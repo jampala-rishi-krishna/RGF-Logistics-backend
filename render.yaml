@@ -1,0 +1,110 @@
+services:
+  - type: web
+    name: intellifleet-api
+    runtime: python
+    region: singapore
+    plan: starter
+    buildCommand: pip install -r requirements.txt
+    preDeployCommand: python -m alembic upgrade head
+    startCommand: python -m uvicorn main:app --host 0.0.0.0 --port $PORT --workers 1 --proxy-headers --forwarded-allow-ips="*"
+    healthCheckPath: /health
+    numInstances: 1
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.11.9
+      - key: DATABASE_URL
+        sync: false
+      - key: DATABASE_URL_DIRECT
+        sync: false
+      - key: JWT_SECRET
+        sync: false
+      - key: JWT_EXPIRE_MINUTES
+        sync: false
+      - key: ALLOWED_ORIGINS
+        sync: false
+      - key: ZOHO_CLIENT_ID
+        sync: false
+      - key: ZOHO_CLIENT_SECRET
+        sync: false
+      - key: ZOHO_REFRESH_TOKEN
+        sync: false
+      - key: ZOHO_ORG_ID
+        sync: false
+      - key: ZOHO_ACCOUNTS_URL
+        sync: false
+      - key: ZOHO_API_DOMAIN
+        sync: false
+      - key: ZOHO_SCOPES
+        sync: false
+      - key: ZOHO_ACKNOWLEDGED_CUSTOMVIEW_ID
+        sync: false
+      - key: CARTRACK_USERNAME
+        sync: false
+      - key: CARTRACK_API_KEY
+        sync: false
+      - key: CARTRACK_BASE_URL
+        sync: false
+      - key: CARTRACK_POLL_INTERVAL_SECONDS
+        sync: false
+      - key: FLEET_ZOHO_SYNC_INTERVAL_SECONDS
+        sync: false
+      - key: GOOGLE_MAPS_API_KEY
+        sync: false
+      - key: GOOGLE_ROUTE_OPTIMIZATION_PROJECT
+        sync: false
+      - key: MAPBOX_SERVER_TOKEN
+        sync: false
+      - key: MAPBOX_ACCESS_TOKEN
+        sync: false
+      - key: MAPBOX_ROUTING_ENABLED
+        sync: false
+      - key: MAPBOX_PROFILE
+        sync: false
+      - key: MAPBOX_MATRIX_BATCH_SIZE
+        sync: false
+      - key: ORS_API_KEY
+        sync: false
+      - key: INTELLIFLEET_WEBHOOK_SECRET
+        sync: false
+      - key: INTELLIFLEET_ASSIGNMENT_WEBHOOK_SECRET
+        sync: false
+      - key: INTELLIFLEET_ASSIGNMENT_WEBHOOK_URL
+        sync: false
+      - key: DISPATCH_N8N_DRIVER_BROADCAST_URL
+        sync: false
+      - key: DISPATCH_N8N_CUSTOMER_NOTIFY_URL
+        sync: false
+      - key: DISPATCH_N8N_INTERNAL_ESCALATION_URL
+        sync: false
+      - key: N8N_API_KEY
+        sync: false
+      - key: STAFF_DIRECTORY_SNAPSHOT_PATH
+        value: /etc/secrets/staff_directory.json
+      - key: GMAIL_COMMS_CLIENT_ID
+        sync: false
+      - key: GMAIL_COMMS_CLIENT_SECRET
+        sync: false
+      - key: GMAIL_COMMS_REFRESH_TOKEN
+        sync: false
+      - key: OPENAI_API_KEY
+        sync: false
+      - key: OPENAI_MODEL
+        sync: false
+      - key: INTERNAL_API_BASE_URL
+        sync: false
+      - key: ROUTE_DISTANCE_COST_PER_KM
+        sync: false
+      - key: ROUTE_DRIVER_COST_PER_HOUR
+        sync: false
+      - key: ROUTE_FUEL_COST_PER_KM
+        sync: false
+      - key: ROUTE_REFRIGERATION_COST_PER_HOUR
+        sync: false
+      - key: ROUTE_FIXED_COST_PER_ROUTE
+        sync: false
+      - key: ROUTE_BALANCED_TIME_WEIGHT
+        sync: false
+      - key: ROUTE_BALANCED_DISTANCE_WEIGHT
+        sync: false
+      - key: ROUTE_BALANCED_COST_WEIGHT
+        sync: false
