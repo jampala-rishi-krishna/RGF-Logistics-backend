@@ -27,7 +27,7 @@ logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.getLogger("httpcore").setLevel(logging.WARNING)
 logger = logging.getLogger("main")
 
-from routers import admin, agent, alerts, assignment, auth, comms, dispatch, fleet, gmail, load_planning, optimization, orders, reports, routes, voice, warehouse, pipeline
+from routers import admin, agent, alerts, assignment, auth, comms, communications, dispatch, fleet, gmail, load_planning, optimization, orders, reports, routes, voice, warehouse, pipeline
 from services import fleet_static_cache, staff_directory_cache, live_sales_order_cache
 from services.cartrack_poller import poll_cartrack_and_update, report_unmatched_roster_on_startup
 from services.ws_manager import manager
@@ -189,6 +189,7 @@ app.include_router(assignment.router)
 app.include_router(pipeline.router)
 app.include_router(reports.router)
 app.include_router(dispatch.router)
+app.include_router(communications.router)
 app.include_router(dispatch.public_router)
 app.include_router(gmail.router)
 app.include_router(voice.router)
