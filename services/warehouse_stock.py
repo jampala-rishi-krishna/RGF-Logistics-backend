@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import contextvars
 import logging
 import re
 import threading
@@ -74,7 +75,7 @@ def stock_for_orders(orders) -> dict[str, float | None]:
         order_items[str(order.id)] = ids
     fetched: dict[str, dict] = {}
     with ThreadPoolExecutor(max_workers=5) as pool:
-        futures = {pool.submit(fetch_item_stock, item_id): item_id for item_id in item_ids}
+        futures = {pool.submit(contextvars.copy_context().run, fetch_item_stock, item_id): item_id for item_id in item_ids}
         for future in as_completed(futures):
             fetched[futures[future]] = future.result()
     result = {}

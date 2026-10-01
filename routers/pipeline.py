@@ -18,6 +18,7 @@ from database import get_db
 from database import db_egress_stats
 from services import staff_directory_cache, live_sales_order_cache, fleet_static_cache
 from services import zoho_client
+from services import zoho_acquisition
 from services.sales_order_history_sync import sync_history_row
 from models.dispatch_pipeline import WarehouseLoadingChecklist
 from models.vehicle import Vehicle
@@ -40,6 +41,7 @@ _zoho_detail_cache: dict[str, tuple[str, dict]] = {}
 _zoho_cache_lock = threading.Lock()
 
 def _zoho_date_records(target: date_type, force: bool) -> tuple[dict[str, dict], dict]:
+    epoch = zoho_acquisition.generation()
     key = target.isoformat()
     with _zoho_cache_lock:
         cached = _zoho_date_cache.get(key)
@@ -65,8 +67,10 @@ def _zoho_date_records(target: date_type, force: bool) -> tuple[dict[str, dict],
         if not batch or not more: break
         page += 1
     stats = {"pages_fetched": pages, "shipment_filter": "shipment_date_start/shipment_date_end", "cache": "cold" if force or cached is None else "expired", "rows_before_filter": rows_before_filter, "rows_after_filter": rows_after_filter}
-    with _zoho_cache_lock:
-        _zoho_date_cache[key] = (time.monotonic(), dict(records), dict(stats))
+    with zoho_acquisition.publication(epoch) as current:
+        if current:
+            with _zoho_cache_lock:
+                _zoho_date_cache[key] = (time.monotonic(), dict(records), dict(stats))
     return records, stats
 
 def _clean_text(value: object) -> str:
@@ -217,10 +221,13 @@ def dispatch_dashboard(date: str | None = None, refresh: bool = False, db: Sessi
                 detail_cache_hits += 1
         def hydrate(item):
             oid, (record, modified) = item
+            epoch = zoho_acquisition.generation()
             try:
                 detail = zoho_client.fetch_sales_order_detail(oid)
                 merged = {**record, **(detail.get("salesorder") or detail)}
-                _zoho_detail_cache[oid] = (modified, merged)
+                with zoho_acquisition.publication(epoch) as current:
+                    if current:
+                        _zoho_detail_cache[oid] = (modified, merged)
                 return oid, merged
             except Exception:
                 return oid, _zoho_detail_cache.get(oid, (modified, record))[1]

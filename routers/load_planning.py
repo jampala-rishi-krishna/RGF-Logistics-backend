@@ -20,6 +20,7 @@ from models.inventory import SalesOrderCache
 from models.sales_order_history import SalesOrderHistory
 from models.sales_order_lines import SalesOrderLine
 from services import staff_directory_cache, live_sales_order_cache
+from services import zoho_acquisition
 from services.serialize import row_to_dict
 from services.zoho_client import (
     ZohoError,
@@ -454,6 +455,7 @@ def acknowledge_sales_order_route(salesorder_id: str):
 
 
 @router.post("/inventory/sales-orders/{salesorder_id}/remove-acknowledge")
+@zoho_acquisition.operation("remove-acknowledgement")
 def remove_acknowledge_sales_order_route(salesorder_id: str):
     cached = live_sales_order_cache.find_cached(salesorder_id) or live_sales_order_cache.ensure_zoho_data(salesorder_id)
     if cached is None:
@@ -463,8 +465,9 @@ def remove_acknowledge_sales_order_route(salesorder_id: str):
         raise HTTPException(409, "This sales order is not acknowledged.")
     try:
         remove_acknowledge_sales_order(salesorder_id)
+        epoch = zoho_acquisition.generation()
         detail = fetch_sales_order_detail(salesorder_id)
-        live_sales_order_cache.refresh_zoho_data(salesorder_id)
+        live_sales_order_cache.publish_zoho_data(salesorder_id, detail, epoch)
         live_sales_order_cache.invalidate_windows()
         return {"removed_acknowledge": True, "status": "confirmed", **detail}
     except ZohoError as exc:
@@ -496,13 +499,15 @@ def acknowledge_filtered_sales_orders(
 
 
 @router.get("/inventory/sales-orders/{salesorder_id}")
+@zoho_acquisition.operation("inventory-drawer")
 def get_sales_order(salesorder_id: str):
     cached = live_sales_order_cache.find_cached(salesorder_id)
     try:
         # List responses are intentionally compact. Fetch the detail payload on every
         # open so the drawer reflects current addresses, line items, totals and fields.
+        epoch = zoho_acquisition.generation()
         detail = fetch_sales_order_detail(salesorder_id)
-        live_sales_order_cache.refresh_zoho_data(salesorder_id)
+        live_sales_order_cache.publish_zoho_data(salesorder_id, detail, epoch)
         record = detail.get("salesorder") or detail
         return {"cached": False, "delivery_status": sales_order_delivery_status(record), **detail}
     except ZohoError as exc:

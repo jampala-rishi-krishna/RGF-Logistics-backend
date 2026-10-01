@@ -3,11 +3,14 @@ from __future__ import annotations
 import logging
 import threading
 import time
+import contextvars
+from copy import deepcopy
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date, datetime, timezone
 
 from models.inventory import SalesOrderCache
 from services.zoho_client import ZohoError, fetch_sales_order_detail, fetch_sales_orders
+from services import zoho_acquisition
 
 logger = logging.getLogger("live_sales_order_cache")
 
@@ -177,6 +180,7 @@ def ensure_zoho_data(order_id: str) -> SalesOrderCache | None:
     """Fetch this SO's Zoho detail if we don't already have it cached. Used for capacity
     checks and Confirmed SO's current/future view, which need the assigned set regardless
     of what date window Inventory happened to have cached."""
+    epoch = zoho_acquisition.generation()
     existing = _assigned_zoho.get(order_id)
     if existing is not None:
         return existing
@@ -184,15 +188,23 @@ def ensure_zoho_data(order_id: str) -> SalesOrderCache | None:
         detail = fetch_sales_order_detail(order_id)
     except ZohoError:
         return None
-    record = detail.get("salesorder") or detail
+    return publish_zoho_data(order_id, detail, epoch)
+
+
+def publish_zoho_data(order_id: str, detail: dict, epoch: int) -> SalesOrderCache:
+    """Publish an already acquired full detail using the existing snapshot shaping."""
+    record = deepcopy(detail.get("salesorder") or detail)
     row = _build_transient(record)
-    _apply_assignment(row)
-    _assigned_zoho[order_id] = row
+    with zoho_acquisition.publication(epoch) as current:
+        if current:
+            _apply_assignment(row)
+            _assigned_zoho[order_id] = row
     return row
 
 
 def refresh_zoho_data(order_id: str) -> SalesOrderCache | None:
-    _assigned_zoho.pop(order_id, None)
+    with zoho_acquisition.invalidation():
+        _assigned_zoho.pop(order_id, None)
     return ensure_zoho_data(order_id)
 
 
@@ -221,7 +233,7 @@ def get_assigned_snapshot_ex() -> tuple[list[SalesOrderCache], bool]:
         # Fan out like _hydrate_details, bounded well under Zoho's ~100 req/min ceiling,
         # so a cold cache with many assigned SOs doesn't fetch them one at a time.
         with ThreadPoolExecutor(max_workers=5) as executor:
-            futures = {executor.submit(ensure_zoho_data, oid): oid for oid in to_fetch}
+            futures = {executor.submit(contextvars.copy_context().run, ensure_zoho_data, oid): oid for oid in to_fetch}
             for future in as_completed(futures):
                 if future.result() is None:
                     had_failures = True
@@ -272,7 +284,7 @@ def _hydrate_details(records: dict[str, dict]) -> None:
     # Keep detail hydration below Zoho's approximate 100 requests/minute ceiling;
     # list pages are still fetched once per 200 SOs and this fan-out is bounded.
     with ThreadPoolExecutor(max_workers=5) as executor:
-        futures = {executor.submit(fetch_sales_order_detail, rid): rid for rid in records}
+        futures = {executor.submit(contextvars.copy_context().run, fetch_sales_order_detail, rid): rid for rid in records}
         for future in as_completed(futures):
             rid = futures[future]
             try:
@@ -288,6 +300,7 @@ def get_window(start: date, end: date, *, hydrate: bool = True) -> list[SalesOrd
     for callers that just need list-level fields (e.g. the city filter), never for anything
     that renders per-line weight/pack breakdowns. Cached separately from the hydrated window
     (same TTL) so it doesn't defeat caching for callers that don't need hydration."""
+    epoch = zoho_acquisition.generation()
     key = (start.isoformat(), end.isoformat())
     cache = _windows if hydrate else _windows_unhydrated
     with _window_lock:
@@ -298,22 +311,26 @@ def get_window(start: date, end: date, *, hydrate: bool = True) -> list[SalesOrd
     if hydrate:
         _hydrate_details(raw)
     rows = {rid: _build_transient(record) for rid, record in raw.items()}
-    with _window_lock:
-        cache[key] = (time.monotonic(), rows)
+    with zoho_acquisition.publication(epoch) as current:
+        if current:
+            with _window_lock:
+                cache[key] = (time.monotonic(), rows)
     return [_apply_assignment(row) for row in rows.values()]
 
 
 def invalidate_assigned_zoho() -> None:
     """Force every currently-assigned SO's cached Zoho data to be re-fetched on next use."""
-    _assigned_zoho.clear()
+    with zoho_acquisition.invalidation():
+        _assigned_zoho.clear()
 
 
 def invalidate_windows() -> None:
     """Call on the Refresh button / after a Zoho-side change - forces the next read to
     re-pull from Zoho instead of serving the TTL cache."""
-    with _window_lock:
-        _windows.clear()
-        _windows_unhydrated.clear()
+    with zoho_acquisition.invalidation():
+        with _window_lock:
+            _windows.clear()
+            _windows_unhydrated.clear()
 
 
 def get_current_orders(days_ahead: int = 30) -> list[SalesOrderCache]:

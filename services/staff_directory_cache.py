@@ -112,7 +112,7 @@ def _load_disk() -> None:
 
 def _save_disk(staff: list[dict], notify: list[dict]) -> None:
     try:
-        os.makedirs(os.path.dirname(CACHE_FILE), exist_ok=True)
+        os.makedirs(os.path.dirname(LOCAL_CACHE_FILE), exist_ok=True)
         temporary = f"{LOCAL_CACHE_FILE}.tmp"
         with open(temporary, "w", encoding="utf-8") as handle:
             json.dump({"staff": staff, "notify": notify, "refreshed_at": time.time()}, handle)

@@ -27,6 +27,7 @@ from services.sales_order_location import shipping_city
 from services.item_weight import calculate_line_weight_kg
 from services.delivery_status import is_delivered, sales_order_delivery_status
 from services.zoho_client import fetch_sales_order_detail, ZohoError
+from services import zoho_acquisition
 
 router = APIRouter(tags=["fleet"])
 logger = logging.getLogger("fleet_refresh")
@@ -280,6 +281,7 @@ def list_vehicles(status: str | None = None, date: str | None = None, db: Sessio
 
 
 @router.post("/vehicles/refresh")
+@zoho_acquisition.operation("fleet-refresh", reuse_details=True)
 def refresh_vehicles(force: bool = False, db: Session = Depends(get_db)):
     """Recompute Fleet from live Zoho data for currently-assigned SOs only (never a bulk
     sync of every SO). `force` is accepted for API compatibility (30-min scheduled sync

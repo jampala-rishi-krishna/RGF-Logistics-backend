@@ -147,6 +147,14 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="IntelliFleet API", lifespan=lifespan)
 
+
+@app.middleware("http")
+async def zoho_request_context(request, call_next):
+    from services.zoho_acquisition import request_context
+    # No query string, user credentials, cookies or headers enter acquisition logs.
+    with request_context(request.url.path):
+        return await call_next(request)
+
 # Single CORS configuration point for the whole app - every former Catalyst function had its
 # own (no-op) CORS handling; this is the one place it happens now.
 allowed_origins = [o.strip() for o in os.environ.get("ALLOWED_ORIGINS", "").split(",") if o.strip()]

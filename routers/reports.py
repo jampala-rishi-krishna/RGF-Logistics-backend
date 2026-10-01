@@ -2,7 +2,10 @@ from __future__ import annotations
 
 import re
 import time
-from concurrent.futures import ThreadPoolExecutor, as_completed
+import os
+import contextvars
+from copy import deepcopy
+from concurrent.futures import Future, ThreadPoolExecutor, as_completed
 from datetime import date, datetime, timedelta
 from threading import Lock
 from zoneinfo import ZoneInfo
@@ -10,6 +13,7 @@ from zoneinfo import ZoneInfo
 from fastapi import APIRouter, Depends, HTTPException
 
 from auth.dependencies import get_current_user
+from services import zoho_acquisition
 from services.zoho_client import (
     ZohoError,
     fetch_inventory_adjustments,
@@ -29,6 +33,7 @@ _CACHE_TTL_SECONDS = 60
 _DETAIL_CAP = 80
 _cache_lock = Lock()
 _cache: dict = {"payload": None, "fetched_at": 0.0}
+_report_inflight: dict[tuple, Future] = {}
 
 _TRANSFER_OPEN_STATUSES = {"draft", "pending_approval", "approved", "in_transit"}
 _IA_WINDOW_DAYS = 90
@@ -139,8 +144,9 @@ def _detail_map(ids: list[str], fetch, key: str, workers: int, errors: dict | No
     results: dict[str, dict] = {}
     if not unique_ids:
         return results
+    zoho_acquisition.event("report_candidates", resource=key, candidates=len(ids), selected=len(ids[:_DETAIL_CAP]), unique=len(unique_ids))
     with ThreadPoolExecutor(max_workers=workers) as executor:
-        futures = {executor.submit(fetch, item_id): item_id for item_id in unique_ids}
+        futures = {executor.submit(contextvars.copy_context().run, fetch, item_id): item_id for item_id in unique_ids}
         for future in as_completed(futures):
             item_id = futures[future]
             try:
@@ -328,6 +334,7 @@ def _build_purchase_receives(purchase_receives: list[dict], errors: dict) -> dic
     return {"not_billed": len(not_billed), "no_attachment": len(no_attachment_candidates), "scanned": scanned, "rows": rows}
 
 
+@zoho_acquisition.operation("report-build", reuse_details=True)
 def _build_report(section: str | None = None) -> dict:
     errors: dict[str, str] = {}
     today = _today()
@@ -493,15 +500,36 @@ def _build_report(section: str | None = None) -> dict:
 
 @router.get("/rgf-logistics")
 def get_rgf_logistics_report(force: bool = False, section: str | None = None):
-    if section is not None:
-        return _build_report(section)
+    epoch = zoho_acquisition.generation()
+    identity = (os.environ.get("ZOHO_API_DOMAIN", "https://www.zohoapis.com"), os.environ.get("ZOHO_ORG_ID", ""), _today().isoformat())
+    key = (identity, section, epoch)
     with _cache_lock:
-        if not force and _cache["payload"] is not None and (time.time() - _cache["fetched_at"]) < _CACHE_TTL_SECONDS:
-            return _cache["payload"]
-        payload = _build_report()
-        _cache["payload"] = payload
-        _cache["fetched_at"] = time.time()
+        future = _report_inflight.get(key)
+        if future is None and section is None and not force and _cache.get("identity") == identity and _cache["payload"] is not None and (time.time() - _cache["fetched_at"]) < _CACHE_TTL_SECONDS:
+            zoho_acquisition.event("cache_hit", resource="report", section=section, force=force)
+            return deepcopy(_cache["payload"])
+        owner = future is None
+        if owner:
+            future = Future()
+            _report_inflight[key] = future
+    zoho_acquisition.event("cache_miss" if owner else "coalesced_waiter", resource="report", section=section, force=force, generation=epoch)
+    if not owner:
+        return deepcopy(future.result())
+    try:
+        payload = _build_report(section) if section is not None else _build_report()
+        with zoho_acquisition.publication(epoch) as current:
+            if current and section is None:
+                with _cache_lock:
+                    _cache.update(payload=deepcopy(payload), fetched_at=time.time(), identity=identity)
+        future.set_result(deepcopy(payload))
         return payload
+    except BaseException as exc:
+        future.set_exception(exc)
+        raise
+    finally:
+        with _cache_lock:
+            if _report_inflight.get(key) is future:
+                del _report_inflight[key]
 
 
 @router.get("/rgf-logistics/sales-order/{salesorder_id}")
