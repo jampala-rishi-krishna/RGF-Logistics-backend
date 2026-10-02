@@ -13,7 +13,10 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
 from auth.dependencies import require_role
-from services import memory_tables, staff_directory_cache, vapi_client, voice_calls
+from fastapi.concurrency import run_in_threadpool
+from html import escape as html_escape
+
+from services import gmail_sender, memory_tables, staff_directory_cache, vapi_client, voice_calls
 
 logger = logging.getLogger("dispatch")
 
@@ -442,6 +445,19 @@ async def _dispatch_webhook(audience: str, payload: dict) -> tuple[bool, str | N
         return False, None
 
 
+async def _send_email_direct(recipient: str | None, subject: str | None, text: str | None) -> tuple[bool, str | None, str | None]:
+    """Email channel goes straight through the Gmail API (no n8n). Returns
+    (sent, provider_message_id, error)."""
+    if not recipient or "@" not in recipient:
+        return False, None, "No email address for this recipient"
+    html = f'<div style="font-family:Arial,Helvetica,sans-serif;font-size:14px;line-height:1.5;color:#1b2419;">{html_escape(text or "").replace(chr(10), "<br>")}</div>'
+    try:
+        result = await run_in_threadpool(gmail_sender.send_email, to=recipient, subject=subject or "Message from RareChain Logistics", html=html, text=text, purpose="dispatch-email")
+        return True, result["id"], None
+    except gmail_sender.GmailSendError as exc:
+        return False, None, str(exc)
+
+
 @router.post("/send", status_code=201)
 async def send_message(body: SendMessageBody):
     if body.audience not in VALID_AUDIENCES:
@@ -490,9 +506,7 @@ async def send_message(body: SendMessageBody):
             status="queued",
         )
 
-        sent, provider_message_id = await _dispatch_webhook(
-            body.audience,
-            {
+        webhook_payload = {
                 "message_log_id": row["id"],
                 "channel": channel,
                 "recipient_name": recipient_name,
@@ -502,11 +516,17 @@ async def send_message(body: SendMessageBody):
                 "trigger_event": body.trigger_event,
                 "related_so_number": body.related_so_number,
                 "severity": body.severity,
-            },
-        )
+        }
+        email_direct = channel == "email" and gmail_sender.configured()
+        if email_direct:
+            sent, provider_message_id, email_error = await _send_email_direct(contact_for_channel, template_subject, rendered_body)
+            if email_error:
+                logger.warning("[Dispatch] direct email to %s failed: %s", contact_for_channel, email_error)
+        else:
+            sent, provider_message_id = await _dispatch_webhook(body.audience, webhook_payload)
         row = memory_tables.message_log.update(
             row["id"],
-            status="sent" if sent else "queued",
+            status="sent" if sent else ("failed" if email_direct else "queued"),
             sent_at=datetime.now(timezone.utc) if sent else None,
             **({"provider_message_id": provider_message_id} if provider_message_id else {}),
         )

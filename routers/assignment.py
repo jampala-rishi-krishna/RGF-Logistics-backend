@@ -25,6 +25,7 @@ from models.vehicle import Vehicle
 from models.inventory import SalesOrderCache
 from services import optimizer
 from services.rarechain_email_template import render_rarechain_email
+from services import gmail_sender
 from services.item_weight import calculate_order_weight_kg
 from services.delivery_status import is_delivered
 from services import staff_directory_cache, live_sales_order_cache, memory_tables, vapi_client, voice_calls
@@ -59,6 +60,31 @@ _NOTIFICATION_WEBHOOKS = (
 )
 # Skipped when VOICE_PROVIDER=direct (services/voice_calls.py places the call instead).
 _VOICE_WEBHOOK = _NOTIFICATION_WEBHOOKS[-1]
+# Assignment emails (driver + team confirmation) go directly through the Gmail API when it is
+# configured (services/gmail_sender.py), so this n8n webhook is skipped. WhatsApp/SMS still
+# use their own n8n webhooks.
+_EMAIL_WEBHOOK = _NOTIFICATION_WEBHOOKS[0]
+
+
+def _send_assignment_emails_direct(driver, driver_subject: str, driver_html: str, team_subject: str | None, team_html: str | None) -> None:
+    """Driver assignment email (and, once per assignment, the team confirmation) straight
+    through Gmail. Runs in the notification pool; every outcome is logged by gmail_sender."""
+    if driver.email:
+        try:
+            gmail_sender.send_email(to=driver.email, subject=driver_subject, html=driver_html, purpose="assignment-driver")
+        except gmail_sender.GmailSendError:
+            pass  # already logged with the reason
+    else:
+        logger.warning("[GMAIL_SEND] assignment email skipped: driver %s has no email on file", driver.name)
+    if team_subject and team_html:
+        team = [member.get("email") for member in staff_directory_cache.notify_list() if member.get("email")]
+        if not team:
+            logger.warning("[GMAIL_SEND] team confirmation skipped: the team notify list has no email addresses")
+            return
+        try:
+            gmail_sender.send_email(to=team, subject=team_subject, html=team_html, purpose="assignment-team")
+        except gmail_sender.GmailSendError:
+            pass
 
 
 def _send_notification(url: str, secret: str, payload: dict) -> None:
@@ -188,7 +214,9 @@ def assignment_options(salesorder_id: str, db: Session = Depends(get_db)):
     profiles = db.execute(select(Vehicle).order_by(Vehicle.is_third_party, Vehicle.plate_no)).scalars().all()
     assigned = {}
     for existing in live_sales_order_cache.get_assigned_snapshot():
-        if existing.assignment_status == "assigned" and not is_delivered(existing.raw_json or {}):
+        # A truck's load is per delivery day: only orders for the same expected shipment date
+        # count against its remaining capacity for this order.
+        if existing.assignment_status == "assigned" and not is_delivered(existing.raw_json or {}) and existing.expected_shipment_date == order.expected_shipment_date:
             assigned[existing.vehicle_id] = assigned.get(existing.vehicle_id, 0.0) + _weight(existing)
     constraint = db.execute(select(ClientDeliveryConstraint).where(ClientDeliveryConstraint.customer_name == order.customer_name)).scalar_one_or_none()
     drivers = sorted((d for d in staff_directory_cache.all_staff() if d.get("active") and str(d.get("title") or "").strip().upper() in ASSIGNABLE_DRIVER_TITLES), key=lambda d: d.get("name") or "")
@@ -216,11 +244,18 @@ def assign_order(salesorder_id: str, body: AssignmentBody, current_user: Current
     if any(item.assignment_status == "assigned" for item in orders):
         raise HTTPException(409, "One or more sales orders are already assigned.")
     known_weights = [_weight_if_known(item) for item in orders]
-    weight = sum(value or 0 for value in known_weights)
-    existing_weights = [_weight_if_known(existing) for existing in live_sales_order_cache.get_assigned_snapshot() if existing.vehicle_id == body.vehicle_id and existing.assignment_status == "assigned" and not is_delivered(existing.raw_json or {})]
-    assigned = sum(value or 0 for value in existing_weights)
-    if profile.rated_capacity_kg is not None and all(value is not None for value in known_weights + existing_weights) and float(assigned) + weight > float(profile.rated_capacity_kg):
-        raise HTTPException(409, f"Capacity exceeded: {weight + float(assigned):.1f} kg requested, {float(profile.rated_capacity_kg):.1f} kg available.")
+    # Capacity is checked per delivery day: the 5th's orders never use up the truck's room on
+    # the 3rd, and each day in this request is checked against only that day's existing load.
+    snapshot = live_sales_order_cache.get_assigned_snapshot()
+    existing_weights: list[float | None] = []
+    for ship_date in {item.expected_shipment_date for item in orders}:
+        day_known = [_weight_if_known(item) for item in orders if item.expected_shipment_date == ship_date]
+        day_existing = [_weight_if_known(existing) for existing in snapshot if existing.vehicle_id == body.vehicle_id and existing.assignment_status == "assigned" and not is_delivered(existing.raw_json or {}) and existing.expected_shipment_date == ship_date]
+        existing_weights.extend(day_existing)
+        day_new_weight = sum(value or 0 for value in day_known)
+        day_assigned = sum(value or 0 for value in day_existing)
+        if profile.rated_capacity_kg is not None and all(value is not None for value in day_known + day_existing) and float(day_assigned) + day_new_weight > float(profile.rated_capacity_kg):
+            raise HTTPException(409, f"Capacity exceeded for {ship_date}: {day_new_weight + float(day_assigned):.1f} kg requested, {float(profile.rated_capacity_kg):.1f} kg available.")
     if any(_reefer(item) for item in orders) and profile.is_reefer is False:
         raise HTTPException(409, "This order requires a reefer-capable vehicle.")
     driver_ids = body.all_driver_ids()
@@ -363,9 +398,14 @@ def send_assignment_email(body: AssignmentEmailBody, current_user: CurrentUser =
             "teamSubject": team_subject if index == 0 else None,
             "teamHtmlBody": team_html if index == 0 else None,
         }
+        email_direct = gmail_sender.configured()
+        if email_direct:
+            _notification_pool.submit(_send_assignment_emails_direct, driver, payload["driverSubject"], driver_html, payload["teamSubject"], payload["teamHtmlBody"])
         for webhook in _NOTIFICATION_WEBHOOKS:
             if voice_direct and webhook == _VOICE_WEBHOOK:
                 continue
+            if email_direct and webhook == _EMAIL_WEBHOOK:
+                continue  # email goes directly through Gmail; WhatsApp/SMS still use n8n
             _notification_pool.submit(_send_notification, webhook, secret, payload)
     if voice_direct:
         # VOICE_PROVIDER=direct: one Vapi call per driver straight from here, replacing the

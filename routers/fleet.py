@@ -142,17 +142,21 @@ def _merge_live(payload: dict) -> dict:
 
 
 def _operational_date(order: SalesOrderCache) -> date_type | None:
-    """Return the day on which the assignment entered Fleet operations.
+    """The day an order belongs to in Fleet: its expected delivery (shipment) date.
 
-    Assignment date is authoritative for the daily Fleet view.  Expected shipment
-    date is only a fallback for older rows that predate assignment timestamps.
+    Assigning on the 2nd for delivery on the 5th must show on the 5th, not the 2nd, and must
+    not touch the load or fulfillment of any other day. The assignment date is only a
+    fallback for rows that have no expected shipment date at all.
     """
+    expected = getattr(order, "expected_shipment_date", None)
+    if expected:
+        return expected
     assigned_at = getattr(order, "assigned_at", None)
     if assigned_at:
         if assigned_at.tzinfo is None:
             assigned_at = assigned_at.replace(tzinfo=timezone.utc)
         return assigned_at.astimezone(OPS_TZ).date()
-    return getattr(order, "expected_shipment_date", None)
+    return None
 
 
 def _historical_vehicle_payload(vehicle: Vehicle, rows: list[SalesOrderHistory], db: Session) -> dict:
@@ -222,7 +226,7 @@ def list_vehicles(status: str | None = None, date: str | None = None, db: Sessio
     if date:
         # Past-date Fleet view: Neon history only. Today remains the live operational view.
         target = requested_date
-        if target >= datetime.now(timezone.utc).date():
+        if target >= datetime.now(OPS_TZ).date():
             date = None
         else:
             vehicles = db.execute(select(Vehicle)).scalars().all()
@@ -237,8 +241,8 @@ def list_vehicles(status: str | None = None, date: str | None = None, db: Sessio
                 result = [v for v in result if v["status"] == status]
             return result
     if requested_date is not None:
-        # A selected current date is still date-scoped.  Do not let an undelivered
-        # assignment from a previous operational day leak into today's Fleet.
+        # A selected current or future date is date-scoped by expected delivery date: only that
+        # day's assigned orders feed each truck's list, load and fulfillment.
         vehicles = db.execute(select(Vehicle)).scalars().all()
         snapshot, had_failures = live_sales_order_cache.get_assigned_snapshot_ex()
         selected = [o for o in snapshot if o.assignment_status == "assigned" and _operational_date(o) == requested_date]
@@ -325,9 +329,10 @@ def refresh_vehicles(force: bool = False, db: Session = Depends(get_db)):
             # field in a detail response; the newest non-empty value wins.
                 live_sales_order_cache.merge_zoho_payload(order, fresh)
                 order.synced_at = datetime.now(timezone.utc)
-        by_vehicle: dict[str, list[SalesOrderCache]] = {}
+        # A truck's batch is one delivery day: finishing the 3rd must not wait on the 5th.
+        by_vehicle: dict[tuple[str, object], list[SalesOrderCache]] = {}
         for order in assigned:
-            by_vehicle.setdefault(str(order.vehicle_id or ""), []).append(order)
+            by_vehicle.setdefault((str(order.vehicle_id or ""), _operational_date(order)), []).append(order)
         for orders in by_vehicle.values():
             if orders and all(sales_order_delivery_status(fresh_orders.get(str(order.id), order.raw_json or {})) == "Delivered" for order in orders):
                 completed_at = datetime.now(timezone.utc)

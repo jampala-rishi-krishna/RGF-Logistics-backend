@@ -9,7 +9,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date, datetime, timezone
 
 from models.inventory import SalesOrderCache
-from services.zoho_client import ZohoError, fetch_sales_order_detail, fetch_sales_orders
+from services.zoho_client import ZohoError, fetch_sales_order_detail, fetch_sales_orders, fetch_sales_orders_by_shipment_date
 from services import zoho_acquisition
 
 logger = logging.getLogger("live_sales_order_cache")
@@ -30,6 +30,12 @@ _assigned_zoho: dict[str, SalesOrderCache] = {}
 _window_lock = threading.Lock()
 _windows: dict[tuple[str, str], tuple[float, dict[str, SalesOrderCache]]] = {}
 _windows_unhydrated: dict[tuple[str, str], tuple[float, dict[str, SalesOrderCache]]] = {}
+
+# Per-order Zoho detail, keyed by the list record's last_modified_time: a window re-pull only
+# re-fetches the orders Zoho says changed. Memory only, bounded.
+_detail_lock = threading.Lock()
+_details: dict[str, tuple[str, dict]] = {}
+DETAIL_CACHE_MAX = 1500
 
 
 def _pick(record: dict, *keys: str):
@@ -250,7 +256,47 @@ def get_assigned_snapshot_ex() -> tuple[list[SalesOrderCache], bool]:
 # --- General Inventory/unassigned windows: short-TTL live Zoho cache ---
 
 
+def _shipment_filter_applied(page_context: dict) -> bool:
+    return any(isinstance(c, dict) and c.get("column_name") == "shipment_date" for c in (page_context.get("search_criteria") or []))
+
+
 def _pull_window(start: date | None, end: date | None) -> dict[str, dict]:
+    """List the orders shipping in [start, end]. Zoho filters by shipment date server-side
+    (1 page for a typical day) instead of scanning 90 days of orders by order date. If a
+    tenant ever stops honoring that filter, fall back to the legacy scan so results stay
+    correct."""
+    if start is None or end is None:
+        return _pull_window_legacy(start, end)
+    records: dict[str, dict] = {}
+    page = 1
+    seen_fingerprints: set[tuple] = set()
+    while True:
+        payload = fetch_sales_orders_by_shipment_date(start, end, page=page, per_page=200)
+        context = payload.get("page_context") or {}
+        if page == 1 and not _shipment_filter_applied(context):
+            logger.warning("[LiveSalesOrderCache] shipment-date filter not applied by Zoho - using legacy window scan")
+            return _pull_window_legacy(start, end)
+        page_records = payload.get("salesorders") or []
+        fingerprint = tuple(str(r.get("salesorder_id") or r.get("id") or "") for r in page_records)
+        if fingerprint and fingerprint in seen_fingerprints:
+            break
+        if fingerprint:
+            seen_fingerprints.add(fingerprint)
+        for record in page_records:
+            record_id = str(record.get("salesorder_id") or record.get("id") or "")
+            expected_shipment = _as_date(record.get("shipment_date") or record.get("expected_shipment_date"))
+            if record_id and expected_shipment and start <= expected_shipment <= end:
+                records[record_id] = record
+        has_more = context.get("has_more_page")
+        if isinstance(has_more, str):
+            has_more = has_more.strip().lower() == "true"
+        if not page_records or not has_more:
+            break
+        page += 1
+    return records
+
+
+def _pull_window_legacy(start: date | None, end: date | None) -> dict[str, dict]:
     records: dict[str, dict] = {}
     page = 1
     seen_fingerprints: set[tuple] = set()
@@ -280,17 +326,40 @@ def _pull_window(start: date | None, end: date | None) -> dict[str, dict]:
     return records
 
 
+def _remember_detail(rid: str, modified: str, fields: dict) -> None:
+    with _detail_lock:
+        _details.pop(rid, None)
+        _details[rid] = (modified, fields)
+        while len(_details) > DETAIL_CACHE_MAX:
+            _details.pop(next(iter(_details)), None)
+
+
 def _hydrate_details(records: dict[str, dict]) -> None:
-    # Keep detail hydration below Zoho's approximate 100 requests/minute ceiling;
-    # list pages are still fetched once per 200 SOs and this fan-out is bounded.
+    # Reuse cached detail for every order whose last_modified_time is unchanged; fetch only
+    # the rest. Keep fetching below Zoho's approximate 100 requests/minute ceiling.
+    to_fetch: list[str] = []
+    for rid, record in records.items():
+        modified = str(record.get("last_modified_time") or "")
+        with _detail_lock:
+            hit = _details.get(rid)
+        if modified and hit is not None and hit[0] == modified:
+            records[rid] = {**record, **hit[1]}
+        else:
+            to_fetch.append(rid)
+    if not to_fetch:
+        return
     with ThreadPoolExecutor(max_workers=5) as executor:
-        futures = {executor.submit(contextvars.copy_context().run, fetch_sales_order_detail, rid): rid for rid in records}
+        futures = {executor.submit(contextvars.copy_context().run, fetch_sales_order_detail, rid): rid for rid in to_fetch}
         for future in as_completed(futures):
             rid = futures[future]
             try:
                 detail = future.result()
                 full = detail.get("salesorder") or detail
-                records[rid] = {**records[rid], **{k: v for k, v in full.items() if v not in (None, "", [], {})}}
+                fields = {k: v for k, v in full.items() if v not in (None, "", [], {})}
+                modified = str(records[rid].get("last_modified_time") or "")
+                records[rid] = {**records[rid], **fields}
+                if modified:
+                    _remember_detail(rid, modified, fields)
             except ZohoError:
                 continue
 
@@ -331,6 +400,44 @@ def invalidate_windows() -> None:
         with _window_lock:
             _windows.clear()
             _windows_unhydrated.clear()
+
+
+def mark_acknowledged(order_id: str, acknowledged: bool) -> None:
+    """Reflect an acknowledge / remove-acknowledge that already succeeded in Zoho on every
+    cached copy of the order, so the next list read is served from cache instead of
+    re-pulling and re-hydrating the whole window. Zoho tracks this as the order's
+    sub-status (status itself stays "confirmed")."""
+    sub_status = "cs_acknowl" if acknowledged else "confirmed"
+
+    def patch(row) -> None:
+        raw = row.raw_json if isinstance(row.raw_json, dict) else {}
+        row.raw_json = {**raw, "current_sub_status": sub_status, "order_sub_status": sub_status}
+
+    with _window_lock:
+        for cache in (_windows, _windows_unhydrated):
+            for _, rows in cache.values():
+                if order_id in rows:
+                    patch(rows[order_id])
+    assigned = _assigned_zoho.get(order_id)
+    if assigned is not None:
+        patch(assigned)
+    with _detail_lock:
+        _details.pop(order_id, None)
+
+
+def prewarm_default_windows() -> None:
+    """Startup warm-up (background thread): load today's and tomorrow's windows so the first
+    Load Planning open after a deploy/restart is served from memory. Best effort."""
+    from datetime import timedelta
+    from zoneinfo import ZoneInfo
+
+    today = datetime.now(ZoneInfo("Asia/Manila")).date()
+    for day in (today + timedelta(days=1), today):
+        try:
+            get_window(day, day)
+            logger.info("[LiveSalesOrderCache] prewarmed window %s", day)
+        except Exception as exc:  # never let a warm-up failure affect startup
+            logger.warning("[LiveSalesOrderCache] prewarm %s failed: %s", day, exc)
 
 
 def get_current_orders(days_ahead: int = 30) -> list[SalesOrderCache]:

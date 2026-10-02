@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import threading
 import logging
 import os
 from contextlib import asynccontextmanager
@@ -118,6 +119,7 @@ async def lifespan(app: FastAPI):
         coalesce=True,
     )
     scheduler.start()
+    threading.Thread(target=live_sales_order_cache.prewarm_default_windows, daemon=True, name="prewarm-windows").start()
     logger.info("Fleet Zoho sync (assigned SOs only) started - syncing every %ss", fleet_sync_interval)
     if CARTRACK_CONFIGURED:
         poll_interval = int(os.environ.get("CARTRACK_POLL_INTERVAL_SECONDS", "5"))

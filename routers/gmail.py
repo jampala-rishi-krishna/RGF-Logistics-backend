@@ -235,6 +235,16 @@ async def gmail_status():
         return {"connected": False}
 
 
+@router.get("/send-log")
+async def send_log(limit: int = 100):
+    """Recent outgoing emails sent directly through Gmail (newest first), with the failure
+    reason for any that did not go out. In-memory: cleared when the backend restarts."""
+    from services import gmail_sender
+
+    entries = gmail_sender.recent(max(1, min(limit, 200)))
+    return {"configured": gmail_sender.configured(), "mailbox": gmail_sender.mailbox_address() if gmail_sender.configured() else None, "sent": sum(1 for e in entries if e.get("ok")), "failed": sum(1 for e in entries if not e.get("ok")), "entries": entries}
+
+
 @router.get("/profile")
 async def gmail_profile():
     """Return the mailbox identity and totals for the configured OAuth token."""

@@ -1,14 +1,15 @@
 from __future__ import annotations
 
-import base64
+import contextvars
 import json
 import logging
 import os
+import time
+from concurrent.futures import ThreadPoolExecutor
 from datetime import date, datetime, timedelta, timezone
 from threading import Lock
 from zoneinfo import ZoneInfo
 
-import httpx
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
 from sqlalchemy import select
@@ -29,13 +30,16 @@ from services.zoho_client import (
     fetch_sales_orders_by_customview,
     remove_acknowledge_sales_order,
 )
-from services.inventory_exports import flatten_order, make_excel, make_pdf
+from services.inventory_exports import confirmed_item_ids, flatten_confirmed_order, flatten_order, make_excel, make_pdf
 from services.openai_client import generate_sales_order_email_draft
 from services.item_weight import calculate_line_weight_kg
 from services.delivery_status import is_delivered, sales_order_delivery_status
-from services.warehouse_stock import stock_for_orders
+from services import item_detail_cache
+from services.warehouse_stock import cached_item_stock, fetch_item_stock, stock_for_orders_cached
 from services.sales_order_location import address_object, find_city, shipping_city
+from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import StreamingResponse
+from services import gmail_sender
 
 router = APIRouter(prefix="/api/load-planning", tags=["load-planning"], dependencies=[Depends(require_role("admin", "dispatcher", "warehouse"))])
 logger = logging.getLogger("load_planning")
@@ -77,6 +81,39 @@ def _fetch_acknowledged_ids_from_zoho() -> set[str]:
     return ids
 
 
+# The Acknowledged custom view used to be re-paged from Zoho on every list request. Cache it
+# briefly; acknowledge / remove-acknowledge update it in place and Refresh drops it.
+ACK_IDS_TTL_SECONDS = 120
+_ack_lock = Lock()
+_ack_cache: dict = {"ids": None, "at": 0.0}
+
+
+def _acknowledged_ids() -> set[str]:
+    with _ack_lock:
+        if _ack_cache["ids"] is not None and time.monotonic() - _ack_cache["at"] < ACK_IDS_TTL_SECONDS:
+            return set(_ack_cache["ids"])
+    ids = _fetch_acknowledged_ids_from_zoho()
+    with _ack_lock:
+        _ack_cache.update(ids=set(ids), at=time.monotonic())
+    return ids
+
+
+def _set_acknowledged(order_id: str, acknowledged: bool) -> None:
+    with _ack_lock:
+        if _ack_cache["ids"] is not None:
+            (_ack_cache["ids"].add if acknowledged else _ack_cache["ids"].discard)(str(order_id))
+
+
+def _invalidate_ack_cache() -> None:
+    with _ack_lock:
+        _ack_cache.update(ids=None, at=0.0)
+
+
+def _is_acknowledged(row) -> bool:
+    raw = row.raw_json if isinstance(getattr(row, "raw_json", None), dict) else {}
+    return str(raw.get("current_sub_status") or raw.get("order_sub_status") or "").lower() == "cs_acknowl" or str(row.order_status or "").lower() == "acknowledged"
+
+
 def _date(value: str | None) -> date | None:
     if not value:
         return None
@@ -89,7 +126,7 @@ def _date(value: str | None) -> date | None:
 _normalized_order_status = live_sales_order_cache._normalized_order_status
 
 
-def _summary(row, db: Session | None = None) -> dict:
+def _summary(row, db: Session | None = None, *, allow_fetch: bool = True) -> dict:
     result = row_to_dict(row)
     result["id"] = row.id
     if result.get("total") is not None:
@@ -145,7 +182,7 @@ def _summary(row, db: Session | None = None) -> dict:
             unit = item.get("unit") or item.get("unit_name") or item.get("usage_unit")
             nested_item = item.get("item") if isinstance(item.get("item"), dict) else {}
             item_id = item.get("item_id") or item.get("itemid") or nested_item.get("item_id") or nested_item.get("id")
-            return calculate_line_weight_kg(quantity, unit, item_id, item=item, context=f"SO={order_number} SKU={item.get('sku')}")
+            return calculate_line_weight_kg(quantity, unit, item_id, item=item, context=f"SO={order_number} SKU={item.get('sku')}", allow_fetch=allow_fetch)
 
         for item in items:
             quantity = number(item, "quantity")
@@ -155,7 +192,9 @@ def _summary(row, db: Session | None = None) -> dict:
             elif "case" in normalized or "carton" in normalized: total_cases += quantity
             else: total_units += quantity
             line_total_weight_kg = item_weight_kg(item, row.salesorder_number or row.id)
-            products.append({"line_item_id": item.get("line_item_id"), "item_id": item.get("item_id") or item.get("itemid"), "name": item.get("name") or item.get("item_description") or item.get("description"), "sku": item.get("sku") or item.get("item_order") or item.get("item_id"), "quantity": quantity, "unit": unit or None, "total_weight_kg": line_total_weight_kg, "packaging_type": "pack" if "pack" in normalized else "case" if "case" in normalized or "carton" in normalized else None, "pack_quantity": quantity if "pack" in normalized else 0, "case_quantity": quantity if "case" in normalized or "carton" in normalized else 0, "quantity_packed": number(item, "quantity_packed"), "quantity_shipped": number(item, "quantity_shipped")})
+            stock_item_id = item.get("item_id") or item.get("itemid")
+            item_stock = ((fetch_item_stock(str(stock_item_id)) if allow_fetch else cached_item_stock(str(stock_item_id))) if stock_item_id else None) or {}
+            products.append({"mets_qty_available_for_sale": item_stock.get("mets"), "glacier_qty_available_for_sale": item_stock.get("glacier"), "line_item_id": item.get("line_item_id"), "item_id": item.get("item_id") or item.get("itemid"), "name": item.get("name") or item.get("item_description") or item.get("description"), "sku": item.get("sku") or item.get("item_order") or item.get("item_id"), "quantity": quantity, "unit": unit or None, "total_weight_kg": line_total_weight_kg, "packaging_type": "pack" if "pack" in normalized else "case" if "case" in normalized or "carton" in normalized else None, "pack_quantity": quantity if "pack" in normalized else 0, "case_quantity": quantity if "case" in normalized or "carton" in normalized else 0, "quantity_packed": number(item, "quantity_packed"), "quantity_shipped": number(item, "quantity_shipped")})
         total_item_quantity = sum(number(item, "quantity") for item in items)
 
     result["product_count"] = len([p for p in products if p["name"]])
@@ -165,6 +204,34 @@ def _summary(row, db: Session | None = None) -> dict:
     result["unit_count"] = total_units
     result["total_item_quantity"] = total_item_quantity
     return result
+
+
+def _total_weight_kg(rows, db: Session) -> tuple[float, bool]:
+    """Total kg across every filtered order (not just the current page), from cached item
+    weights only. The bool is False while any line's weight is still unknown."""
+    total = 0.0
+    complete = True
+    for row in rows:
+        if isinstance(row, SalesOrderHistory):
+            continue
+        for item in (row.raw_json or {}).get("line_items") or []:
+            if not isinstance(item, dict) or item.get("quantity") in (None, ""):
+                continue
+            nested = item.get("item") if isinstance(item.get("item"), dict) else {}
+            item_id = item.get("item_id") or item.get("itemid") or nested.get("item_id") or nested.get("id")
+            weight = calculate_line_weight_kg(item.get("quantity"), item.get("unit") or item.get("unit_name") or item.get("usage_unit"), item_id, item=item, context="total", allow_fetch=False)
+            if weight is None:
+                complete = False
+            else:
+                total += weight
+    history_ids = [row.id for row in rows if isinstance(row, SalesOrderHistory)]
+    if history_ids:
+        for weight in db.execute(select(SalesOrderLine.weight_kg).where(SalesOrderLine.sales_order_id.in_(history_ids))).scalars().all():
+            if weight is None:
+                complete = False
+            else:
+                total += float(weight)
+    return round(total, 3), complete
 
 
 @router.get("/inventory/sales-orders")
@@ -183,18 +250,25 @@ def list_sales_orders(
     db: Session = Depends(get_db),
 ):
     rows = _filtered_rows(db, date_from, date_to, status, search, assignment, cities, vehicle, customer, delivery_status)
-    stock = stock_for_orders(rows) if rows and not all(isinstance(row, SalesOrderHistory) for row in rows) else {}
+    # Never block the list on per-item Zoho calls: serve cached stock/weights (stale is fine),
+    # fill the gaps in the background, and tell the UI to poll while anything is still missing.
+    live_rows = [row for row in rows if not isinstance(row, SalesOrderHistory)]
+    stock, waiting = stock_for_orders_cached(live_rows) if live_rows else ({}, 0)
     for row in rows:
         setattr(row, "_mets_qty_available_for_sale", stock.get(f"{row.id}:mets"))
         setattr(row, "_glacier_qty_available_for_sale", stock.get(f"{row.id}:glacier"))
     start_index = (page - 1) * per_page
     page_rows = rows[start_index : start_index + per_page]
+    total_weight, weight_complete = _total_weight_kg(rows, db)
     return {
-        "items": [_summary(row, db) for row in page_rows],
+        "items": [_summary(row, db, allow_fetch=False) for row in page_rows],
         "page": page,
         "per_page": per_page,
         "total": len(rows),
         "has_more": start_index + per_page < len(rows),
+        "stock_pending": waiting > 0,
+        "total_weight_kg": total_weight,
+        "weight_complete": weight_complete and waiting == 0,
     }
 
 
@@ -239,7 +313,7 @@ def _filtered_rows(db: Session, date_from: str | None, date_to: str | None, stat
         # No sales_orders_cache read/write at all any more.
         rows = live_sales_order_cache.get_window(start, end)
     needle = (search or "").lower(); wanted = (status or "").lower()
-    acknowledged_ids = _fetch_acknowledged_ids_from_zoho() if wanted.replace("_", " ") == "acknowledged" else None
+    acknowledged_ids = _acknowledged_ids() if wanted.replace("_", " ") == "acknowledged" else None
     def matches_status(row: SalesOrderCache) -> bool:
         if not wanted or wanted == "all":
             return True
@@ -334,66 +408,85 @@ def _email_context(rows: list[SalesOrderCache], context: EmailFilterContext) -> 
 
 @router.post("/email/draft")
 async def email_draft(body: EmailDraftRequest, db: Session = Depends(get_db)):
-    rows = _email_rows(db, body)
+    # _email_rows can call Zoho for order detail - keep it off the event loop.
+    rows = await run_in_threadpool(_email_rows, db, body)
     return await generate_sales_order_email_draft(_email_context(rows, body))
 
 
+XLSX_MIME = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+
+
 @router.post("/email/send")
-async def email_send(body: EmailSendRequest, db: Session = Depends(get_db)):
-    if "@" not in body.to or any(not part.strip() for part in body.to.split("@", 1)):
+def email_send(body: EmailSendRequest, db: Session = Depends(get_db)):
+    """Sends the sales-order email straight through the Gmail API (no n8n). Plain `def` so
+    FastAPI runs the Zoho hydration, PDF/Excel building and the Gmail call in a worker thread."""
+    to = body.to.strip()
+    if not to or "@" not in to:
         raise HTTPException(422, "Enter a valid recipient email address.")
-    webhook_secret = os.environ.get("INTELLIFLEET_WEBHOOK_SECRET", "").strip()
-    if not webhook_secret:
-        raise HTTPException(501, "INTELLIFLEET_WEBHOOK_SECRET is not configured.")
+    if not gmail_sender.configured():
+        raise HTTPException(503, "Gmail is not configured on the server (GMAIL_COMMS_* credentials).")
     rows = _email_rows(db, body)
-    export_rows = [line for order in rows for line in flatten_order(order)]
+    export_rows = _confirmed_export_rows(rows) if body.assignment == "assigned" else [line for order in rows for line in flatten_order(order)]
+    layout = "confirmed" if body.assignment == "assigned" else "default"
     start = body.date_from or datetime.now(PHT).date().isoformat()
     end = body.date_to or start
     stamp = _download_stamp()
     caption = f"{start} to {end} - {body.status or 'All'} statuses - Downloaded {stamp.replace('_', ' ')} PHT"
-    pdf = make_pdf(export_rows, caption).getvalue()
-    excel = make_excel(export_rows, caption).getvalue()
-    payload = {
-        "to": body.to.strip(),
-        "subject": body.subject.strip(),
-        "htmlBody": body.htmlBody,
-        "orderIds": [str(row.id) for row in rows],
-        "filterContext": _email_context(rows, body),
-        "attachments": [
-            {"filename": "SalesOrders.pdf", "mimeType": "application/pdf", "content": base64.b64encode(pdf).decode("ascii")},
-            {"filename": "SalesOrders.xlsx", "mimeType": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", "content": base64.b64encode(excel).decode("ascii")},
-        ],
-    }
+    pdf = make_pdf(export_rows, caption, layout).getvalue()
+    excel = make_excel(export_rows, caption, layout).getvalue()
     try:
-        async with httpx.AsyncClient(timeout=45) as client:
-            response = await client.post(
-                "https://rareglobalfood.app.n8n.cloud/webhook/intellifleet-send-sales-order-email",
-                headers={"Authorization": webhook_secret},
-                json=payload,
-            )
-    except httpx.HTTPError as exc:
-        raise HTTPException(502, "The email delivery service could not be reached.") from exc
-    try:
-        result = response.json()
-    except ValueError:
-        result = {"success": response.is_success, "message": response.text}
-    if not response.is_success:
-        raise HTTPException(502, result if isinstance(result, str) else result)
-    return result
+        sent = gmail_sender.send_email(
+            to=to,
+            subject=body.subject.strip(),
+            html=body.htmlBody,
+            attachments=[("SalesOrders.pdf", "application/pdf", pdf), ("SalesOrders.xlsx", XLSX_MIME, excel)],
+            purpose="sales-order-email",
+        )
+    except gmail_sender.GmailSendError as exc:
+        raise HTTPException(exc.status_code, str(exc)) from exc
+    return {"success": True, "messageId": sent["id"], "threadId": sent["threadId"], "orderCount": len(rows), "message": f"Email sent to {to} with {len(rows)} order(s) attached."}
 
 
+def _confirmed_export_rows(rows: list) -> list[list]:
+    """Confirmed SO export: one row per line item with the same columns the screen shows -
+    including per-item Mets/Glacier stock, warehouse, notes, truck and driver/helper."""
+    item_ids = confirmed_item_ids(rows)
+    stock: dict[str, dict] = {}
+    if item_ids:
+        # Items already seen in the list are cached, so this is normally instant; anything
+        # missing is fetched here with a bounded fan-out (the Zoho limiter paces it).
+        with ThreadPoolExecutor(max_workers=5) as pool:
+            futures = {item_id: pool.submit(contextvars.copy_context().run, fetch_item_stock, item_id) for item_id in item_ids}
+            stock = {item_id: future.result() for item_id, future in futures.items()}
+
+    def staff_name(staff_id) -> str | None:
+        member = staff_directory_cache.get_by_id(staff_id, retry_on_miss=False) if staff_id else None
+        return (member or {}).get("name")
+
+    def truck_driver(order) -> tuple[str, str]:
+        names = [staff_name(getattr(order, "driver_id", None))] + [staff_name(helper) for helper in (getattr(order, "helper_ids", None) or [])]
+        return order.vehicle_id or "", " / ".join(dict.fromkeys(name for name in names if name))
+
+    return [line for order in rows for line in flatten_confirmed_order(order, stock.get, truck_driver)]
+
+
+def _export_payload(db: Session, rows: list, assignment: str | None) -> tuple[list[list], str]:
+    rows = _hydrate_export_rows(db, rows)
+    if assignment == "assigned":
+        return _confirmed_export_rows(rows), "confirmed"
+    return [line for order in rows for line in flatten_order(order)], "default"
 
 
 @router.get("/inventory/export/excel")
 def export_excel(date_from: str | None = Query(None), date_to: str | None = Query(None), status: str | None = Query(None), search: str | None = Query(None), assignment: str | None = Query(None), db: Session = Depends(get_db)):
-    rows = _hydrate_export_rows(db, _filtered_rows(db, date_from, date_to, status, search, assignment)); start = date_from or datetime.now(PHT).date().isoformat(); end = date_to or start; downloaded = _download_stamp(); caption = f"{start} to {end} - {status or 'All'} statuses - Downloaded {downloaded.replace('_', ' ')} PHT"
-    return StreamingResponse(make_excel([line for order in rows for line in flatten_order(order)], caption), media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", headers={"Content-Disposition": f'attachment; filename="RGF_SalesOrders_{start}_to_{end}_downloaded_{downloaded}.xlsx"'})
+    export_rows, layout = _export_payload(db, _filtered_rows(db, date_from, date_to, status, search, assignment), assignment); start = date_from or datetime.now(PHT).date().isoformat(); end = date_to or start; downloaded = _download_stamp(); caption = f"{start} to {end} - {status or 'All'} statuses - Downloaded {downloaded.replace('_', ' ')} PHT"
+    return StreamingResponse(make_excel(export_rows, caption, layout), media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", headers={"Content-Disposition": f'attachment; filename="RGF_SalesOrders_{start}_to_{end}_downloaded_{downloaded}.xlsx"'})
 
 
 @router.get("/inventory/export/pdf")
 def export_pdf(date_from: str | None = Query(None), date_to: str | None = Query(None), status: str | None = Query(None), search: str | None = Query(None), assignment: str | None = Query(None), db: Session = Depends(get_db)):
-    rows = _hydrate_export_rows(db, _filtered_rows(db, date_from, date_to, status, search, assignment)); start = date_from or datetime.now(PHT).date().isoformat(); end = date_to or start; downloaded = _download_stamp(); caption = f"{start} to {end} - {status or 'All'} statuses - Downloaded {downloaded.replace('_', ' ')} PHT"
-    return StreamingResponse(make_pdf([line for order in rows for line in flatten_order(order)], caption), media_type="application/pdf", headers={"Content-Disposition": f'attachment; filename="RGF_SalesOrders_{start}_to_{end}_downloaded_{downloaded}.pdf"'})
+    export_rows, layout = _export_payload(db, _filtered_rows(db, date_from, date_to, status, search, assignment), assignment); start = date_from or datetime.now(PHT).date().isoformat(); end = date_to or start; downloaded = _download_stamp(); caption = f"{start} to {end} - {status or 'All'} statuses - Downloaded {downloaded.replace('_', ' ')} PHT"
+    return StreamingResponse(make_pdf(export_rows, caption, layout), media_type="application/pdf", headers={"Content-Disposition": f'attachment; filename="RGF_SalesOrders_{start}_to_{end}_downloaded_{downloaded}.pdf"'})
 
 
 def _run_sales_order_sync(start: date | None, end: date | None) -> None:
@@ -403,6 +496,8 @@ def _run_sales_order_sync(start: date | None, end: date | None) -> None:
     try:
         live_sales_order_cache.invalidate_windows()
         live_sales_order_cache.invalidate_assigned_zoho()
+        _invalidate_ack_cache()
+        item_detail_cache.mark_all_stale()
         synced = len(live_sales_order_cache.get_window(start or datetime.now(PHT).date(), end or datetime.now(PHT).date()))
         with _refresh_lock:
             _refresh_state.update(running=False, synced_count=synced, error=None, finished_at=datetime.now(timezone.utc).isoformat())
@@ -443,12 +538,16 @@ def acknowledge_sales_order_route(salesorder_id: str):
     if cached is None:
         raise HTTPException(404, "Sales order was not found.")
     current_status = str(cached.order_status or "").lower().replace("_", " ")
-    if current_status in {"acknowledged", "void", "cancelled", "canceled"}:
+    if current_status in {"void", "cancelled", "canceled"}:
         raise HTTPException(409, "This sales order is locked and cannot be acknowledged.")
+    if _is_acknowledged(cached):
+        return {"acknowledged": True, "already_acknowledged": True}
     try:
         result = acknowledge_sales_order(salesorder_id)
-        live_sales_order_cache.refresh_zoho_data(salesorder_id)
-        live_sales_order_cache.invalidate_windows()
+        # Reflect the change on every cached copy instead of re-pulling and re-hydrating the
+        # whole window (that re-pull is what made acknowledging take over a minute).
+        live_sales_order_cache.mark_acknowledged(salesorder_id, True)
+        _set_acknowledged(salesorder_id, True)
         return {"acknowledged": True, **result}
     except ZohoError as exc:
         raise HTTPException(502, str(exc)) from exc
@@ -460,15 +559,15 @@ def remove_acknowledge_sales_order_route(salesorder_id: str):
     cached = live_sales_order_cache.find_cached(salesorder_id) or live_sales_order_cache.ensure_zoho_data(salesorder_id)
     if cached is None:
         raise HTTPException(404, "Sales order was not found.")
-    current_status = str(cached.order_status or "").lower().replace("_", " ")
-    if current_status != "acknowledged":
+    if not _is_acknowledged(cached):
         raise HTTPException(409, "This sales order is not acknowledged.")
     try:
         remove_acknowledge_sales_order(salesorder_id)
         epoch = zoho_acquisition.generation()
         detail = fetch_sales_order_detail(salesorder_id)
         live_sales_order_cache.publish_zoho_data(salesorder_id, detail, epoch)
-        live_sales_order_cache.invalidate_windows()
+        live_sales_order_cache.mark_acknowledged(salesorder_id, False)
+        _set_acknowledged(salesorder_id, False)
         return {"removed_acknowledge": True, "status": "confirmed", **detail}
     except ZohoError as exc:
         raise HTTPException(502, f"Zoho status changed could not be synchronized locally: {exc}") from exc
@@ -483,18 +582,17 @@ def acknowledge_filtered_sales_orders(
     db: Session = Depends(get_db),
 ):
     rows = _filtered_rows(db, date_from, date_to, status, search)
-    eligible = [row for row in rows if str(row.order_status or "").lower().replace("_", " ") not in {"acknowledged", "void", "cancelled", "canceled"}]
+    eligible = [row for row in rows if str(row.order_status or "").lower().replace("_", " ") not in {"void", "cancelled", "canceled"} and not _is_acknowledged(row)]
     acknowledged = 0
     failed = 0
     for row in eligible:
         try:
             acknowledge_sales_order(str(row.id))
-            live_sales_order_cache.refresh_zoho_data(str(row.id))
+            live_sales_order_cache.mark_acknowledged(str(row.id), True)
+            _set_acknowledged(str(row.id), True)
             acknowledged += 1
         except ZohoError:
             failed += 1
-    if acknowledged:
-        live_sales_order_cache.invalidate_windows()
     return {"filtered_count": len(rows), "eligible_count": len(eligible), "acknowledged_count": acknowledged, "failed_count": failed}
 
 
