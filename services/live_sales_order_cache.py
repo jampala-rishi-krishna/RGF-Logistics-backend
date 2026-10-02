@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import re
 import threading
 import time
 import contextvars
@@ -66,7 +67,36 @@ def _normalized_order_status(record: dict) -> str | None:
     return None
 
 
+# Zoho sometimes hands back text whose UTF-8 bytes were decoded as Windows-1252 ("Denny’s" arrives
+# as "Dennyâ€™s"). Undo that at ingestion so every screen, export and email reads correctly.
+_MOJIBAKE = re.compile("[\u00c2\u00c3\u00e2][\u0080-\u00bf\u0152\u0153\u0160\u0161\u0178\u017d\u017e\u0192\u02c6\u02dc\u2013-\u203a\u20ac\u2122]")
+
+
+def repair_text(value: str) -> str:
+    if not _MOJIBAKE.search(value):
+        return value
+    for codec in ("cp1252", "latin-1"):
+        try:
+            fixed = value.encode(codec).decode("utf-8")
+        except (UnicodeEncodeError, UnicodeDecodeError):
+            continue
+        if fixed != value:
+            return fixed
+    return value
+
+
+def repair_deep(value):
+    if isinstance(value, str):
+        return repair_text(value)
+    if isinstance(value, list):
+        return [repair_deep(item) for item in value]
+    if isinstance(value, dict):
+        return {key: repair_deep(item) for key, item in value.items()}
+    return value
+
+
 def record_payload(record: dict) -> dict:
+    record = repair_deep(record)
     customer = record.get("customer_name") or (record.get("customer") or {}).get("customer_name") or (record.get("customer") or {}).get("display_name")
     return {
         "id": str(_pick(record, "salesorder_id", "sales_order_id", "id")),

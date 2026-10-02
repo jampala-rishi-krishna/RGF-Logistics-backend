@@ -26,6 +26,7 @@ from models.inventory import SalesOrderCache
 from services import optimizer
 from services.rarechain_email_template import render_rarechain_email
 from services import gmail_sender
+from services.sales_order_location import address_lines
 from services.item_weight import calculate_order_weight_kg
 from services.delivery_status import is_delivered
 from services import staff_directory_cache, live_sales_order_cache, memory_tables, vapi_client, voice_calls
@@ -130,9 +131,7 @@ def _assignment_email_html(drivers: list, profile, orders, assigned_by: str, ass
     rows = []
     for order in orders:
         raw = order.raw_json or {}
-        address = raw.get("shipping_address") or order.shipping_address or {}
-        if isinstance(address, list): address = address[0] if address else {}
-        address_text = ", ".join(str(address.get(key)) for key in ("address", "street_address", "city", "state", "zip", "country") if isinstance(address, dict) and address.get(key))
+        address_text = ", ".join(address_lines(raw.get("shipping_address") or order.shipping_address))
         packs = sum(float(item.get("quantity") or 0) for item in raw.get("line_items", []))
         rows.append(f"<tr><td>{escape(str(order.salesorder_number or order.id))}</td><td>{escape(str(order.customer_name or '-'))}</td><td>{_weight(order):,.1f}</td><td>{packs:,.0f}</td><td>{escape(address_text or '-')}</td></tr>")
     headers = "".join(f"<th style='border:1px solid #ccc;padding:6px;text-align:left'>{heading}</th>" for heading in ("SO number", "Client", "Total kg", "Total Packs", "Shipping Address"))
@@ -360,9 +359,7 @@ def send_assignment_email(body: AssignmentEmailBody, current_user: CurrentUser =
     if len(orders) != len(set(ids)) or not profile:
         raise HTTPException(404, "Sales order or vehicle was not found.")
     def address(order):
-        value = (order.raw_json or {}).get("shipping_address") or order.shipping_address or {}
-        if isinstance(value, list): value = value[0] if value else {}
-        return ", ".join(str(value.get(key)) for key in ("address", "street_address", "city", "state", "zip", "country") if isinstance(value, dict) and value.get(key))
+        return ", ".join(address_lines((order.raw_json or {}).get("shipping_address") or order.shipping_address))
     def packs(order): return sum(float(item.get("quantity") or 0) for item in (order.raw_json or {}).get("line_items", []))
     assigned_by = body.assigned_by or current_user.full_name or current_user.email
     assigned_at = datetime.now(timezone.utc).isoformat()

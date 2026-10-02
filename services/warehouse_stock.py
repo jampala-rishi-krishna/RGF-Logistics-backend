@@ -21,6 +21,10 @@ def _stock_value(value):
 
 
 def _parse_stock(entry: dict | None, item_id: str = "") -> dict[str, float | None]:
+    """Zoho's own "Available for Sale" figure for the item's main Mets warehouse and its Glacier
+    South RGF warehouse, passed through exactly as Zoho reports it (negative, zero or
+    positive) - no arithmetic. The separate "Chilled - Mets ..." warehouse is a different
+    location and must not replace the main Mets figure."""
     result: dict[str, float | None] = {"mets": None, "glacier": None}
     for warehouse in (entry or {}).get("warehouses") or []:
         if not isinstance(warehouse, dict):
@@ -34,12 +38,16 @@ def _parse_stock(entry: dict | None, item_id: str = "") -> dict[str, float | Non
         )
         if re.search(r"\(deactivated\)$", name, re.I) or name.startswith("(do not use)"):
             continue
-        if METS_NAME in name and "near-expiry" not in name and "for supermarket" not in name:
-            result["mets"] = value
+        if METS_NAME in name and "near-expiry" not in name and "for supermarket" not in name and not name.startswith("chilled"):
+            site = "mets"
         elif GLACIER_NAME in name:
-            result["glacier"] = value
-        elif name:
-            logger.debug("[WAREHOUSE_STOCK] item=%s unmatched_warehouse=%s", item_id, name)
+            site = "glacier"
+        else:
+            if name:
+                logger.debug("[WAREHOUSE_STOCK] item=%s unmatched_warehouse=%s", item_id, name)
+            continue
+        if value is not None:
+            result[site] = value
     return result
 
 

@@ -11,6 +11,8 @@ from openpyxl import Workbook
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
 
+from services.sales_order_location import address_lines, shipping_city
+
 HEADERS = ["Expected Shipment Date", "Sales Order#", "Customer Name", "Item Description", "SKU", "Quantity", "Unit", "City", "Shipping Address", "Fulfillment Type", "Order Status", "Invoiced", "Payment", "Packed", "Shipped", "Amount"]
 # Confirmed SO export: every column the Confirmed SO screen shows, in the layout dispatch uses.
 CONFIRMED_HEADERS = ["Date", "Item", "SKU", "Quantity", "Unit", "SO Number", "Customer", "City", "Shipping Address", "Warehouse", "Mets Qty Available for Sale", "Glacier Qty Available for Sale", "Notes", "Fulfillment Type", "Truck", "Driver/Helper"]
@@ -37,9 +39,7 @@ def _status_color(value) -> colors.Color:
     return BRAND_BLACK
 
 def _address(value) -> str:
-    item = value[0] if isinstance(value, list) and value else value
-    if not isinstance(item, dict): return _text(item)
-    return ", ".join(_text(item.get(key)) for key in ("address", "street_address", "city", "state", "zip", "country") if item.get(key))
+    return ", ".join(address_lines(value))
 
 def _fulfillment_type(raw: dict) -> str:
     """Zoho stores this as a custom field (cf_fulfillment_type), not a top-level key."""
@@ -75,7 +75,7 @@ def flatten_confirmed_order(order, stock_of, truck_driver) -> list[list]:
     items = [item for item in (raw.get("line_items") or []) if isinstance(item, dict) and any(item.get(key) not in (None, "") for key in ("name", "item_description", "sku", "quantity", "unit"))]
     address_value = raw.get("shipping_address") or getattr(order, "shipping_address", None)
     address_item = address_value[0] if isinstance(address_value, list) and address_value else address_value
-    city = _text(address_item.get("city")) if isinstance(address_item, dict) else ""
+    city = _text(shipping_city(order))
     notes = _text(raw.get("notes") or raw.get("note") or raw.get("customer_notes")).strip()
     truck, driver = truck_driver(order)
     rows = []
@@ -93,10 +93,8 @@ def flatten_order(order) -> list[list]:
     source_items = raw.get("line_items") or []
     items = [item for item in source_items if isinstance(item, dict) and any(item.get(key) not in (None, "") for key in ("name", "item_description", "sku", "quantity", "unit", "item_total", "amount"))]
     shipping = _address(raw.get("shipping_address") or order.shipping_address)
-    city = ""
     address_value = raw.get("shipping_address") or order.shipping_address
-    address_item = address_value[0] if isinstance(address_value, list) and address_value else address_value
-    if isinstance(address_item, dict): city = _text(address_item.get("city"))
+    city = _text(shipping_city(order))
     invoice_status = _text(getattr(order, "invoice_status", "") or raw.get("invoice_status") or raw.get("invoiced_status")).lower()
     payment_status = _text(getattr(order, "payment_status", "") or raw.get("payment_status") or raw.get("paid_status")).lower()
     shipment_status = _text(getattr(order, "shipment_status", "") or raw.get("shipment_status") or raw.get("shipping_status") or raw.get("status")).lower()

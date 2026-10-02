@@ -12,6 +12,7 @@ from services import live_gps_store
 from services import live_sales_order_cache
 from services.google_maps import geocode_address
 from services.item_weight import calculate_order_weight_kg
+from services.sales_order_location import address_lines
 from services.time_utils import minutes_since_midnight
 
 logger = logging.getLogger("optimization_data")
@@ -173,7 +174,9 @@ async def fetch_fleet_data(
         name = order.customer_name or f"Order {order.id}"
         lat = raw.get("latitude") or raw.get("lat") or (address.get("latitude") if isinstance(address, dict) else None)
         lng = raw.get("longitude") or raw.get("lng") or (address.get("longitude") if isinstance(address, dict) else None)
-        address_text = ", ".join(str(address.get(k)) for k in ("address", "street_address", "city", "state", "zip", "country") if isinstance(address, dict) and address.get(k))
+        # Full street text (incl. Zoho's street2) geocodes far better than the first line alone;
+        # business/attention names are left out because they only confuse the geocoder.
+        address_text = ", ".join(address_lines(address, include_names=False))
         if lat is None or lng is None:
             geocoded = await geocode_address(address_text) if address_text else None
             if geocoded:

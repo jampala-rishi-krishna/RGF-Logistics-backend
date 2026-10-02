@@ -169,10 +169,13 @@ def _summary(row, db: Session | None = None, *, allow_fetch: bool = True) -> dic
             quantity = float(line.quantity or 0)
             unit = str(line.unit or "").strip()
             normalized = unit.casefold()
+            # The order-level stock saved at assignment time is a point-in-time snapshot that may
+            # be wrong; show Zoho's own per-item "Available for Sale" instead.
+            saved_item_stock = ((fetch_item_stock(str(line.item_id)) if allow_fetch else cached_item_stock(str(line.item_id))) if line.item_id else None) or {}
             if "pack" in normalized: total_packs += quantity
             elif "case" in normalized or "carton" in normalized: total_cases += quantity
             else: total_units += quantity
-            products.append({"line_item_id": None, "item_id": line.item_id, "name": line.name, "sku": line.sku, "quantity": quantity, "unit": unit or None, "total_weight_kg": line.weight_kg, "packaging_type": "pack" if "pack" in normalized else "case" if "case" in normalized or "carton" in normalized else None, "pack_quantity": quantity if "pack" in normalized else 0, "case_quantity": quantity if "case" in normalized or "carton" in normalized else 0, "quantity_packed": 0.0, "quantity_shipped": float(line.quantity_shipped or 0)})
+            products.append({"mets_qty_available_for_sale": saved_item_stock.get("mets"), "glacier_qty_available_for_sale": saved_item_stock.get("glacier"), "line_item_id": None, "item_id": line.item_id, "name": line.name, "sku": line.sku, "quantity": quantity, "unit": unit or None, "total_weight_kg": line.weight_kg, "packaging_type": "pack" if "pack" in normalized else "case" if "case" in normalized or "carton" in normalized else None, "pack_quantity": quantity if "pack" in normalized else 0, "case_quantity": quantity if "case" in normalized or "carton" in normalized else 0, "quantity_packed": 0.0, "quantity_shipped": float(line.quantity_shipped or 0)})
         total_item_quantity = sum(float(line.quantity or 0) for line in lines)
     else:
         items = (row.raw_json or {}).get("line_items") or []
@@ -259,6 +262,10 @@ def list_sales_orders(
         setattr(row, "_glacier_qty_available_for_sale", stock.get(f"{row.id}:glacier"))
     start_index = (page - 1) * per_page
     page_rows = rows[start_index : start_index + per_page]
+    saved_page = [row.id for row in page_rows if isinstance(row, SalesOrderHistory)]
+    if saved_page:
+        # Past-dated orders: queue a background fetch of each line's item so its stock fills in.
+        waiting += item_detail_cache.request_refresh(db.execute(select(SalesOrderLine.item_id).where(SalesOrderLine.sales_order_id.in_(saved_page))).scalars().all())
     total_weight, weight_complete = _total_weight_kg(rows, db)
     return {
         "items": [_summary(row, db, allow_fetch=False) for row in page_rows],
@@ -318,7 +325,10 @@ def _filtered_rows(db: Session, date_from: str | None, date_to: str | None, stat
         if not wanted or wanted == "all":
             return True
         if acknowledged_ids is not None:
-            return str(row.id) in acknowledged_ids
+            # Zoho's Acknowledged custom view also lists orders that were later voided; those
+            # are not workable (they can't be assigned or acknowledged), so leave them out.
+            actual_status = _normalized_order_status(getattr(row, "raw_json", None) or {}) or str(row.order_status or "")
+            return str(row.id) in acknowledged_ids and actual_status.strip().lower() not in {"void", "cancelled", "canceled"}
         actual = _normalized_order_status(getattr(row, "raw_json", None) or {}) or str(row.order_status or "")
         return actual.strip().lower().replace("_", " ") == wanted.replace("_", " ")
     wanted_cities = {value.strip().casefold() for value in (cities or "").split(",") if value.strip()}
