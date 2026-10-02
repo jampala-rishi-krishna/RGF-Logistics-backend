@@ -12,6 +12,11 @@ from services import user_cache
 
 bearer_scheme = HTTPBearer(auto_error=False)
 
+# A planner works the same operational pages as a dispatcher (Control Tower, Fleet, Load
+# Planning, Orders, ...). Admin-only pages stay admin-only. The user's stored role remains
+# "planner"; only the permission check treats it as a dispatcher.
+ROLE_ALIASES = {"planner": "dispatcher"}
+
 
 @dataclass
 class CurrentUser:
@@ -66,7 +71,7 @@ def require_role(*allowed_roles: str):
     JWT auth here; a missing/invalid token is now always a hard 401/403."""
 
     def dependency(current_user: CurrentUser = Depends(get_current_user)) -> CurrentUser:
-        if current_user.role not in allowed_roles:
+        if ROLE_ALIASES.get(current_user.role, current_user.role) not in allowed_roles:
             raise HTTPException(status.HTTP_403_FORBIDDEN, "Forbidden")
         return current_user
 

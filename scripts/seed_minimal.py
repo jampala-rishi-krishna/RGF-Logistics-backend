@@ -42,6 +42,8 @@ def seed() -> None:
     admin_password = os.environ.get("SEED_ADMIN_PASSWORD", "").strip()
     dispatcher_email = os.environ.get("SEED_DISPATCHER_EMAIL", "dispatcher@rgf.com").strip()
     dispatcher_password = os.environ.get("SEED_DISPATCHER_PASSWORD", "").strip()
+    planner_email = os.environ.get("SEED_PLANNER_EMAIL", "planner@rgf.com").strip()
+    planner_password = os.environ.get("SEED_PLANNER_PASSWORD", "").strip()
     if not admin_email or not admin_password:
         raise SystemExit("SEED_ADMIN_EMAIL and SEED_ADMIN_PASSWORD must be set in backend/.env before running this script.")
 
@@ -72,6 +74,20 @@ def seed() -> None:
                 dispatcher.password_hash = hash_password(dispatcher_password)
                 dispatcher.must_change_password = False
                 print(f"Updated dispatcher user {dispatcher_email}")
+
+        if planner_password:
+            planner = db.execute(select(User).where(User.email == planner_email)).scalar_one_or_none()
+            if planner is None:
+                planner = User(email=planner_email, full_name="Planner", phone=639170000002, role="planner", status="active", password_hash=hash_password(planner_password), must_change_password=False)
+                db.add(planner)
+                print(f"Created planner user {planner_email}")
+            else:
+                planner.full_name = "Planner"
+                planner.role = "planner"
+                planner.status = "active"
+                planner.password_hash = hash_password(planner_password)
+                planner.must_change_password = False
+                print(f"Updated planner user {planner_email}")
 
         # --- 2. Vehicles + capacity profiles. ---
         for v in VEHICLES:
