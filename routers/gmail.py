@@ -1,15 +1,18 @@
 from __future__ import annotations
 
+import asyncio
 import base64
 import logging
 import os
 import time as time_module
 from datetime import date, datetime, time, timezone
 from email.utils import parsedate_to_datetime
+from typing import Literal
 from zoneinfo import ZoneInfo
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException
+from starlette.concurrency import run_in_threadpool
 
 from auth.dependencies import require_role
 
@@ -126,14 +129,8 @@ def _today_query() -> str:
     return f"after:{int(start.timestamp())} before:{int(end.timestamp())}"
 
 
-async def _fetch_message(client: httpx.AsyncClient, access_token: str, message_id: str) -> dict:
-    resp = await client.get(
-        f"{GMAIL_API_BASE}/messages/{message_id}",
-        headers={"Authorization": f"Bearer {access_token}"},
-        params={"format": "full"},
-    )
-    resp.raise_for_status()
-    data = resp.json()
+def _to_message(data: dict) -> dict:
+    """A Gmail `message` resource (format=full) in the shape the dashboard renders."""
     payload = data.get("payload", {})
     headers = payload.get("headers", [])
     date_header = _header("Date", headers)
@@ -158,55 +155,83 @@ async def _fetch_message(client: httpx.AsyncClient, access_token: str, message_i
         "body": body,
         "body_html": body_html,
         "sent_at": sent_at,
+        # Gmail's own receive time (ms). Used for ordering: the Date header text is local to each
+        # sender, so sorting it as a string misorders messages across timezones.
+        "internal_ts": int(data.get("internalDate") or 0),
         "is_sent": "SENT" in label_ids,
         "is_unread": "UNREAD" in label_ids,
     }
 
 
+# The dashboard is LOGISTICS-ONLY. These existing Gmail labels (applied by the backend and the
+# Gmail `to:` filter) are the source of truth; ids are looked up by name, never hard-coded, and
+# never created from here.
+LOGISTICS_LABELS = {"inbox": "Logistics", "sent": "Logistics/Sent"}
+MAX_DASHBOARD_THREADS = 50
+
+
 @router.get("/messages/today")
-async def list_today_messages(selected_date: date | None = None):
+async def list_today_messages(selected_date: date | None = None, folder: Literal["inbox", "sent"] = "inbox"):
+    """Logistics email for one day (Asia/Manila), read-only.
+
+    inbox -> label `Logistics`, excluding SENT (inbound logistics mail; stays visible after the
+             agent archives it, because INBOX is not part of the query).
+    sent  -> label `Logistics/Sent`.
+    Each match is shown as its WHOLE conversation (threads.get), so a thread keeps its driver
+    message and our reply. Nothing outside these labels is ever listed or returned."""
+    from services import gmail_sender
+
     access_token = await _get_access_token()
     mailbox_date = selected_date or datetime.now(MANILA_TZ).date()
     start = datetime.combine(mailbox_date, time.min, tzinfo=MANILA_TZ).astimezone(timezone.utc)
     end = datetime.combine(mailbox_date, time.max, tzinfo=MANILA_TZ).astimezone(timezone.utc)
-    query = f"after:{int(start.timestamp())} before:{int(end.timestamp())}"
+    day = f"after:{int(start.timestamp())} before:{int(end.timestamp())}"
+    label_name = LOGISTICS_LABELS[folder]
+    empty = {"date": mailbox_date.isoformat(), "folder": folder, "scope": "logistics", "threads": []}
+
+    try:
+        label_id = (await run_in_threadpool(gmail_sender.lookup_label_ids, [label_name])).get(label_name)
+    except gmail_sender.GmailSendError as exc:
+        raise HTTPException(502, "Could not read the Gmail labels") from exc
+    if not label_id:
+        logger.warning("Gmail label %r does not exist; the logistics %s view is empty", label_name, folder)
+        return {**empty, "missingLabels": [label_name]}
+    query = f"-in:sent {day}" if folder == "inbox" else day
 
     async with httpx.AsyncClient(timeout=20) as client:
-        list_resp = await client.get(
-            f"{GMAIL_API_BASE}/messages",
-            headers={"Authorization": f"Bearer {access_token}"},
-            # No labelIds filter: passing multiple label ids ANDs them (message must have
-            # every label at once), which is never true for INBOX+SENT together and silently
-            # returned zero results. `q`'s after:/before: already covers both directions.
-            params={"q": query, "maxResults": 100},
-        )
+        headers = {"Authorization": f"Bearer {access_token}"}
+        list_resp = await client.get(f"{GMAIL_API_BASE}/messages", headers=headers, params={"labelIds": label_id, "q": query, "maxResults": 100})
         if list_resp.status_code != 200:
             logger.error("Gmail message list failed: %s %s", list_resp.status_code, list_resp.text[:300])
             raise HTTPException(502, "Could not list Gmail messages")
-
         list_payload = list_resp.json()
-        ids = [m["id"] for m in list_payload.get("messages", [])]
-        logger.info(
-            "Gmail today query=%s | resultSizeEstimate=%s | message_count=%s",
-            query,
-            list_payload.get("resultSizeEstimate"),
-            len(ids),
-        )
-        messages = []
-        for message_id in ids:
-            try:
-                messages.append(await _fetch_message(client, access_token, message_id))
-            except httpx.HTTPStatusError:
-                continue
+        thread_ids = list(dict.fromkeys(m["threadId"] for m in list_payload.get("messages", [])))[:MAX_DASHBOARD_THREADS]
+        logger.info("Logistics %s view query=%s labelId=%s | resultSizeEstimate=%s | threads=%d", folder, query, label_id, list_payload.get("resultSizeEstimate"), len(thread_ids))
+
+        gate = asyncio.Semaphore(5)
+
+        async def fetch_thread(thread_id: str) -> dict | None:
+            async with gate:
+                resp = await client.get(f"{GMAIL_API_BASE}/threads/{thread_id}", headers=headers, params={"format": "full"})
+            if resp.status_code != 200:
+                logger.warning("Gmail thread %s could not be read: HTTP %s", thread_id, resp.status_code)
+                return None
+            return resp.json()
+
+        fetched = await asyncio.gather(*(fetch_thread(thread_id) for thread_id in thread_ids))
 
     threads: dict[str, dict] = {}
-    for m in messages:
-        t = threads.setdefault(m["thread_id"], {"thread_id": m["thread_id"], "subject": m["subject"], "messages": []})
-        t["messages"].append(m)
+    for thread in fetched:
+        if not thread:
+            continue
+        for raw in thread.get("messages", []):
+            m = _to_message(raw)
+            t = threads.setdefault(m["thread_id"], {"thread_id": m["thread_id"], "subject": m["subject"], "messages": []})
+            t["messages"].append(m)
 
     result = []
     for t in threads.values():
-        t["messages"].sort(key=lambda m: m["sent_at"] or "")
+        t["messages"].sort(key=lambda m: m["internal_ts"])
         latest = t["messages"][-1]
         participants = {m["from"] for m in t["messages"] if m["from"]} | {m["to"] for m in t["messages"] if m["to"]}
         result.append({
@@ -219,8 +244,8 @@ async def list_today_messages(selected_date: date | None = None):
             "messages": t["messages"],
         })
 
-    result.sort(key=lambda t: t["last_message_at"] or "", reverse=True)
-    return {"date": mailbox_date.isoformat(), "threads": result}
+    result.sort(key=lambda t: max(m["internal_ts"] for m in t["messages"]), reverse=True)
+    return {**empty, "threads": result}
 
 
 @router.get("/status")
@@ -243,6 +268,35 @@ async def send_log(limit: int = 100):
 
     entries = gmail_sender.recent(max(1, min(limit, 200)))
     return {"configured": gmail_sender.configured(), "mailbox": gmail_sender.mailbox_address() if gmail_sender.configured() else None, "sent": sum(1 for e in entries if e.get("ok")), "failed": sum(1 for e in entries if not e.get("ok")), "entries": entries}
+
+
+@router.get("/agent/status", dependencies=[Depends(require_role("admin"))])
+async def logistics_agent_status():
+    """Inbound Logistics email agent: enabled flag, last poll, and senders/failures that need a human."""
+    from services import logistics_email_agent
+
+    return logistics_email_agent.status()
+
+
+@router.post("/agent/poll", dependencies=[Depends(require_role("admin"))])
+async def logistics_agent_poll(dry_run: bool = True):
+    """Run one inbox pass now. Defaults to dry_run=true (decides and drafts, sends nothing)."""
+    from starlette.concurrency import run_in_threadpool
+
+    from services import logistics_email_agent
+
+    return {"dryRun": dry_run, "results": await run_in_threadpool(logistics_email_agent.poll_once, dry_run=dry_run)}
+
+
+@router.get("/identity")
+async def gmail_identity():
+    """Authenticated mailbox vs configured From identity, and whether Gmail will actually send
+    as it. No credentials are returned."""
+    from starlette.concurrency import run_in_threadpool
+
+    from services import gmail_sender
+
+    return await run_in_threadpool(gmail_sender.identity_status)
 
 
 @router.get("/profile")

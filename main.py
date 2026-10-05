@@ -29,7 +29,7 @@ logging.getLogger("httpcore").setLevel(logging.WARNING)
 logger = logging.getLogger("main")
 
 from routers import admin, agent, alerts, assignment, auth, comms, communications, dispatch, fleet, gmail, load_planning, optimization, orders, reports, routes, voice, warehouse, pipeline
-from services import fleet_static_cache, staff_directory_cache, live_sales_order_cache
+from services import fleet_static_cache, gmail_sender, staff_directory_cache, live_sales_order_cache
 from services.cartrack_poller import poll_cartrack_and_update, report_unmatched_roster_on_startup
 from services.ws_manager import manager
 from auth.security import hash_password, verify_password
@@ -120,6 +120,21 @@ async def lifespan(app: FastAPI):
     )
     scheduler.start()
     threading.Thread(target=live_sales_order_cache.prewarm_default_windows, daemon=True, name="prewarm-windows").start()
+    gmail_sender.log_identity_config_at_startup()
+    # Inbound Logistics email agent (replaces the n8n agent). OFF unless LOGISTICS_AGENT_ENABLED=true,
+    # so it never answers alongside the n8n workflow before cutover.
+    from services import logistics_email_agent
+    if logistics_email_agent.enabled():
+        scheduler.add_job(
+            logistics_email_agent.poll_once,
+            trigger="interval",
+            seconds=int(os.environ.get("LOGISTICS_AGENT_POLL_SECONDS", "60")),
+            id="logistics_email_agent",
+            replace_existing=True,
+            max_instances=1,
+            coalesce=True,
+        )
+        logger.info("Logistics email agent enabled - polling Gmail every %ss", os.environ.get("LOGISTICS_AGENT_POLL_SECONDS", "60"))
     logger.info("Fleet Zoho sync (assigned SOs only) started - syncing every %ss", fleet_sync_interval)
     if CARTRACK_CONFIGURED:
         poll_interval = int(os.environ.get("CARTRACK_POLL_INTERVAL_SECONDS", "5"))
@@ -209,6 +224,7 @@ def health():
         "cartrack_poller": CARTRACK_CONFIGURED,
         "cartrack_poller_active": bool(CARTRACK_CONFIGURED and manager.connection_count > 0),
         "db_egress": database.db_egress_stats,
+        "gmail_identity": gmail_sender.identity_health(),
     }
 
 @app.exception_handler(SQLAlchemyError)

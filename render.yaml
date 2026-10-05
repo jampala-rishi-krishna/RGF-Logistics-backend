@@ -64,11 +64,7 @@ services:
         sync: false
       - key: ORS_API_KEY
         sync: false
-      - key: INTELLIFLEET_WEBHOOK_SECRET
-        sync: false
       - key: INTELLIFLEET_ASSIGNMENT_WEBHOOK_SECRET
-        sync: false
-      - key: INTELLIFLEET_ASSIGNMENT_WEBHOOK_URL
         sync: false
       - key: DISPATCH_N8N_DRIVER_BROADCAST_URL
         sync: false
@@ -86,6 +82,23 @@ services:
         sync: false
       - key: GMAIL_COMMS_REFRESH_TOKEN
         sync: false
+      # Logistics sender identity - PENDING. Leave GMAIL_FROM_ADDRESS EMPTY until
+      # martin.logistics@rareglobalfood.com is a verified Send-As alias on the authenticated
+      # mailbox (check GET /api/gmail/identity), then set: GMAIL_FROM_ADDRESS=
+      # martin.logistics@rareglobalfood.com, GMAIL_FROM_NAME=Martin Cuico,
+      # GMAIL_REPLY_TO=martin.logistics@rareglobalfood.com. Sends are refused while an
+      # unavailable alias is configured.
+      - key: GMAIL_FROM_ADDRESS
+        sync: false
+      - key: GMAIL_FROM_NAME
+        sync: false
+      - key: GMAIL_REPLY_TO
+        sync: false
+      # Inbound Logistics email agent - keep false until the n8n agent is deactivated (cutover).
+      - key: LOGISTICS_AGENT_ENABLED
+        value: "false"
+      - key: LOGISTICS_AGENT_POLL_SECONDS
+        value: "60"
       - key: OPENAI_API_KEY
         sync: false
       - key: OPENAI_MODEL

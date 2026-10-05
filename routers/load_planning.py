@@ -320,17 +320,19 @@ def _filtered_rows(db: Session, date_from: str | None, date_to: str | None, stat
         # No sales_orders_cache read/write at all any more.
         rows = live_sales_order_cache.get_window(start, end)
     needle = (search or "").lower(); wanted = (status or "").lower()
-    acknowledged_ids = _acknowledged_ids() if wanted.replace("_", " ") == "acknowledged" else None
+    wanted_label = wanted.replace("_", " ")
+    acknowledged_ids = _acknowledged_ids() if wanted_label in {"acknowledged", "all except acknowledged"} else None
     def matches_status(row: SalesOrderCache) -> bool:
         if not wanted or wanted == "all":
             return True
+        actual_status = _normalized_order_status(getattr(row, "raw_json", None) or {}) or str(row.order_status or "")
+        if wanted_label == "all except acknowledged":
+            return str(row.id) not in (acknowledged_ids or set()) and actual_status.strip().lower() != "acknowledged"
         if acknowledged_ids is not None:
             # Zoho's Acknowledged custom view also lists orders that were later voided; those
             # are not workable (they can't be assigned or acknowledged), so leave them out.
-            actual_status = _normalized_order_status(getattr(row, "raw_json", None) or {}) or str(row.order_status or "")
             return str(row.id) in acknowledged_ids and actual_status.strip().lower() not in {"void", "cancelled", "canceled"}
-        actual = _normalized_order_status(getattr(row, "raw_json", None) or {}) or str(row.order_status or "")
-        return actual.strip().lower().replace("_", " ") == wanted.replace("_", " ")
+        return actual_status.strip().lower().replace("_", " ") == wanted_label
     wanted_cities = {value.strip().casefold() for value in (cities or "").split(",") if value.strip()}
     # Confirmed SO history includes active and soft-completed assignments.
     assignment_match = lambda row: not assignment or ((row.assignment_status or "unassigned") in {assignment, "completed"} if assignment == "assigned" else (row.assignment_status or "unassigned") == assignment)

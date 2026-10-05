@@ -53,26 +53,23 @@ _assignment_options_cache: dict[str, tuple[float, dict]] = {}
 
 def _invalidate_assignment_options_cache() -> None:
     _assignment_options_cache.clear()
+# WhatsApp / SMS / voice only. Email is NOT here: assignment emails (driver + team) go through
+# services/gmail_sender.py, and no n8n email webhook exists in this module.
 _NOTIFICATION_WEBHOOKS = (
-    "https://rareglobalfood.app.n8n.cloud/webhook/intellifleet-logistics-driver-assignment",
     "https://rareglobalfood.app.n8n.cloud/webhook/intellifleet-logistics-whatsapp-initial",
     "https://rareglobalfood.app.n8n.cloud/webhook/intellifleet-logistics-sms-initial",
     "https://rareglobalfood.app.n8n.cloud/webhook/intellifleet-logistics-voice-call",
 )
 # Skipped when VOICE_PROVIDER=direct (services/voice_calls.py places the call instead).
 _VOICE_WEBHOOK = _NOTIFICATION_WEBHOOKS[-1]
-# Assignment emails (driver + team confirmation) go directly through the Gmail API when it is
-# configured (services/gmail_sender.py), so this n8n webhook is skipped. WhatsApp/SMS still
-# use their own n8n webhooks.
-_EMAIL_WEBHOOK = _NOTIFICATION_WEBHOOKS[0]
 
 
-def _send_assignment_emails_direct(driver, driver_subject: str, driver_html: str, team_subject: str | None, team_html: str | None) -> None:
+def _send_assignment_emails_direct(driver, driver_subject: str, driver_html: str, team_subject: str | None, team_html: str | None, assignment_key: str = "") -> None:
     """Driver assignment email (and, once per assignment, the team confirmation) straight
     through Gmail. Runs in the notification pool; every outcome is logged by gmail_sender."""
     if driver.email:
         try:
-            gmail_sender.send_email(to=driver.email, subject=driver_subject, html=driver_html, purpose="assignment-driver")
+            gmail_sender.send_email(to=driver.email, subject=driver_subject, html=driver_html, purpose="assignment-driver", dedupe_key=f"driver|{driver.email.lower()}|{assignment_key}")
         except gmail_sender.GmailSendError:
             pass  # already logged with the reason
     else:
@@ -83,7 +80,7 @@ def _send_assignment_emails_direct(driver, driver_subject: str, driver_html: str
             logger.warning("[GMAIL_SEND] team confirmation skipped: the team notify list has no email addresses")
             return
         try:
-            gmail_sender.send_email(to=team, subject=team_subject, html=team_html, purpose="assignment-team")
+            gmail_sender.send_email(to=team, subject=team_subject, html=team_html, purpose="assignment-team", dedupe_key=f"team|{assignment_key}")
         except gmail_sender.GmailSendError:
             pass
 
@@ -341,9 +338,10 @@ def optimize_assigned_stops(vehicle_id: str, current_user: CurrentUser = Depends
 
 @router.post("/send-assignment-email-internal")
 def send_assignment_email(body: AssignmentEmailBody, current_user: CurrentUser = Depends(require_role("admin", "dispatcher")), db: Session = Depends(get_db)):
+    # Only the WhatsApp/SMS n8n webhooks need this secret; email (Gmail) must never depend on it.
     secret = os.environ.get("INTELLIFLEET_ASSIGNMENT_WEBHOOK_SECRET", "").strip()
     if not secret and not body.preview:
-        raise HTTPException(503, "Assignment webhook secret is not configured.")
+        logger.warning("INTELLIFLEET_ASSIGNMENT_WEBHOOK_SECRET is not set: WhatsApp/SMS n8n notifications are skipped; email is unaffected")
     ids = body.salesorder_ids
     if not ids:
         raise HTTPException(400, "At least one sales order is required.")
@@ -379,6 +377,7 @@ def send_assignment_email(body: AssignmentEmailBody, current_user: CurrentUser =
     # The team confirmation email is only attached to the first driver's payload
     # so it doesn't fire once per driver.
     voice_direct = vapi_client.voice_provider() == "direct"
+    assignment_key = f"{body.vehicle_id}|{','.join(sorted(map(str, ids)))}|{','.join(sorted(map(str, driver_ids)))}"
     for index, driver in enumerate(drivers):
         payload = {
             "driverName": driver.name,
@@ -395,14 +394,15 @@ def send_assignment_email(body: AssignmentEmailBody, current_user: CurrentUser =
             "teamSubject": team_subject if index == 0 else None,
             "teamHtmlBody": team_html if index == 0 else None,
         }
-        email_direct = gmail_sender.configured()
-        if email_direct:
-            _notification_pool.submit(_send_assignment_emails_direct, driver, payload["driverSubject"], driver_html, payload["teamSubject"], payload["teamHtmlBody"])
+        if not gmail_sender.configured():
+            logger.error("[GMAIL_SEND] assignment emails NOT sent for driver %s: Gmail is not configured (GMAIL_COMMS_*)", driver.name)
+        else:
+            _notification_pool.submit(_send_assignment_emails_direct, driver, payload["driverSubject"], driver_html, payload["teamSubject"], payload["teamHtmlBody"], assignment_key)
         for webhook in _NOTIFICATION_WEBHOOKS:
             if voice_direct and webhook == _VOICE_WEBHOOK:
                 continue
-            if email_direct and webhook == _EMAIL_WEBHOOK:
-                continue  # email goes directly through Gmail; WhatsApp/SMS still use n8n
+            if not secret:
+                continue  # WhatsApp/SMS n8n webhooks cannot be called without their secret
             _notification_pool.submit(_send_notification, webhook, secret, payload)
     if voice_direct:
         # VOICE_PROVIDER=direct: one Vapi call per driver straight from here, replacing the
@@ -417,4 +417,9 @@ def send_assignment_email(body: AssignmentEmailBody, current_user: CurrentUser =
             sales_orders=sales_orders_payload,
             drivers=driver_rows,
         )
-    return {"success": True, "dispatched": ["email", "whatsapp", "sms", "voice"], "drivers": [d.name for d in drivers], "message": "Notifications dispatched asynchronously."}
+    # Email delivery is independent of the assignment: "queued" means handed to the background
+    # sender, whose per-message outcome (sent/failed/skipped) is at GET /api/gmail/send-log.
+    email_status = "queued" if gmail_sender.configured() else "not_configured"
+    n8n_status = "queued" if secret else "skipped_missing_secret"
+    channels = {"email": email_status, "whatsapp": n8n_status, "sms": n8n_status, "voice": "queued_direct" if voice_direct else n8n_status}
+    return {"success": True, "dispatched": [name for name, state in channels.items() if state.startswith("queued")], "channels": channels, "emailStatus": email_status, "drivers": [d.name for d in drivers], "message": "Notifications dispatched asynchronously."}

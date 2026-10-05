@@ -16,21 +16,25 @@ from auth.dependencies import require_role
 from fastapi.concurrency import run_in_threadpool
 from html import escape as html_escape
 
-from services import gmail_sender, memory_tables, staff_directory_cache, vapi_client, voice_calls
+from services import email_conversations, gmail_sender, memory_tables, staff_directory_cache, vapi_client, voice_calls
 
 logger = logging.getLogger("dispatch")
 
 router = APIRouter(prefix="/api/dispatch", tags=["dispatch"], dependencies=[Depends(require_role("admin", "dispatcher", "warehouse"))])
 _n8n_cache: dict[str, tuple[float, dict]] = {}
+# Email conversations are NOT here: they are built from Gmail threads (services/email_conversations.py)
+# and served at GET /api/communications/email/conversations.
 _N8N_FEEDS = {
-    "email": "https://rareglobalfood.app.n8n.cloud/webhook/logistics-email-conversations",
     "whatsapp": "https://rareglobalfood.app.n8n.cloud/webhook/logistics-whatsapp-conversations",
     "sms": "https://rareglobalfood.app.n8n.cloud/webhook/logistics-sms-conversations",
 }
-_CHANNELS = (*_N8N_FEEDS, "voice")
+_CHANNELS = (*_N8N_FEEDS, "voice")  # channels served by /n8n-conversations/{channel}
 
 
 def _n8n_conversations(channel: str, tolerate_errors: bool = False) -> dict:
+    if channel == "email":
+        # Gmail-backed (read-only, 60s cache); used by comms-overview. Never calls n8n.
+        return email_conversations.feed(tolerate_errors=tolerate_errors)
     if channel == "voice":
         # Read from Vapi's own call log, whichever VOICE_PROVIDER places the calls - the n8n
         # voice DataTable is not read. Same response shape as the old n8n feed.
@@ -517,7 +521,7 @@ async def send_message(body: SendMessageBody):
                 "related_so_number": body.related_so_number,
                 "severity": body.severity,
         }
-        email_direct = channel == "email" and gmail_sender.configured()
+        email_direct = channel == "email"  # email is Gmail-only; never routed to n8n
         if email_direct:
             sent, provider_message_id, email_error = await _send_email_direct(contact_for_channel, template_subject, rendered_body)
             if email_error:
@@ -613,7 +617,13 @@ def notify_packed_orders_batch(orders: list[dict]) -> None:
                         body=body_text,
                         status="queued",
                     )
-                    if webhook_url:
+                    if channel == "email":  # email is Gmail-only; never routed to n8n
+                        try:
+                            gmail_sender.send_email(to=contact, subject=f"Order packed: {so_number}", html=f"<p>{html_escape(body_text)}</p>", text=body_text, purpose="order-packed", dedupe_key=f"packed|{contact.lower()}|{so_number}")
+                            memory_tables.message_log.update(row["id"], status="sent", sent_at=datetime.now(timezone.utc))
+                        except gmail_sender.GmailSendError:
+                            pass  # logged by gmail_sender; row stays "queued"
+                    elif webhook_url:
                         try:
                             response = httpx.post(
                                 webhook_url,
