@@ -1,0 +1,108 @@
+[
+ {
+  "name": "confirmed-0rows-390",
+  "width": 390,
+  "rows": 0,
+  "cards": 0,
+  "heights": {
+   "Search": [
+    36,
+    "14px"
+   ],
+   "From": [
+    36,
+    "14px"
+   ],
+   "To": [
+    36,
+    "14px"
+   ],
+   "Order status": [
+    null,
+    null
+   ],
+   "Weight text": [
+    "13px"
+   ],
+   "Cities": [
+    36,
+    "14px"
+   ],
+   "Export": [
+    null,
+    null
+   ],
+   "Send to Email": [
+    null,
+    null
+   ],
+   "Acknowledge": [
+    null,
+    null
+   ],
+   "Refresh": [
+    36,
+    "14px"
+   ],
+   "Toggle (box)": [
+    null,
+    null
+   ],
+   "Toggle btn widths": [],
+   "scrollWidth>clientWidth (page)": false
+  }
+ },
+ {
+  "name": "confirmed-8rows-390",
+  "width": 390,
+  "rows": 8,
+  "cards": 0,
+  "heights": {
+   "Search": [
+    36,
+    "14px"
+   ],
+   "From": [
+    36,
+    "14px"
+   ],
+   "To": [
+    36,
+    "14px"
+   ],
+   "Order status": [
+    null,
+    null
+   ],
+   "Weight text": [
+    "13px"
+   ],
+   "Cities": [
+    36,
+    "14px"
+   ],
+   "Export": [
+    null,
+    null
+   ],
+   "Send to Email": [
+    null,
+    null
+   ],
+   "Acknowledge": [
+    null,
+    null
+   ],
+   "Refresh": [
+    36,
+    "14px"
+   ],
+   "Toggle (box)": [
+    null,
+    null
+   ],
+   "Toggle btn widths": [],
+   "scrollWidth>clientWidth (page)": false
+  }
+ }
+]
