@@ -12,7 +12,7 @@ from html import escape
 
 import httpx
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 from sqlalchemy import select, func
 from sqlalchemy.orm import Session
@@ -150,6 +150,21 @@ def _weight_if_known(order: SalesOrderCache) -> float | None:
     return calculate_order_weight_kg(order)
 
 
+def capacity_overage(capacity_kg, *weights: float | None) -> dict | None:
+    """How far `weights` (the load for one truck on one day) go past the truck's rated capacity.
+    Returns None when nothing is over: no rated capacity, exactly at capacity, or any weight
+    unknown (an unverified weight is never treated as over-capacity). Over-capacity is a warning,
+    never a reason to refuse an assignment."""
+    if capacity_kg is None or any(value is None for value in weights):
+        return None
+    capacity = float(capacity_kg)
+    total = sum(float(value) for value in weights)
+    if total <= capacity:
+        return None
+    over = total - capacity
+    return {"requested_kg": round(total, 1), "capacity_kg": round(capacity, 1), "over_kg": round(over, 1), "over_percent": round(over / capacity * 100, 1) if capacity > 0 else None}
+
+
 def _reefer(order: SalesOrderCache) -> bool:
     raw = order.raw_json or {}
     text = " ".join(str(raw.get(k) or "") for k in ("notes", "customer_name", "mode_of_transport")).lower()
@@ -198,9 +213,11 @@ def create_new_driver(body: NewDriverBody, current_user: CurrentUser = Depends(r
 
 
 @router.get("/{salesorder_id}")
-def assignment_options(salesorder_id: str, db: Session = Depends(get_db)):
+def assignment_options(salesorder_id: str, extra_ids: str | None = Query(None, description="Other selected sales orders assigned together with this one (comma-separated)"), db: Session = Depends(get_db)):
     now = time.monotonic()
-    cached = _assignment_options_cache.get(salesorder_id)
+    extras = [value.strip() for value in (extra_ids or "").split(",") if value.strip() and value.strip() != salesorder_id]
+    cache_key = "|".join([salesorder_id, *extras])
+    cached = _assignment_options_cache.get(cache_key)
     if cached and now - cached[0] < _ASSIGNMENT_OPTIONS_TTL_SECONDS:
         return cached[1]
 
@@ -217,8 +234,13 @@ def assignment_options(salesorder_id: str, db: Session = Depends(get_db)):
     constraint = db.execute(select(ClientDeliveryConstraint).where(ClientDeliveryConstraint.customer_name == order.customer_name)).scalar_one_or_none()
     drivers = sorted((d for d in staff_directory_cache.all_staff() if d.get("active") and str(d.get("title") or "").strip().upper() in ASSIGNABLE_DRIVER_TITLES), key=lambda d: d.get("name") or "")
     weight = _weight_if_known(order)
-    result = {"order": {"id": order.id, "number": order.salesorder_number, "customer": order.customer_name, "address": (order.raw_json or {}).get("shipping_address"), "weight_kg": weight, "weight_verified": weight is not None, "weight_warning": None if weight is not None else "Zoho package weight unavailable; assignment is allowed but capacity remains unverified.", "requires_reefer": _reefer(order), "assignment_status": order.assignment_status}, "constraint": constraint and {"opening_time": constraint.opening_time, "receiving_cutoff_time": constraint.receiving_cutoff_time, "avg_processing_time_minutes": constraint.avg_processing_time_minutes, "requires_reefer": constraint.requires_reefer, "notes": constraint.notes}, "constraint_status": "on file" if constraint else "No delivery constraints on file", "vehicles": [{"vehicle_id": p.plate_no, "vehicle_type": p.vehicle_type, "capacity_kg": p.rated_capacity_kg, "capacity_note": p.capacity_note, "reefer": p.is_reefer, "gps_tracked": p.is_gps_tracked, "third_party": p.is_third_party, "locked": str(p.plate_no or "").upper() in LOCKED_VEHICLES, "lock_reason": LOCKED_VEHICLES.get(str(p.plate_no or "").upper()), "assigned_weight_kg": float(assigned.get(p.plate_no, 0) or 0), "remaining_capacity_kg": None if p.rated_capacity_kg is None else max(0, float(p.rated_capacity_kg) - float(assigned.get(p.plate_no, 0) or 0))} for p in profiles if str(p.plate_no or "").upper() not in LOCKED_VEHICLES], "drivers": [{"id": d.get("id"), "name": d.get("name"), "title": d.get("title")} for d in drivers]}
-    _assignment_options_cache[salesorder_id] = (now, result)
+    # Total of every selected order (this one + extra_ids) for the over-capacity warning; None
+    # when any weight is unknown, so an unverified selection is never flagged.
+    extra_orders = [o for o in (live_sales_order_cache.find_cached(oid) or live_sales_order_cache.ensure_zoho_data(oid) for oid in extras) if o is not None]
+    selected_weights = [weight] + [_weight_if_known(o) for o in extra_orders]
+    selected_weight = None if any(value is None for value in selected_weights) else round(sum(selected_weights), 3)
+    result = {"order": {"id": order.id, "number": order.salesorder_number, "customer": order.customer_name, "address": (order.raw_json or {}).get("shipping_address"), "weight_kg": weight, "selected_weight_kg": selected_weight, "weight_verified": weight is not None, "weight_warning": None if weight is not None else "Zoho package weight unavailable; assignment is allowed but capacity remains unverified.", "requires_reefer": _reefer(order), "assignment_status": order.assignment_status}, "constraint": constraint and {"opening_time": constraint.opening_time, "receiving_cutoff_time": constraint.receiving_cutoff_time, "avg_processing_time_minutes": constraint.avg_processing_time_minutes, "requires_reefer": constraint.requires_reefer, "notes": constraint.notes}, "constraint_status": "on file" if constraint else "No delivery constraints on file", "vehicles": [{"vehicle_id": p.plate_no, "vehicle_type": p.vehicle_type, "capacity_kg": p.rated_capacity_kg, "capacity_note": p.capacity_note, "reefer": p.is_reefer, "gps_tracked": p.is_gps_tracked, "third_party": p.is_third_party, "locked": str(p.plate_no or "").upper() in LOCKED_VEHICLES, "lock_reason": LOCKED_VEHICLES.get(str(p.plate_no or "").upper()), "assigned_weight_kg": float(assigned.get(p.plate_no, 0) or 0), "remaining_capacity_kg": None if p.rated_capacity_kg is None else max(0, float(p.rated_capacity_kg) - float(assigned.get(p.plate_no, 0) or 0))} for p in profiles if str(p.plate_no or "").upper() not in LOCKED_VEHICLES], "drivers": [{"id": d.get("id"), "name": d.get("name"), "title": d.get("title")} for d in drivers]}
+    _assignment_options_cache[cache_key] = (now, result)
     return result
 
 
@@ -242,16 +264,20 @@ def assign_order(salesorder_id: str, body: AssignmentBody, current_user: Current
     known_weights = [_weight_if_known(item) for item in orders]
     # Capacity is checked per delivery day: the 5th's orders never use up the truck's room on
     # the 3rd, and each day in this request is checked against only that day's existing load.
+    # Going over the truck's rated capacity is a warning (logged + returned), never a rejection.
     snapshot = live_sales_order_cache.get_assigned_snapshot()
     existing_weights: list[float | None] = []
+    over_capacity: list[dict] = []
     for ship_date in {item.expected_shipment_date for item in orders}:
-        day_known = [_weight_if_known(item) for item in orders if item.expected_shipment_date == ship_date]
+        day_orders = [item for item in orders if item.expected_shipment_date == ship_date]
+        day_known = [_weight_if_known(item) for item in day_orders]
         day_existing = [_weight_if_known(existing) for existing in snapshot if existing.vehicle_id == body.vehicle_id and existing.assignment_status == "assigned" and not is_delivered(existing.raw_json or {}) and existing.expected_shipment_date == ship_date]
         existing_weights.extend(day_existing)
-        day_new_weight = sum(value or 0 for value in day_known)
-        day_assigned = sum(value or 0 for value in day_existing)
-        if profile.rated_capacity_kg is not None and all(value is not None for value in day_known + day_existing) and float(day_assigned) + day_new_weight > float(profile.rated_capacity_kg):
-            raise HTTPException(409, f"Capacity exceeded for {ship_date}: {day_new_weight + float(day_assigned):.1f} kg requested, {float(profile.rated_capacity_kg):.1f} kg available.")
+        overage = capacity_overage(profile.rated_capacity_kg, *day_known, *day_existing)
+        if overage:
+            overage["ship_date"] = str(ship_date)
+            over_capacity.append(overage)
+            logger.warning("[CAPACITY] over-capacity assignment so_number=%s truck=%s ship_date=%s over_kg=%.1f over_percent=%s", ",".join(str(item.salesorder_number or item.id) for item in day_orders), body.vehicle_id, ship_date, overage["over_kg"], overage["over_percent"])
     if any(_reefer(item) for item in orders) and profile.is_reefer is False:
         raise HTTPException(409, "This order requires a reefer-capable vehicle.")
     driver_ids = body.all_driver_ids()
@@ -276,7 +302,7 @@ def assign_order(salesorder_id: str, body: AssignmentBody, current_user: Current
     db.commit()
     invalidate_fleet_cache()
     _invalidate_assignment_options_cache()
-    return {"success": True, "salesorder_ids": [item.id for item in orders], "vehicle_id": body.vehicle_id, "driver_id": primary_driver_id, "driver_ids": driver_ids, "assignment_status": "assigned", "capacity_verified": all(value is not None for value in known_weights + existing_weights), "capacity_warning": None if all(value is not None for value in known_weights + existing_weights) else "Assignment completed, but one or more Zoho package weights were unavailable; capacity must be verified before dispatch."}
+    return {"success": True, "salesorder_ids": [item.id for item in orders], "vehicle_id": body.vehicle_id, "driver_id": primary_driver_id, "driver_ids": driver_ids, "assignment_status": "assigned", "over_capacity": bool(over_capacity), "over_capacity_kg": max((o["over_kg"] for o in over_capacity), default=0.0), "over_capacity_percent": max((o["over_percent"] or 0.0 for o in over_capacity), default=0.0), "capacity_verified": all(value is not None for value in known_weights + existing_weights), "capacity_warning": None if all(value is not None for value in known_weights + existing_weights) else "Assignment completed, but one or more Zoho package weights were unavailable; capacity must be verified before dispatch."}
 
 
 @router.post("/{salesorder_id}/unassign")

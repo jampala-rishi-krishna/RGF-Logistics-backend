@@ -67,6 +67,26 @@ def _normalized_order_status(record: dict) -> str | None:
     return None
 
 
+_ON_HOLD_SUB_STATUSES = {"csonhold", "onhold"}
+
+
+def _squash(value) -> str:
+    return "".join(ch for ch in str(value or "").lower() if ch.isalnum())
+
+
+def is_on_hold(row_or_record) -> bool:
+    """True for a Sales Order Zoho has put On Hold. Zoho models it as the built-in sub-status
+    `cs_onhold` (current_sub_status / order_sub_status, status stays "confirmed"). Matching is
+    case/spacing-insensitive. Accepts a Zoho record dict or a row carrying one in raw_json."""
+    record = row_or_record if isinstance(row_or_record, dict) else (getattr(row_or_record, "raw_json", None) or {})
+    if not isinstance(record, dict):
+        return False
+    sub_statuses = (record.get("current_sub_status"), record.get("order_sub_status"))
+    if any(_squash(value) in _ON_HOLD_SUB_STATUSES for value in sub_statuses):
+        return True
+    return _squash(_normalized_order_status(record) or getattr(row_or_record, "order_status", "")) == "onhold"
+
+
 # Zoho sometimes hands back text whose UTF-8 bytes were decoded as Windows-1252 ("Denny’s" arrives
 # as "Dennyâ€™s"). Undo that at ingestion so every screen, export and email reads correctly.
 _MOJIBAKE = re.compile("[\u00c2\u00c3\u00e2][\u0080-\u00bf\u0152\u0153\u0160\u0161\u0178\u017d\u017e\u0192\u02c6\u02dc\u2013-\u203a\u20ac\u2122]")

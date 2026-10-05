@@ -83,31 +83,77 @@ def _fetch_acknowledged_ids_from_zoho() -> set[str]:
 
 
 # The Acknowledged custom view used to be re-paged from Zoho on every list request. Cache it
-# briefly; acknowledge / remove-acknowledge update it in place and Refresh drops it.
+# briefly; Refresh drops it. Local acknowledge / remove-acknowledge results are NOT written into
+# this cache (a re-fetch would replace them wholesale with whatever Zoho's view returns, which can
+# lag a just-made change); they live in _ack_overrides and are laid over the Zoho set on every read.
 ACK_IDS_TTL_SECONDS = 120
+# How long a local acknowledge/remove result keeps winning over Zoho's view if the view never
+# catches up (it normally does within seconds, at which point the override is dropped).
+ACK_OVERRIDE_TTL_SECONDS = 600
 _ack_lock = Lock()
 _ack_cache: dict = {"ids": None, "at": 0.0}
+_ack_overrides: dict[str, tuple[bool, float]] = {}
+
+
+def _with_overrides(zoho_ids: set[str]) -> tuple[set[str], dict[str, bool]]:
+    """Zoho's Acknowledged-view ids with locally confirmed changes applied. An override is dropped
+    once Zoho's view agrees with it, or when it is older than ACK_OVERRIDE_TTL_SECONDS."""
+    now = time.monotonic()
+    result = set(zoho_ids)
+    live: dict[str, bool] = {}
+    with _ack_lock:
+        for order_id, (acknowledged, at) in list(_ack_overrides.items()):
+            if (order_id in zoho_ids) == acknowledged or now - at > ACK_OVERRIDE_TTL_SECONDS:
+                del _ack_overrides[order_id]
+            else:
+                live[order_id] = acknowledged
+                (result.add if acknowledged else result.discard)(order_id)
+    return result, live
+
+
+def _ack_snapshot() -> tuple[set[str], dict[str, bool]]:
+    """(Zoho Acknowledged-view ids with local changes applied, the still-live local overrides)."""
+    with _ack_lock:
+        fresh = _ack_cache["ids"] is not None and time.monotonic() - _ack_cache["at"] < ACK_IDS_TTL_SECONDS
+        zoho_ids = set(_ack_cache["ids"]) if fresh else None
+    if zoho_ids is None:
+        zoho_ids = _fetch_acknowledged_ids_from_zoho()
+        with _ack_lock:
+            _ack_cache.update(ids=set(zoho_ids), at=time.monotonic())
+    return _with_overrides(zoho_ids)
 
 
 def _acknowledged_ids() -> set[str]:
-    with _ack_lock:
-        if _ack_cache["ids"] is not None and time.monotonic() - _ack_cache["at"] < ACK_IDS_TTL_SECONDS:
-            return set(_ack_cache["ids"])
-    ids = _fetch_acknowledged_ids_from_zoho()
-    with _ack_lock:
-        _ack_cache.update(ids=set(ids), at=time.monotonic())
-    return ids
+    return _ack_snapshot()[0]
 
 
 def _set_acknowledged(order_id: str, acknowledged: bool) -> None:
     with _ack_lock:
-        if _ack_cache["ids"] is not None:
-            (_ack_cache["ids"].add if acknowledged else _ack_cache["ids"].discard)(str(order_id))
+        _ack_overrides[str(order_id)] = (acknowledged, time.monotonic())
 
 
 def _invalidate_ack_cache() -> None:
     with _ack_lock:
         _ack_cache.update(ids=None, at=0.0)
+
+
+def _explicit_sub_status(row) -> str:
+    raw = row.raw_json if isinstance(getattr(row, "raw_json", None), dict) else {}
+    return live_sales_order_cache._squash(raw.get("current_sub_status") or raw.get("order_sub_status"))
+
+
+def row_is_acknowledged(row, view_ids: set[str], overrides: dict[str, bool] | None = None) -> bool:
+    """The single decision for "is this order acknowledged". Order of authority:
+    1. a recent local acknowledge / remove-acknowledge (beats a Zoho payload that has not caught up),
+    2. the order's own sub-status (current_sub_status / order_sub_status == cs_acknowl),
+    3. Zoho's Acknowledged custom view - only when the record carries no sub-status at all."""
+    order_id = str(row.id)
+    if overrides and order_id in overrides:
+        return overrides[order_id]
+    sub_status = _explicit_sub_status(row)
+    if sub_status:
+        return sub_status == "csacknowl"
+    return order_id in view_ids or str(getattr(row, "order_status", "") or "").lower() == "acknowledged"
 
 
 def _is_acknowledged(row) -> bool:
@@ -323,17 +369,17 @@ def _filtered_rows(db: Session, date_from: str | None, date_to: str | None, stat
         rows = live_sales_order_cache.get_window(start, end)
     needle = (search or "").lower(); wanted = (status or "").lower()
     wanted_label = wanted.replace("_", " ")
-    acknowledged_ids = _acknowledged_ids() if wanted_label in {"acknowledged", "all except acknowledged"} else None
+    acknowledged_ids, ack_overrides = _ack_snapshot() if wanted_label in {"acknowledged", "all except acknowledged"} else (None, {})
     def matches_status(row: SalesOrderCache) -> bool:
         if not wanted or wanted == "all":
             return True
         actual_status = _normalized_order_status(getattr(row, "raw_json", None) or {}) or str(row.order_status or "")
         if wanted_label == "all except acknowledged":
-            return str(row.id) not in (acknowledged_ids or set()) and actual_status.strip().lower() != "acknowledged"
+            return not row_is_acknowledged(row, acknowledged_ids or set(), ack_overrides)
         if acknowledged_ids is not None:
             # Zoho's Acknowledged custom view also lists orders that were later voided; those
             # are not workable (they can't be assigned or acknowledged), so leave them out.
-            return str(row.id) in acknowledged_ids and actual_status.strip().lower() not in {"void", "cancelled", "canceled"}
+            return row_is_acknowledged(row, acknowledged_ids, ack_overrides) and actual_status.strip().lower() not in {"void", "cancelled", "canceled"}
         return actual_status.strip().lower().replace("_", " ") == wanted_label
     wanted_cities = {value.strip().casefold() for value in (cities or "").split(",") if value.strip()}
     # Confirmed SO history includes active and soft-completed assignments.
@@ -348,7 +394,9 @@ def _filtered_rows(db: Session, date_from: str | None, date_to: str | None, stat
         if is_delivered(raw):
             return "Delivered"
         return str(raw.get("shipment_status") or raw.get("shipping_status") or "Pending")
-    return [row for row in rows if assignment_match(row) and not (assignment == "assigned" and is_delivered(getattr(row, "raw_json", None) or {}) and row.assignment_status != "completed") and matches_status(row) and (not wanted_cities or (_shipping_city(row) or "").casefold() in wanted_cities) and (not vehicle_needle or vehicle_needle in str(row.vehicle_id or "").casefold()) and (not customer_needle or customer_needle in str(row.customer_name or "").casefold()) and (not delivery_needle or delivery_needle in row_delivery_status(row).casefold()) and (not needle or needle in " ".join(str(x or "") for x in (row.salesorder_number, row.customer_name, row.reference_number, row.vehicle_id, _shipping_city(row) or "")).lower())]
+    # Inventory tab / its exports (no assignment filter) never lists On Hold orders; Load Planning and Confirmed SO pass an assignment filter and are untouched.
+    hide_on_hold = assignment is None
+    return [row for row in rows if assignment_match(row) and not (hide_on_hold and live_sales_order_cache.is_on_hold(row)) and not (assignment == "assigned" and is_delivered(getattr(row, "raw_json", None) or {}) and row.assignment_status != "completed") and matches_status(row) and (not wanted_cities or (_shipping_city(row) or "").casefold() in wanted_cities) and (not vehicle_needle or vehicle_needle in str(row.vehicle_id or "").casefold()) and (not customer_needle or customer_needle in str(row.customer_name or "").casefold()) and (not delivery_needle or delivery_needle in row_delivery_status(row).casefold()) and (not needle or needle in " ".join(str(x or "") for x in (row.salesorder_number, row.customer_name, row.reference_number, row.vehicle_id, _shipping_city(row) or "")).lower())]
 
 
 def _hydrate_export_rows(db: Session, rows: list[SalesOrderCache]) -> list[SalesOrderCache]:
@@ -581,6 +629,7 @@ def acknowledge_sales_order_route(salesorder_id: str, current_user: CurrentUser 
     if current_status in {"void", "cancelled", "canceled"}:
         raise HTTPException(409, "This sales order is locked and cannot be acknowledged.")
     if _is_acknowledged(cached):
+        _set_acknowledged(salesorder_id, True)  # Zoho already says acknowledged; keep every list consistent with it
         lock_payload = _lock_after_acknowledge(salesorder_id, cached.salesorder_number, current_user)
         return {"acknowledged": True, "already_acknowledged": True, **lock_payload}  # retry path: no new acknowledge
     try:

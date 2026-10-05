@@ -28,7 +28,7 @@ from models.sales_order_history import SalesOrderHistory
 from services.serialize import row_to_dict
 from routers.dispatch import SendMessageBody, send_message
 from routers.fleet import invalidate_fleet_cache
-from routers.assignment import _invalidate_assignment_options_cache
+from routers.assignment import _invalidate_assignment_options_cache, capacity_overage
 from services.item_weight import calculate_order_weight_kg
 
 router = APIRouter(prefix="/api/load-planning", tags=["dispatch-pipeline"])
@@ -131,8 +131,11 @@ async def confirm_manifest(body: ManifestBody, current_user: CurrentUser = Depen
         raise HTTPException(409, "All selected orders must be assigned to this vehicle.")
     total = sum(_weight(o) for o in orders)
     profile = db.execute(select(Vehicle).where(Vehicle.plate_no == body.vehicle_id)).scalar_one_or_none()
-    if profile and profile.rated_capacity_kg is not None and total > float(profile.rated_capacity_kg):
-        raise HTTPException(409, f"Manifest exceeds capacity: {total:.1f} kg / {profile.rated_capacity_kg:.1f} kg.")
+    # Over the truck's rating is a warning (logged + returned), never a rejection. An order whose
+    # weight is unknown makes the total unverified, so nothing is flagged then.
+    overage = capacity_overage(profile.rated_capacity_kg if profile else None, *[calculate_order_weight_kg(o) for o in orders])
+    if overage:
+        logger.warning("[CAPACITY] over-capacity manifest so_number=%s truck=%s over_kg=%.1f over_percent=%s", ",".join(str(o.salesorder_number or o.id) for o in orders), body.vehicle_id, overage["over_kg"], overage["over_percent"])
     manifest = LoadManifest(vehicle_id=body.vehicle_id, status="confirmed", cargo_type="Mixed", total_weight_kg=total, confirmed_at=datetime.now(timezone.utc), confirmed_by=current_user.id)
     db.add(manifest); db.flush()
     for o in orders:
@@ -146,7 +149,7 @@ async def confirm_manifest(body: ManifestBody, current_user: CurrentUser = Depen
     recipient = (staff_directory_cache.get_by_id(profile.driver_id) if profile and profile.driver_id else None) or staff_directory_cache.first_active()
     if recipient:
         await send_message(SendMessageBody(audience="driver", recipient_id=recipient["id"], channels=["email", "sms", "whatsapp"], subject="Load ready", body=f"Load manifest {manifest.id} is ready for {body.vehicle_id}.", trigger_event="manifest_confirmed", related_so_number=orders[0].salesorder_number))
-    return {"manifest": row_to_dict(manifest), "items": [row_to_dict(i) for i in db.execute(select(ManifestItem).where(ManifestItem.manifest_id == str(manifest.id))).scalars().all()]}
+    return {"manifest": row_to_dict(manifest), "items": [row_to_dict(i) for i in db.execute(select(ManifestItem).where(ManifestItem.manifest_id == str(manifest.id))).scalars().all()], "over_capacity": bool(overage), "over_capacity_kg": overage["over_kg"] if overage else 0.0, "over_capacity_percent": (overage["over_percent"] or 0.0) if overage else 0.0}
 
 
 @router.get("/warehouse/checklists/{manifest_id}", dependencies=[Depends(OPS)])
