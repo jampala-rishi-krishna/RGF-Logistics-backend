@@ -1,0 +1,245 @@
+from __future__ import annotations
+
+import json
+import logging
+import os
+import re
+import threading
+import time
+from datetime import datetime
+from zoneinfo import ZoneInfo
+
+import httpx
+
+from services import zoho_rate_limiter
+from services.zoho_client import REQUEST_TIMEOUT, ZohoError
+
+logger = logging.getLogger("zoho")
+PHT = ZoneInfo("Asia/Manila")
+
+_access_token: str | None = None
+_access_token_expires_at = 0.0
+_token_lock = threading.Lock()
+
+
+def configured() -> bool:
+    return all(
+        os.environ.get(name, "").strip()
+        for name in (
+            "ZOHO_LOCK_CLIENT_ID",
+            "ZOHO_LOCK_CLIENT_SECRET",
+            "ZOHO_LOCK_REFRESH_TOKEN",
+            "ZOHO_SO_LOCK_CONFIGURATION_ID",
+            "ZOHO_SO_LOCK_API_BASE",
+            "ZOHO_ORG_ID",
+        )
+    )
+
+
+def health_status() -> str:
+    return "ok" if configured() else "not_configured"
+
+
+def log_configuration_warning() -> None:
+    if not configured():
+        logger.warning("[ZOHO_SO_LOCK] so_lock: not_configured")
+
+
+def _required(name: str) -> str:
+    value = os.environ.get(name, "").strip()
+    if not value:
+        raise ZohoError("not_configured")
+    return value
+
+
+def _base_url() -> str:
+    return _required("ZOHO_SO_LOCK_API_BASE").rstrip("/")
+
+
+def reset_token_cache() -> None:
+    global _access_token, _access_token_expires_at
+    with _token_lock:
+        _access_token = None
+        _access_token_expires_at = 0.0
+
+
+def get_access_token() -> str:
+    if _access_token and time.time() < _access_token_expires_at - 60:
+        return _access_token
+    with _token_lock:
+        return _refresh_access_token()
+
+
+def _refresh_access_token() -> str:
+    global _access_token, _access_token_expires_at
+    if _access_token and time.time() < _access_token_expires_at - 60:
+        return _access_token
+    try:
+        response = httpx.post(
+            f"{os.environ.get('ZOHO_ACCOUNTS_URL', 'https://accounts.zoho.com')}/oauth/v2/token",
+            data={
+                "grant_type": "refresh_token",
+                "client_id": _required("ZOHO_LOCK_CLIENT_ID"),
+                "client_secret": _required("ZOHO_LOCK_CLIENT_SECRET"),
+                "refresh_token": _required("ZOHO_LOCK_REFRESH_TOKEN"),
+            },
+            timeout=REQUEST_TIMEOUT,
+        )
+    except httpx.HTTPError as exc:
+        raise ZohoError("Zoho lock connection is unavailable.") from exc
+    if response.status_code != 200:
+        raise ZohoError("Zoho lock connection needs re-authentication.")
+    try:
+        payload = response.json()
+    except ValueError as exc:
+        raise ZohoError("Zoho lock connection needs re-authentication.") from exc
+    token = payload.get("access_token")
+    if not token:
+        raise ZohoError("Zoho lock connection needs re-authentication.")
+    _access_token = token
+    _access_token_expires_at = time.time() + int(payload.get("expires_in", 3600))
+    logger.info("[ZOHO_SO_LOCK] token refresh status=ok expires_in=%ss", int(payload.get("expires_in", 3600)))
+    return token
+
+
+def lock_status_from_record(record: dict | None) -> dict:
+    record = record or {}
+    details = record.get("lock_details")
+    if not isinstance(details, dict):
+        lock_detail = record.get("lock_detail") if isinstance(record.get("lock_detail"), dict) else {}
+        custom_locks = lock_detail.get("custom_locks") if isinstance(lock_detail, dict) else []
+        if isinstance(custom_locks, list):
+            for item in custom_locks:
+                nested = item.get("lock_details") if isinstance(item, dict) else None
+                if isinstance(nested, dict):
+                    details = nested
+                    break
+    details = details if isinstance(details, dict) else {}
+    return {
+        "is_locked": bool(details.get("is_locked")),
+        "config_id": str(details.get("locking_config_id") or ""),
+        "config_name": details.get("locking_config_name") or None,
+        "locked_by": details.get("locked_by") or None,
+        "lock_time": details.get("lock_time") or None,
+        "reason": details.get("lock_reason") or None,
+    }
+
+
+def _request(method: str, url: str, *, params: dict | None = None, data: dict | None = None) -> httpx.Response:
+    org_id = _required("ZOHO_ORG_ID")
+    limiter = zoho_rate_limiter.limiter_for(org_id)
+    token = get_access_token()  # Accounts endpoint: not gated as Inventory (same as the main client)
+    with limiter.admit():
+        return httpx.request(
+            method,
+            url,
+            headers={"Authorization": f"Zoho-oauthtoken {token}"},
+            params=params,
+            data=data,
+            timeout=REQUEST_TIMEOUT,
+        )
+
+
+def _scope_error(status_code: int, payload: dict) -> bool:
+    message = str(payload.get("message") or payload.get("error") or "").lower()
+    code = str(payload.get("code") or "")
+    return status_code in {401, 403} or code == "57" or "not authorized" in message or "scope" in message
+
+
+def _payload(response: httpx.Response) -> dict:
+    try:
+        body = response.json()
+    except ValueError:
+        return {}
+    return body if isinstance(body, dict) else {}
+
+
+def _already_locked(payload: dict) -> bool:
+    text = " ".join(str(payload.get(key) or "") for key in ("message", "error", "details")).lower()
+    return "already" in text and "lock" in text
+
+
+_SO_ID = re.compile(r"^\d{1,32}$")
+
+
+def _empty_status(error: str, message: str | None = None) -> dict:
+    status = {"is_locked": False, "config_id": "", "config_name": None, "locked_by": None, "lock_time": None, "reason": None, "lock_error": error}
+    if message:
+        status["message"] = message
+    return status
+
+
+def _connection_error(exc: Exception) -> str:
+    """Token refresh / network failures become a lock_error; they must never escape to the caller."""
+    text = str(exc)
+    if text == "not_configured":
+        return "not_configured"
+    if "re-authentication" in text:
+        return "lock_credential_needs_reauthentication"
+    return "lock_connection_error"
+
+
+def _safe_request(method: str, url: str, *, params: dict | None = None, data: dict | None = None) -> tuple[httpx.Response | None, str | None]:
+    try:
+        return _request(method, url, params=params, data=data), None
+    except (ZohoError, httpx.HTTPError) as exc:
+        logger.error("[ZOHO_SO_LOCK] %s request failed: %s", method, type(exc).__name__)
+        return None, _connection_error(exc)
+
+
+def get_lock_status(so_id: str) -> dict:
+    """Lock state of ONE sales order via the lock credential. Never raises."""
+    if not configured():
+        return _empty_status("not_configured")
+    so_id = str(so_id or "").strip()
+    if not _SO_ID.match(so_id):
+        return _empty_status("invalid_salesorder_id")
+    response, error = _safe_request(
+        "GET",
+        f"{_base_url()}/salesorders/{so_id}",
+        params={"organization_id": _required("ZOHO_ORG_ID")},
+    )
+    if error:
+        return _empty_status(error)
+    payload = _payload(response)
+    if _scope_error(response.status_code, payload):
+        return _empty_status("lock_credential_lacks_scope", payload.get("message"))
+    if response.status_code < 200 or response.status_code >= 300:
+        return _empty_status(payload.get("message") or f"HTTP {response.status_code}")
+    return lock_status_from_record(payload.get("salesorder") if isinstance(payload.get("salesorder"), dict) else payload)
+
+
+def lock_salesorder(so_id: str, user: str | None = None) -> dict:
+    """Lock exactly ONE sales order. Never raises: every failure is returned as locked=False + lock_error."""
+    if not configured():
+        return {"locked": False, "already_locked": False, "lock_status": None, "lock_error": "not_configured"}
+    so_id = str(so_id or "").strip()
+    if not _SO_ID.match(so_id):  # digits only: a crafted id must never add a second entity id
+        return {"locked": False, "already_locked": False, "lock_status": None, "lock_error": "invalid_salesorder_id"}
+    status = get_lock_status(so_id)
+    if status.get("lock_error"):
+        return {"locked": False, "already_locked": False, "lock_status": status, "lock_error": status["lock_error"]}
+    config_id = _required("ZOHO_SO_LOCK_CONFIGURATION_ID")
+    if status.get("is_locked"):
+        return {"locked": True, "already_locked": True, "lock_status": status, "lock_error": None}
+    actor = (user or "unknown user").strip() or "unknown user"
+    reason = f"Acknowledged by Supply Chain Department via IntelliFleet ({actor}, {datetime.now(PHT).strftime('%Y-%m-%d %H:%M')} Asia/Manila)"
+    url = f"{_base_url()}/lock/{config_id}"
+    response, error = _safe_request(
+        "POST",
+        f"{url}?entity=salesorder&entity_ids={so_id}&organization_id={_required('ZOHO_ORG_ID')}",
+        data={"JSONString": json.dumps({"reason": reason}, separators=(",", ":"), ensure_ascii=False)},
+    )
+    if error:
+        return {"locked": False, "already_locked": False, "lock_status": status, "lock_error": error}
+    payload = _payload(response)
+    if _scope_error(response.status_code, payload):
+        return {"locked": False, "already_locked": False, "lock_status": status, "lock_error": "lock_credential_lacks_scope", "message": payload.get("message")}
+    post_ok = 200 <= response.status_code < 300 and str(payload.get("code", 0)) == "0"
+    already = _already_locked(payload)
+    if not post_ok and not already:
+        return {"locked": False, "already_locked": False, "lock_status": status, "lock_error": payload.get("message") or f"HTTP {response.status_code}", "zoho_code": payload.get("code")}
+    verified = get_lock_status(so_id)
+    if verified.get("is_locked") and str(verified.get("config_id") or "") == config_id:
+        return {"locked": True, "already_locked": bool(already), "lock_status": verified, "lock_error": None}
+    return {"locked": False, "already_locked": bool(already), "lock_status": verified, "lock_error": verified.get("lock_error") or "lock_verify_failed", "zoho_code": payload.get("code"), "message": payload.get("message")}

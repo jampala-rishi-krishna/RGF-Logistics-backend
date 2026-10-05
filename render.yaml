@@ -38,6 +38,16 @@ services:
         sync: false
       - key: ZOHO_ACKNOWLEDGED_CUSTOMVIEW_ID
         sync: false
+      - key: ZOHO_LOCK_CLIENT_ID
+        sync: false
+      - key: ZOHO_LOCK_CLIENT_SECRET
+        sync: false
+      - key: ZOHO_LOCK_REFRESH_TOKEN
+        sync: false
+      - key: ZOHO_SO_LOCK_CONFIGURATION_ID
+        sync: false
+      - key: ZOHO_SO_LOCK_API_BASE
+        value: https://www.zohoapis.com/inventory/v1
       - key: CARTRACK_USERNAME
         sync: false
       - key: CARTRACK_API_KEY

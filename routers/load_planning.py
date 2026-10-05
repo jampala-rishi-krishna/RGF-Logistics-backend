@@ -15,7 +15,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from auth.dependencies import require_role
+from auth.dependencies import CurrentUser, require_role
 from database import get_db
 from models.inventory import SalesOrderCache
 from models.sales_order_history import SalesOrderHistory
@@ -30,6 +30,7 @@ from services.zoho_client import (
     fetch_sales_orders_by_customview,
     remove_acknowledge_sales_order,
 )
+from services.zoho_so_lock import lock_salesorder, lock_status_from_record
 from services.inventory_exports import confirmed_item_ids, flatten_confirmed_order, flatten_order, make_excel, make_pdf
 from services.openai_client import generate_sales_order_email_draft
 from services.item_weight import calculate_line_weight_kg
@@ -139,6 +140,7 @@ def _summary(row, db: Session | None = None, *, allow_fetch: bool = True) -> dic
     result["shipping_city"] = _shipping_city(row)
     result["shipping_address"] = address
     raw_notes = {} if is_persisted else (row.raw_json or {})
+    result["zoho_lock"] = lock_status_from_record(raw_notes)
     notes = raw_notes.get("notes") or raw_notes.get("note") or raw_notes.get("customer_notes")
     result["notes"] = str(notes).strip() if notes is not None and str(notes).strip() else None
     if is_persisted:
@@ -544,8 +546,34 @@ def refresh_sales_orders(
     return {"sync_started": True, "synced_count": 0, "synced_at": datetime.now(timezone.utc).isoformat()}
 
 
+def _lock_result_payload(salesorder_id: str, result: dict, *, so_number: str | None = None) -> dict:
+    payload = {
+        "so_id": salesorder_id,
+        "so_number": so_number,
+        "locked": bool(result.get("locked")),
+        "already_locked": bool(result.get("already_locked")),
+        "lock_status": result.get("lock_status"),
+        "lock_error": result.get("lock_error"),
+    }
+    if result.get("message"):
+        payload["lock_message"] = result.get("message")
+    return payload
+
+
+def _lock_after_acknowledge(salesorder_id: str, so_number: str | None, user: CurrentUser | None) -> dict:
+    try:
+        result = lock_salesorder(salesorder_id, user=(user.full_name if user else None))
+    except Exception as exc:  # the acknowledge already succeeded and must be kept
+        logger.error("[ZOHO_SO_LOCK] unexpected lock error so_number=%s type=%s", so_number or salesorder_id, type(exc).__name__)
+        result = {"locked": False, "lock_error": "lock_unexpected_error"}
+    payload = _lock_result_payload(salesorder_id, result, so_number=so_number)
+    if not payload["locked"]:
+        logger.error("[ZOHO_SO_LOCK] acknowledge succeeded but lock failed so_number=%s error=%s", so_number or salesorder_id, payload.get("lock_error"))
+    return payload
+
+
 @router.post("/inventory/sales-orders/{salesorder_id}/acknowledge")
-def acknowledge_sales_order_route(salesorder_id: str):
+def acknowledge_sales_order_route(salesorder_id: str, current_user: CurrentUser = Depends(require_role("admin", "dispatcher", "warehouse"))):
     cached = live_sales_order_cache.find_cached(salesorder_id) or live_sales_order_cache.ensure_zoho_data(salesorder_id)
     if cached is None:
         raise HTTPException(404, "Sales order was not found.")
@@ -553,16 +581,26 @@ def acknowledge_sales_order_route(salesorder_id: str):
     if current_status in {"void", "cancelled", "canceled"}:
         raise HTTPException(409, "This sales order is locked and cannot be acknowledged.")
     if _is_acknowledged(cached):
-        return {"acknowledged": True, "already_acknowledged": True}
+        lock_payload = _lock_after_acknowledge(salesorder_id, cached.salesorder_number, current_user)
+        return {"acknowledged": True, "already_acknowledged": True, **lock_payload}  # retry path: no new acknowledge
     try:
         result = acknowledge_sales_order(salesorder_id)
         # Reflect the change on every cached copy instead of re-pulling and re-hydrating the
         # whole window (that re-pull is what made acknowledging take over a minute).
         live_sales_order_cache.mark_acknowledged(salesorder_id, True)
         _set_acknowledged(salesorder_id, True)
-        return {"acknowledged": True, **result}
+        lock_payload = _lock_after_acknowledge(salesorder_id, cached.salesorder_number, current_user)
+        return {**result, "acknowledged": True, **lock_payload}
     except ZohoError as exc:
         raise HTTPException(502, str(exc)) from exc
+
+
+@router.post("/salesorders/{salesorder_id}/lock")
+def lock_sales_order_route(salesorder_id: str, current_user: CurrentUser = Depends(require_role("admin", "dispatcher", "warehouse"))):
+    """Retry the Zoho lock for ONE already-acknowledged sales order."""
+    cached = live_sales_order_cache.find_cached(salesorder_id)  # cache only: no extra Zoho call
+    payload = _lock_after_acknowledge(salesorder_id, getattr(cached, "salesorder_number", None), current_user)
+    return payload
 
 
 @router.post("/inventory/sales-orders/{salesorder_id}/remove-acknowledge")
@@ -592,20 +630,25 @@ def acknowledge_filtered_sales_orders(
     status: str | None = Query(None),
     search: str | None = Query(None),
     db: Session = Depends(get_db),
+    current_user: CurrentUser = Depends(require_role("admin", "dispatcher", "warehouse")),
 ):
     rows = _filtered_rows(db, date_from, date_to, status, search)
     eligible = [row for row in rows if str(row.order_status or "").lower().replace("_", " ") not in {"void", "cancelled", "canceled"} and not _is_acknowledged(row)]
     acknowledged = 0
     failed = 0
+    results = []
     for row in eligible:
         try:
             acknowledge_sales_order(str(row.id))
             live_sales_order_cache.mark_acknowledged(str(row.id), True)
             _set_acknowledged(str(row.id), True)
+            lock_payload = _lock_after_acknowledge(str(row.id), row.salesorder_number, current_user)
+            results.append({"acknowledged": True, **lock_payload})
             acknowledged += 1
         except ZohoError:
             failed += 1
-    return {"filtered_count": len(rows), "eligible_count": len(eligible), "acknowledged_count": acknowledged, "failed_count": failed}
+            results.append({"so_id": str(row.id), "so_number": row.salesorder_number, "acknowledged": False, "locked": False, "lock_error": None, "acknowledge_failed": True})
+    return {"filtered_count": len(rows), "eligible_count": len(eligible), "acknowledged_count": acknowledged, "failed_count": failed, "results": results}
 
 
 @router.get("/inventory/sales-orders/{salesorder_id}")
@@ -619,6 +662,9 @@ def get_sales_order(salesorder_id: str):
         detail = fetch_sales_order_detail(salesorder_id)
         live_sales_order_cache.publish_zoho_data(salesorder_id, detail, epoch)
         record = detail.get("salesorder") or detail
+        # Lock state comes from the detail record just fetched (lock_details): opening the drawer
+        # stays ONE Zoho GET. The lock credential is used only by the lock flows (lock_salesorder).
+        detail["zoho_lock"] = lock_status_from_record(record)
         return {"cached": False, "delivery_status": sales_order_delivery_status(record), **detail}
     except ZohoError as exc:
         if cached and cached.raw_json:

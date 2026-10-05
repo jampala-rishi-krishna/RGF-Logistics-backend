@@ -29,7 +29,7 @@ logging.getLogger("httpcore").setLevel(logging.WARNING)
 logger = logging.getLogger("main")
 
 from routers import admin, agent, alerts, assignment, auth, comms, communications, dispatch, fleet, gmail, load_planning, optimization, orders, reports, routes, voice, warehouse, pipeline
-from services import fleet_static_cache, gmail_sender, staff_directory_cache, live_sales_order_cache
+from services import fleet_static_cache, gmail_sender, staff_directory_cache, live_sales_order_cache, zoho_so_lock
 from services.cartrack_poller import poll_cartrack_and_update, report_unmatched_roster_on_startup
 from services.ws_manager import manager
 from auth.security import hash_password, verify_password
@@ -121,6 +121,7 @@ async def lifespan(app: FastAPI):
     scheduler.start()
     threading.Thread(target=live_sales_order_cache.prewarm_default_windows, daemon=True, name="prewarm-windows").start()
     gmail_sender.log_identity_config_at_startup()
+    zoho_so_lock.log_configuration_warning()
     # Inbound Logistics email agent (replaces the n8n agent). OFF unless LOGISTICS_AGENT_ENABLED=true,
     # so it never answers alongside the n8n workflow before cutover.
     from services import logistics_email_agent
@@ -225,6 +226,7 @@ def health():
         "cartrack_poller_active": bool(CARTRACK_CONFIGURED and manager.connection_count > 0),
         "db_egress": database.db_egress_stats,
         "gmail_identity": gmail_sender.identity_health(),
+        "so_lock": zoho_so_lock.health_status(),
     }
 
 @app.exception_handler(SQLAlchemyError)
