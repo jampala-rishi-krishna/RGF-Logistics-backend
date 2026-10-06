@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -14,6 +15,7 @@ from services.audit import write_audit_log
 from services.openai_client import create_response, extract_text, repair_or_strip_invalid_mermaid
 
 router = APIRouter(prefix="/agent", tags=["agent"])
+logger = logging.getLogger("agent")
 
 MAX_TOOL_LOOP_ITERATIONS = 5
 
@@ -46,6 +48,18 @@ def _load_conversation_input(conversation_id: int) -> list[dict]:
     return [{"role": "user" if m["direction"] == "inbound" else "assistant", "content": m["content_ref"]} for m in messages]
 
 
+def _function_call_input_item(call) -> dict:
+    # Do not pass the SDK model_dump() output back to Responses. It includes Python-safe
+    # field names such as async_, which the OpenAI API rejects. The API only needs these
+    # four fields to connect a function_call_output to the prior tool call.
+    return {
+        "type": "function_call",
+        "call_id": call.call_id,
+        "name": call.name,
+        "arguments": call.arguments or "{}",
+    }
+
+
 class ChatBody(BaseModel):
     message: str
     conversationId: int | None = None
@@ -66,40 +80,46 @@ async def chat(
 
     current_input = _load_conversation_input(conversation_id)
 
-    for _ in range(MAX_TOOL_LOOP_ITERATIONS):
-        response = await create_response(current_input)
-        function_calls = [item for item in (response.output or []) if getattr(item, "type", None) == "function_call"]
+    try:
+        for _ in range(MAX_TOOL_LOOP_ITERATIONS):
+            response = await create_response(current_input)
+            function_calls = [item for item in (response.output or []) if getattr(item, "type", None) == "function_call"]
 
-        if not function_calls:
-            reply_text = extract_text(response) or "(no response)"
-            reply_text = await repair_or_strip_invalid_mermaid(current_input, reply_text)
-            _insert_message(conversation_id, "outbound", reply_text)
-            return {"reply": reply_text, "conversationId": conversation_id}
+            if not function_calls:
+                reply_text = extract_text(response) or "(no response)"
+                reply_text = await repair_or_strip_invalid_mermaid(current_input, reply_text)
+                _insert_message(conversation_id, "outbound", reply_text)
+                return {"reply": reply_text, "conversationId": conversation_id}
 
-        output_items = []
-        for call in function_calls:
-            try:
-                args = json.loads(call.arguments) if call.arguments else {}
-            except json.JSONDecodeError:
-                args = {}
+            output_items = []
+            for call in function_calls:
+                try:
+                    args = json.loads(call.arguments) if call.arguments else {}
+                except json.JSONDecodeError:
+                    args = {}
 
-            if call.name in ACTION_TOOLS:
-                # Human-approval gate: an ACTION tool's call is never auto-executed here. Stop
-                # the loop entirely and hand it back for explicit confirmation.
-                return {
-                    "reply": None,
-                    "conversationId": conversation_id,
-                    "pendingAction": {"tool": call.name, "args": args, "callId": call.call_id},
-                }
+                if call.name in ACTION_TOOLS:
+                    # Human-approval gate: an ACTION tool's call is never auto-executed here. Stop
+                    # the loop entirely and hand it back for explicit confirmation.
+                    return {
+                        "reply": None,
+                        "conversationId": conversation_id,
+                        "pendingAction": {"tool": call.name, "args": args, "callId": call.call_id},
+                    }
 
-            tool_fn = READ_TOOLS.get(call.name)
-            try:
-                result = await tool_fn(args, credentials.credentials) if tool_fn else {"error": f"Unknown tool: {call.name}"}
-            except Exception as e:
-                result = {"error": str(e) or "Tool call failed"}
-            output_items.append({"type": "function_call_output", "call_id": call.call_id, "output": json.dumps(result)})
+                tool_fn = READ_TOOLS.get(call.name)
+                try:
+                    result = await tool_fn(args, credentials.credentials) if tool_fn else {"error": f"Unknown tool: {call.name}"}
+                except Exception as e:
+                    result = {"error": str(e) or "Tool call failed"}
+                output_items.append({"type": "function_call_output", "call_id": call.call_id, "output": json.dumps(result)})
 
-        current_input = current_input + [c.model_dump() for c in function_calls] + output_items
+            current_input = current_input + [_function_call_input_item(c) for c in function_calls] + output_items
+    except Exception:
+        logger.exception("Agent chat failed")
+        fallback = "I couldn't reach the logistics assistant engine just now. Please try again in a moment."
+        _insert_message(conversation_id, "outbound", fallback)
+        return {"reply": fallback, "conversationId": conversation_id}
 
     fallback = "I wasn't able to finish that within the allowed number of steps - please try a more specific question."
     _insert_message(conversation_id, "outbound", fallback)
