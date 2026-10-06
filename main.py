@@ -93,6 +93,8 @@ async def lifespan(app: FastAPI):
     except Exception as exc:
         logger.error("[SCHEMA] Unable to verify migration state before cache queries: %s", exc)
         raise SystemExit(2) from exc
+    from services import agent_tools
+    agent_tools.log_internal_api_config()
     if not schema_state["ok"]:
         logger.error("[SCHEMA] Startup stopped before cache queries; run 'python -m alembic upgrade head'.")
         raise SystemExit(2)

@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import logging
 import os
 import re
 from datetime import datetime
+from urllib.parse import urlparse
 from zoneinfo import ZoneInfo
 
 import httpx
@@ -16,11 +18,44 @@ from services.google_maps import OrsError, fetch_route_matrix
 # inherit whatever auth gate the target endpoint already enforces (e.g. alerts' dispatcher/admin
 # check on acknowledge) without duplicating it here.
 
-def _internal_api_base_url() -> str:
-    configured = (os.environ.get("INTERNAL_API_BASE_URL") or "").strip()
-    if configured:
-        return configured.rstrip("/")
+logger = logging.getLogger("agent")
+
+_LOOPBACK_HOSTS = {"127.0.0.1", "localhost", "::1"}
+_warned_stale_base_url = False
+
+
+def _default_internal_api_base_url() -> str:
     return f"http://127.0.0.1:{os.environ.get('PORT') or '8003'}"
+
+
+def _internal_api_base_url() -> str:
+    """Loopback to this same app. Defaults to http://127.0.0.1:$PORT.
+
+    INTERNAL_API_BASE_URL is an optional override, but a loopback value whose port differs from
+    $PORT is ignored: it is a leftover from a local .env (e.g. :8003) and can never reach the
+    server on Render, which listens on $PORT. That mistake silently broke every Martin tool.
+    """
+    global _warned_stale_base_url
+    default = _default_internal_api_base_url()
+    configured = (os.environ.get("INTERNAL_API_BASE_URL") or "").strip()
+    if not configured:
+        return default
+    parsed = urlparse(configured)
+    port = os.environ.get("PORT")
+    if parsed.hostname in _LOOPBACK_HOSTS and port and str(parsed.port or 80) != port:
+        if not _warned_stale_base_url:
+            _warned_stale_base_url = True
+            logger.warning(
+                "[AGENT] Ignoring INTERNAL_API_BASE_URL=%s: loopback port differs from $PORT=%s; using %s",
+                configured, port, default,
+            )
+        return default
+    return configured.rstrip("/")
+
+
+def log_internal_api_config() -> None:
+    """Call once at startup so a bad INTERNAL_API_BASE_URL is warned about before any chat."""
+    logger.info("[AGENT] Tool base URL: %s", _internal_api_base_url())
 
 ROWID_PATTERN = re.compile(r"^\d{1,20}$")
 OPS_TZ = ZoneInfo("Asia/Manila")

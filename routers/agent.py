@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 import logging
+import time
+import uuid
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -12,6 +14,7 @@ from auth.dependencies import CurrentUser, bearer_scheme, get_current_user
 from services import memory_tables
 from services.agent_tools import ACTION_TOOLS, READ_TOOLS, InternalRequestError
 from services.audit import write_audit_log
+from services.mermaid_safety import validate_mermaid_blocks
 from services.openai_client import create_response, extract_text, repair_or_strip_invalid_mermaid
 
 router = APIRouter(prefix="/agent", tags=["agent"])
@@ -80,6 +83,18 @@ async def chat(
 
     current_input = _load_conversation_input(conversation_id)
 
+    request_id = uuid.uuid4().hex[:8]
+    started = time.perf_counter()
+    tool_log: list[str] = []
+
+    def _log_chat(outcome: str, mermaid: str = "n/a") -> None:
+        # Never logs message content or tokens - ids, tool names, outcomes and timings only.
+        logger.info(
+            "[AGENT] request_id=%s user_id=%s outcome=%s tools=[%s] mermaid=%s total_ms=%d",
+            request_id, current_user.id, outcome, ", ".join(tool_log) or "none", mermaid,
+            (time.perf_counter() - started) * 1000,
+        )
+
     try:
         for _ in range(MAX_TOOL_LOOP_ITERATIONS):
             response = await create_response(current_input)
@@ -87,8 +102,17 @@ async def chat(
 
             if not function_calls:
                 reply_text = extract_text(response) or "(no response)"
+                checks_before = validate_mermaid_blocks(reply_text)
                 reply_text = await repair_or_strip_invalid_mermaid(current_input, reply_text)
+                if not checks_before:
+                    mermaid = "none"
+                elif all(c.valid for c in checks_before):
+                    mermaid = "valid"
+                else:
+                    checks_after = validate_mermaid_blocks(reply_text)
+                    mermaid = "invalid->repaired" if checks_after and all(c.valid for c in checks_after) else "invalid->stripped"
                 _insert_message(conversation_id, "outbound", reply_text)
+                _log_chat("reply", mermaid)
                 return {"reply": reply_text, "conversationId": conversation_id}
 
             output_items = []
@@ -101,6 +125,7 @@ async def chat(
                 if call.name in ACTION_TOOLS:
                     # Human-approval gate: an ACTION tool's call is never auto-executed here. Stop
                     # the loop entirely and hand it back for explicit confirmation.
+                    _log_chat("pending_action")
                     return {
                         "reply": None,
                         "conversationId": conversation_id,
@@ -108,19 +133,29 @@ async def chat(
                     }
 
                 tool_fn = READ_TOOLS.get(call.name)
+                tool_started = time.perf_counter()
+                tool_status = "ok"
                 try:
                     result = await tool_fn(args, credentials.credentials) if tool_fn else {"error": f"Unknown tool: {call.name}"}
+                    if not tool_fn:
+                        tool_status = "error"
                 except Exception as e:
-                    result = {"error": str(e) or "Tool call failed"}
+                    logger.exception("[AGENT_TOOL] %s failed", call.name)
+                    tool_status = f"error:{type(e).__name__}"
+                    detail = str(e)[:200]
+                    result = {"error": f"{call.name} tool failed: {type(e).__name__}" + (f": {detail}" if detail else "")}
+                tool_log.append(f"{call.name}={tool_status}/{(time.perf_counter() - tool_started) * 1000:.0f}ms")
                 output_items.append({"type": "function_call_output", "call_id": call.call_id, "output": json.dumps(result)})
 
             current_input = current_input + [_function_call_input_item(c) for c in function_calls] + output_items
     except Exception:
         logger.exception("Agent chat failed")
+        _log_chat("exception")
         fallback = "I couldn't reach the logistics assistant engine just now. Please try again in a moment."
         _insert_message(conversation_id, "outbound", fallback)
         return {"reply": fallback, "conversationId": conversation_id}
 
+    _log_chat("max_steps")
     fallback = "I wasn't able to finish that within the allowed number of steps - please try a more specific question."
     _insert_message(conversation_id, "outbound", fallback)
     return {"reply": fallback, "conversationId": conversation_id}
