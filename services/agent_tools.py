@@ -16,7 +16,11 @@ from services.google_maps import OrsError, fetch_route_matrix
 # inherit whatever auth gate the target endpoint already enforces (e.g. alerts' dispatcher/admin
 # check on acknowledge) without duplicating it here.
 
-INTERNAL_API_BASE_URL = os.environ.get("INTERNAL_API_BASE_URL", "http://127.0.0.1:8003")
+def _internal_api_base_url() -> str:
+    configured = (os.environ.get("INTERNAL_API_BASE_URL") or "").strip()
+    if configured:
+        return configured.rstrip("/")
+    return f"http://127.0.0.1:{os.environ.get('PORT') or '8003'}"
 
 ROWID_PATTERN = re.compile(r"^\d{1,20}$")
 OPS_TZ = ZoneInfo("Asia/Manila")
@@ -33,7 +37,7 @@ async def internal_request(method: str, path: str, *, query: dict | None = None,
     headers = {"Content-Type": "application/json"}
     if token:
         headers["Authorization"] = f"Bearer {token}"
-    async with httpx.AsyncClient(base_url=INTERNAL_API_BASE_URL, timeout=20.0) as client:
+    async with httpx.AsyncClient(base_url=_internal_api_base_url(), timeout=20.0) as client:
         res = await client.request(method, path, params=query, json=body, headers=headers)
     data = None
     if res.text:
