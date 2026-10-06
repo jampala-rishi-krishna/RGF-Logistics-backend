@@ -11,7 +11,7 @@ from auth.dependencies import CurrentUser, bearer_scheme, get_current_user
 from services import memory_tables
 from services.agent_tools import ACTION_TOOLS, READ_TOOLS, InternalRequestError
 from services.audit import write_audit_log
-from services.openai_client import create_response, extract_text
+from services.openai_client import create_response, extract_text, repair_or_strip_invalid_mermaid
 
 router = APIRouter(prefix="/agent", tags=["agent"])
 
@@ -55,6 +55,7 @@ class ChatBody(BaseModel):
 async def chat(
     body: ChatBody,
     current_user: CurrentUser = Depends(get_current_user),
+    credentials: HTTPAuthorizationCredentials = Depends(bearer_scheme),
 ):
     message = body.message.strip() if body.message else ""
     if not message:
@@ -71,6 +72,7 @@ async def chat(
 
         if not function_calls:
             reply_text = extract_text(response) or "(no response)"
+            reply_text = await repair_or_strip_invalid_mermaid(current_input, reply_text)
             _insert_message(conversation_id, "outbound", reply_text)
             return {"reply": reply_text, "conversationId": conversation_id}
 
@@ -92,7 +94,7 @@ async def chat(
 
             tool_fn = READ_TOOLS.get(call.name)
             try:
-                result = await tool_fn(args) if tool_fn else {"error": f"Unknown tool: {call.name}"}
+                result = await tool_fn(args, credentials.credentials) if tool_fn else {"error": f"Unknown tool: {call.name}"}
             except Exception as e:
                 result = {"error": str(e) or "Tool call failed"}
             output_items.append({"type": "function_call_output", "call_id": call.call_id, "output": json.dumps(result)})

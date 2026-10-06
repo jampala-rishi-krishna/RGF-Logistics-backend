@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import os
 import re
+from datetime import datetime
+from zoneinfo import ZoneInfo
 
 import httpx
 
@@ -17,6 +19,7 @@ from services.google_maps import OrsError, fetch_route_matrix
 INTERNAL_API_BASE_URL = os.environ.get("INTERNAL_API_BASE_URL", "http://127.0.0.1:8003")
 
 ROWID_PATTERN = re.compile(r"^\d{1,20}$")
+OPS_TZ = ZoneInfo("Asia/Manila")
 
 
 class InternalRequestError(Exception):
@@ -47,16 +50,16 @@ async def internal_request(method: str, path: str, *, query: dict | None = None,
 # ---- Read tools ----------------------------------------------------------------------------
 
 
-async def get_vehicle_status(args: dict) -> dict:
+async def get_vehicle_status(args: dict, token: str | None = None) -> dict:
     plate_or_id = args["plateOrId"]
     if ROWID_PATTERN.match(str(plate_or_id)):
         try:
-            return await internal_request("GET", f"/vehicles/{plate_or_id}")
+            return await internal_request("GET", f"/vehicles/{plate_or_id}", token=token)
         except InternalRequestError as e:
             if e.status_code == 404:
                 return {"error": f"No vehicle found with id {plate_or_id}"}
             raise
-    all_vehicles = await internal_request("GET", "/vehicles")
+    all_vehicles = await internal_request("GET", "/vehicles", token=token)
     normalized = re.sub(r"[^A-Z0-9]", "", str(plate_or_id).upper())
     for v in all_vehicles:
         if re.sub(r"[^A-Z0-9]", "", str(v.get("plate_no") or "").upper()) == normalized:
@@ -64,40 +67,100 @@ async def get_vehicle_status(args: dict) -> dict:
     return {"error": f"No vehicle found with plate {plate_or_id}"}
 
 
-async def get_active_alerts(args: dict) -> dict:
+async def get_control_tower_fleet(args: dict, token: str | None = None) -> dict:
+    query = {}
+    if args.get("date"):
+        query["date"] = args["date"]
+    vehicles = await internal_request("GET", "/vehicles", query=query or None, token=token)
+    rows = []
+    for vehicle in vehicles or []:
+        sos = vehicle.get("associated_sos") or []
+        rows.append(
+            {
+                "vehicleId": vehicle.get("id"),
+                "plate": vehicle.get("plate_no"),
+                "status": vehicle.get("status"),
+                "speedKph": vehicle.get("speed_kph"),
+                "fuelPercent": vehicle.get("fuel_pct"),
+                "location": vehicle.get("address") or vehicle.get("zone"),
+                "assignedSoCount": len(sos),
+                "assignedSos": [
+                    {
+                        "soNumber": so.get("soNumber"),
+                        "customer": so.get("clientName"),
+                        "destinationCity": so.get("destinationCity"),
+                        "warehouse": so.get("warehouse"),
+                        "orderedWeightKg": so.get("orderedWeightKg"),
+                        "shippedWeightKg": so.get("shippedWeightKg"),
+                        "deliveryStatus": so.get("deliveryStatus"),
+                    }
+                    for so in sos
+                ],
+            }
+        )
+    assigned = [row for row in rows if row["assignedSoCount"]]
+    return {
+        "date": args.get("date") or "current",
+        "vehicleCount": len(rows),
+        "assignedVehicleCount": len(assigned),
+        "assignedSoCount": sum(row["assignedSoCount"] for row in assigned),
+        "vehicles": rows,
+    }
+
+
+async def list_assigned_sales_orders(args: dict, token: str | None = None) -> dict:
+    query = {
+        "assignment": "assigned",
+        "status": args.get("status") or "All",
+        "page": args.get("page") or 1,
+        "per_page": min(int(args.get("perPage") or 25), 100),
+    }
+    today = datetime.now(OPS_TZ).date().isoformat()
+    query["date_from"] = args.get("dateFrom") or args.get("date") or today
+    query["date_to"] = args.get("dateTo") or args.get("date") or query["date_from"]
+    if args.get("vehicle"):
+        query["vehicle"] = args["vehicle"]
+    if args.get("search"):
+        query["search"] = args["search"]
+    if args.get("deliveryStatus"):
+        query["delivery_status"] = args["deliveryStatus"]
+    return await internal_request("GET", "/api/load-planning/inventory/sales-orders", query=query, token=token)
+
+
+async def get_active_alerts(args: dict, token: str | None = None) -> dict:
     query = {"status": "open"}
     if args.get("severity"):
         query["severity"] = args["severity"]
-    return await internal_request("GET", "/alerts", query=query)
+    return await internal_request("GET", "/alerts", query=query, token=token)
 
 
-async def get_order_status(args: dict) -> dict:
+async def get_order_status(args: dict, token: str | None = None) -> dict:
     order_id = args["orderId"]
     try:
-        return await internal_request("GET", f"/orders/{order_id}")
+        return await internal_request("GET", f"/orders/{order_id}", token=token)
     except InternalRequestError as e:
         if e.status_code == 404:
             return {"error": f"No order found with id {order_id}"}
         raise
 
 
-async def suggest_reroute(args: dict) -> dict:
+async def suggest_reroute(args: dict, token: str | None = None) -> dict:
     """Read-only preview - never calls the persisting POST /routes/optimize, and never applies
     anything (that's why it's a READ tool, not an ACTION tool)."""
     vehicle_id = args["vehicleId"]
     try:
-        vehicle = await internal_request("GET", f"/vehicles/{vehicle_id}")
+        vehicle = await internal_request("GET", f"/vehicles/{vehicle_id}", token=token)
     except InternalRequestError as e:
         if e.status_code == 404:
             return {"error": f"No vehicle found with id {vehicle_id}"}
         raise
 
-    manifests = await internal_request("GET", "/manifests")
+    manifests = await internal_request("GET", "/manifests", token=token)
     manifest = next((m for m in manifests if str(m.get("vehicle_id")) == str(vehicle_id)), None)
     if manifest is None:
         return {"message": f"Vehicle {vehicle_id} has no active load manifest / assigned route to suggest a reroute for."}
 
-    stops = await internal_request("GET", f"/routes/{manifest['route_id']}/stops")
+    stops = await internal_request("GET", f"/routes/{manifest['route_id']}/stops", token=token)
     if not stops:
         return {"message": f"Route {manifest['route_id']} has no stops recorded yet."}
     if vehicle.get("current_lat") is None or vehicle.get("current_lng") is None:
@@ -174,6 +237,8 @@ async def acknowledge_alert(args: dict, token: str | None = None) -> dict:
 
 READ_TOOLS = {
     "get_vehicle_status": get_vehicle_status,
+    "get_control_tower_fleet": get_control_tower_fleet,
+    "list_assigned_sales_orders": list_assigned_sales_orders,
     "get_active_alerts": get_active_alerts,
     "get_order_status": get_order_status,
     "suggest_reroute": suggest_reroute,
@@ -193,6 +258,38 @@ TOOL_DEFINITIONS = [
             "type": "object",
             "properties": {"plateOrId": {"type": "string", "description": 'Plate number (e.g. "DCD8953") or numeric id'}},
             "required": ["plateOrId"],
+            "additionalProperties": False,
+        },
+    },
+    {
+        "type": "function",
+        "name": "get_control_tower_fleet",
+        "description": "Read the Control Tower/Fleet vehicle list, including associated assigned Sales Orders for each truck.",
+        "parameters": {
+            "type": "object",
+            "properties": {"date": {"type": "string", "description": "Optional fleet date in YYYY-MM-DD format. Omit for current live Control Tower view."}},
+            "required": [],
+            "additionalProperties": False,
+        },
+    },
+    {
+        "type": "function",
+        "name": "list_assigned_sales_orders",
+        "description": "List assigned Sales Orders from the Orders/Confirmed SO data, optionally filtered by date, truck, search text, or delivery status.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "date": {"type": "string", "description": "Single date in YYYY-MM-DD format."},
+                "dateFrom": {"type": "string", "description": "Start date in YYYY-MM-DD format."},
+                "dateTo": {"type": "string", "description": "End date in YYYY-MM-DD format."},
+                "vehicle": {"type": "string", "description": "Truck plate or vehicle id filter."},
+                "search": {"type": "string", "description": "SO number, customer, city, or other search text."},
+                "status": {"type": "string", "description": "Zoho order status filter, or All."},
+                "deliveryStatus": {"type": "string", "description": "Delivery status filter, such as Pending, Partially delivered, or Delivered."},
+                "page": {"type": "integer", "minimum": 1},
+                "perPage": {"type": "integer", "minimum": 1, "maximum": 100},
+            },
+            "required": [],
             "additionalProperties": False,
         },
     },
