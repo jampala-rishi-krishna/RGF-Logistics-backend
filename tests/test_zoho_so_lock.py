@@ -47,6 +47,7 @@ class ZohoSoLockServiceTests(unittest.TestCase):
     def setUp(self):
         zoho_so_lock.reset_token_cache()
         env = {
+            "ZOHO_SO_LOCK_MODE": "api",
             "ZOHO_ORG_ID": "org-test",
             "ZOHO_SO_LOCK_API_BASE": "https://www.zohoapis.com/inventory/v1",
             "ZOHO_SO_LOCK_CONFIGURATION_ID": "4489499000111461258",
@@ -247,6 +248,7 @@ from fastapi import HTTPException
 from services import zoho_rate_limiter
 
 LOCK_ENV = {
+    "ZOHO_SO_LOCK_MODE": "api",
     "ZOHO_ORG_ID": "org-test",
     "ZOHO_SO_LOCK_API_BASE": "https://www.zohoapis.com/inventory/v1",
     "ZOHO_SO_LOCK_CONFIGURATION_ID": "4489499000111461258",
@@ -446,7 +448,7 @@ class LockRequestShapeTests(unittest.TestCase):
 
     def test_health_and_configuration_flags(self):
         self.assertEqual(zoho_so_lock.health_status(), "ok")
-        for name in LOCK_ENV:
+        for name in (n for n in LOCK_ENV if n != "ZOHO_SO_LOCK_MODE"):  # a blank mode just means the api fallback
             with patch.dict(os.environ, {name: ""}, clear=False):
                 self.assertEqual(zoho_so_lock.health_status(), "not_configured", name)
                 self.assertFalse(zoho_so_lock.configured())
@@ -640,6 +642,106 @@ class ListAndDetailDoNotCallZohoLockTests(unittest.TestCase):
         with patch.object(load_planning, "fetch_sales_order_detail", return_value={"salesorder": {"salesorder_id": "1", "status": "confirmed"}}),                 patch.object(load_planning.live_sales_order_cache, "publish_zoho_data"),                 patch.object(load_planning.live_sales_order_cache, "find_cached", return_value=None),                 patch.object(load_planning, "sales_order_delivery_status", return_value={}):
             body = load_planning.get_sales_order("1")
         self.assertFalse(body["zoho_lock"]["is_locked"])
+
+WEBHOOK_URL = "https://hooks.example.test/inventory/v1/settings/incomingwebhooks/iw_lock/execute?auth_type=apikey&encapiKey=SECRET-KEY-VALUE"
+
+
+class WebhookModeTests(unittest.TestCase):
+    def setUp(self):
+        lock_case_setup(self)
+        env = patch.dict(os.environ, {"ZOHO_SO_LOCK_MODE": "webhook", "ZOHO_SO_LOCK_WEBHOOK_URL": WEBHOOK_URL}, clear=False)
+        env.start()
+        self.addCleanup(env.stop)
+        sleeps = patch.object(zoho_so_lock.time, "sleep")
+        self.sleep = sleeps.start()
+        self.addCleanup(sleeps.stop)
+
+    def lock(self, recorder, user="Pau"):
+        with patch.object(zoho_so_lock, "get_access_token", return_value="LOCK-TOKEN"), patch.object(zoho_so_lock.httpx, "request", recorder):
+            return zoho_so_lock.lock_salesorder("4489499000267764126", user)
+
+    def test_posts_only_the_salesorder_id_json_to_the_webhook_url_without_auth_header(self):
+        rec = Recorder(response(body=so_payload(False)), response(body={"code": 0, "message": "success"}), response(body=so_payload(True)))
+        result = self.lock(rec)
+        self.assertTrue(result["locked"])
+        self.assertEqual(rec.methods, ["GET", "POST", "GET"])
+        post = rec.calls[1]
+        self.assertEqual(post["url"], WEBHOOK_URL)
+        self.assertEqual(post["json"], {"salesorder_id": "4489499000267764126"})
+        self.assertIsNone(post["data"])
+        self.assertIsNone(post["headers"])  # the key travels in the URL, not in a header
+        self.assertEqual((result["lock_http_status"], result["lock_zoho_code"]), (200, 0))
+
+    def test_verifies_through_lock_details_polling_up_to_three_times_1_5s_apart(self):
+        rec = Recorder(response(body=so_payload(False)), response(body={"code": 0}), response(body=so_payload(False)), response(body=so_payload(True)))
+        result = self.lock(rec)
+        self.assertTrue(result["locked"])
+        self.assertEqual(rec.methods, ["GET", "POST", "GET", "GET"])
+        self.assertEqual([c.args[0] for c in self.sleep.call_args_list], [1.5, 1.5])
+
+    def test_gives_up_after_three_verify_polls(self):
+        rec = Recorder(response(body=so_payload(False)), response(body={"code": 0}), *[response(body=so_payload(False)) for _ in range(3)])
+        result = self.lock(rec)
+        self.assertFalse(result["locked"])
+        self.assertEqual(result["lock_error"], "lock_verify_failed")
+        self.assertEqual(rec.methods, ["GET", "POST", "GET", "GET", "GET"])
+        self.assertEqual(self.sleep.call_count, 3)
+
+    def test_already_locked_makes_no_webhook_call(self):
+        rec = Recorder(response(body=so_payload(True)))
+        result = self.lock(rec)
+        self.assertEqual((result["locked"], result["already_locked"]), (True, True))
+        self.assertEqual(rec.methods, ["GET"])
+
+    def test_http_error_from_the_webhook_is_reported_with_status_and_message_and_skips_verify(self):
+        rec = Recorder(response(body=so_payload(False)), response(status=400, body={"code": 4, "message": "Invalid salesorder"}))
+        result = self.lock(rec)
+        self.assertFalse(result["locked"])
+        self.assertEqual((result["lock_error"], result["lock_http_status"], result["lock_zoho_code"]), ("Invalid salesorder", 400, 4))
+        self.assertEqual(rec.methods, ["GET", "POST"])
+        self.sleep.assert_not_called()
+
+    def test_connection_failure_is_a_lock_error_and_logs_no_url(self):
+        rec = Recorder(response(body=so_payload(False)), httpx.ConnectError("boom " + WEBHOOK_URL))
+        with self.assertLogs("zoho", level="ERROR") as logs:
+            result = self.lock(rec)
+        self.assertEqual((result["locked"], result["lock_error"]), (False, "lock_connection_error"))
+        text = "\n".join(logs.output)
+        self.assertNotIn("SECRET-KEY-VALUE", text)
+        self.assertNotIn("hooks.example.test", text)
+
+    def test_url_and_key_never_appear_in_logs_or_results(self):
+        rec = Recorder(response(body=so_payload(False)), response(body={"code": 0}), response(body=so_payload(True)))
+        with self.assertLogs(level=logging.DEBUG) as logs:
+            logging.getLogger("zoho").info("start")
+            result = self.lock(rec)
+        blob = "\n".join(logs.output) + json.dumps(result, default=str)
+        self.assertNotIn("SECRET-KEY-VALUE", blob)
+        self.assertNotIn("hooks.example.test", blob)
+
+    def test_mode_defaults_to_api_and_webhook_needs_its_url(self):
+        with patch.dict(os.environ, {"ZOHO_SO_LOCK_MODE": ""}, clear=False):
+            self.assertEqual(zoho_so_lock.mode(), "api")
+        with patch.dict(os.environ, {"ZOHO_SO_LOCK_MODE": "bogus"}, clear=False):
+            self.assertEqual(zoho_so_lock.mode(), "api")
+        with patch.dict(os.environ, {"ZOHO_SO_LOCK_WEBHOOK_URL": ""}, clear=False):
+            self.assertFalse(zoho_so_lock.configured())
+            self.assertEqual(self.lock(Recorder())["lock_error"], "not_configured")
+
+    def test_webhook_mode_does_not_need_the_lock_configuration_id(self):
+        with patch.dict(os.environ, {"ZOHO_SO_LOCK_CONFIGURATION_ID": ""}, clear=False):
+            self.assertTrue(zoho_so_lock.configured())
+        with patch.dict(os.environ, {"ZOHO_SO_LOCK_MODE": "api", "ZOHO_SO_LOCK_CONFIGURATION_ID": ""}, clear=False):
+            self.assertFalse(zoho_so_lock.configured())  # the api fallback still requires it
+
+    def test_api_mode_is_kept_as_the_fallback(self):
+        with patch.dict(os.environ, {"ZOHO_SO_LOCK_MODE": "api"}, clear=False):
+            rec = Recorder(response(body=so_payload(False)), response(body={"code": 0}), response(body=so_payload(True)))
+            result = self.lock(rec)
+        self.assertTrue(result["locked"])
+        self.assertTrue(rec.calls[1]["url"].startswith("https://www.zohoapis.com/inventory/v1/lock/"))
+        self.assertNotIn(WEBHOOK_URL, [c["url"] for c in rec.calls])
+
 
 if __name__ == "__main__":
     unittest.main()

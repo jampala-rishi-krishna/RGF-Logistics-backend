@@ -19,18 +19,17 @@ _access_token_expires_at = 0.0
 _token_lock = threading.Lock()
 
 
+def mode() -> str:
+    """"webhook": lock through the IT-provided Zoho incoming webhook. Anything else: the direct lock API
+    ("api", the fallback)."""
+    return "webhook" if os.environ.get("ZOHO_SO_LOCK_MODE", "").strip().lower() == "webhook" else "api"
+
+
 def configured() -> bool:
-    return all(
-        os.environ.get(name, "").strip()
-        for name in (
-            "ZOHO_LOCK_CLIENT_ID",
-            "ZOHO_LOCK_CLIENT_SECRET",
-            "ZOHO_LOCK_REFRESH_TOKEN",
-            "ZOHO_SO_LOCK_CONFIGURATION_ID",
-            "ZOHO_SO_LOCK_API_BASE",
-            "ZOHO_ORG_ID",
-        )
-    )
+    # The lock credential is still needed in both modes: webhook mode verifies the result by reading the order.
+    names = ["ZOHO_LOCK_CLIENT_ID", "ZOHO_LOCK_CLIENT_SECRET", "ZOHO_LOCK_REFRESH_TOKEN", "ZOHO_SO_LOCK_API_BASE", "ZOHO_ORG_ID"]
+    names.append("ZOHO_SO_LOCK_WEBHOOK_URL" if mode() == "webhook" else "ZOHO_SO_LOCK_CONFIGURATION_ID")
+    return all(os.environ.get(name, "").strip() for name in names)
 
 
 def health_status() -> str:
@@ -232,6 +231,41 @@ def get_lock_status(so_id: str) -> dict:
     return lock_status_from_record(payload.get("salesorder") if isinstance(payload.get("salesorder"), dict) else payload)
 
 
+# Webhook mode: after the POST, read the order back up to 3 times, 1.5s apart, until lock_details says locked.
+WEBHOOK_VERIFY_ATTEMPTS = 3
+WEBHOOK_VERIFY_DELAY_S = 1.5
+
+
+def _lock_via_webhook(so_id: str, status: dict) -> dict:
+    """POST {"salesorder_id": id} to the incoming webhook (the API key lives in the URL, which is never logged),
+    then verify through lock_details. Never raises."""
+    try:
+        url = _required("ZOHO_SO_LOCK_WEBHOOK_URL")
+        limiter = zoho_rate_limiter.limiter_for(_required("ZOHO_ORG_ID"))
+        with limiter.admit():
+            response = httpx.request("POST", url, json={"salesorder_id": so_id}, timeout=REQUEST_TIMEOUT)
+    except ZohoError as exc:
+        return {"locked": False, "already_locked": False, "lock_status": status, "lock_error": _connection_error(exc)}
+    except httpx.HTTPError as exc:
+        # Log only the exception type: httpx messages can contain the request URL, and the URL carries the key.
+        logger.error("[ZOHO_SO_LOCK] webhook request failed: %s", type(exc).__name__)
+        return {"locked": False, "already_locked": False, "lock_status": status, "lock_error": "lock_connection_error"}
+    payload = _payload(response)
+    details = _post_details(response, payload)
+    message = payload.get("message") if isinstance(payload.get("message"), str) else None
+    logger.info("[ZOHO_SO_LOCK] webhook status=%s", response.status_code)
+    code_ok = "code" not in payload or str(payload.get("code")) in {"0", "success"}
+    if not (200 <= response.status_code < 300 and code_ok):
+        return {"locked": False, "already_locked": False, "lock_status": status, "lock_error": message or f"HTTP {response.status_code}", "message": message, **details}
+    verified: dict = status
+    for attempt in range(WEBHOOK_VERIFY_ATTEMPTS):
+        time.sleep(WEBHOOK_VERIFY_DELAY_S)
+        verified = get_lock_status(so_id)
+        if verified.get("is_locked"):
+            return {"locked": True, "already_locked": False, "lock_status": verified, "lock_error": None, "message": message, **details}
+    return {"locked": False, "already_locked": False, "lock_status": verified, "lock_error": verified.get("lock_error") or "lock_verify_failed", "message": message, **details}
+
+
 def lock_salesorder(so_id: str, user: str | None = None) -> dict:
     """Lock exactly ONE sales order. Never raises: every failure is returned as locked=False + lock_error."""
     if not configured():
@@ -242,9 +276,11 @@ def lock_salesorder(so_id: str, user: str | None = None) -> dict:
     status = get_lock_status(so_id)
     if status.get("lock_error"):
         return {"locked": False, "already_locked": False, "lock_status": status, "lock_error": status["lock_error"]}
-    config_id = _required("ZOHO_SO_LOCK_CONFIGURATION_ID")
     if status.get("is_locked"):
         return {"locked": True, "already_locked": True, "lock_status": status, "lock_error": None}
+    if mode() == "webhook":
+        return _lock_via_webhook(so_id, status)
+    config_id = _required("ZOHO_SO_LOCK_CONFIGURATION_ID")
     reason = build_reason(user)
     url = f"{_base_url()}/lock/{config_id}"
     response, error = _safe_request(

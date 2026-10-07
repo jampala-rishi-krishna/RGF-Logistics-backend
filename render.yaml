@@ -48,6 +48,10 @@ services:
         sync: false
       - key: ZOHO_SO_LOCK_API_BASE
         value: https://www.zohoapis.com/inventory/v1
+      - key: ZOHO_SO_LOCK_MODE
+        value: webhook
+      - key: ZOHO_SO_LOCK_WEBHOOK_URL
+        sync: false
       - key: CARTRACK_USERNAME
         sync: false
       - key: CARTRACK_API_KEY
