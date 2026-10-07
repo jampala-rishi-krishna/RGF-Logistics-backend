@@ -183,6 +183,14 @@ def _can_apply_acknowledged_sub_status(row) -> bool:
     return _acknowledge_parent_status(row) == "confirmed"
 
 
+def _is_inventory_acknowledge_candidate(row, view_ids: set[str] | None = None, overrides: dict[str, bool] | None = None) -> bool:
+    return (
+        _can_apply_acknowledged_sub_status(row)
+        and not live_sales_order_cache.is_on_hold(row)
+        and not row_is_acknowledged(row, view_ids or set(), overrides or {})
+    )
+
+
 def _is_zoho_parent_status_error(exc: ZohoError) -> bool:
     return "parent and entity status differs" in str(exc).lower()
 
@@ -395,8 +403,13 @@ def _filtered_rows(db: Session, date_from: str | None, date_to: str | None, stat
         rows = live_sales_order_cache.get_window(start, end)
     needle = (search or "").lower(); wanted = (status or "").lower()
     wanted_label = wanted.replace("_", " ")
-    acknowledged_ids, ack_overrides = _ack_snapshot() if wanted_label in {"acknowledged", "all except acknowledged"} else (None, {})
+    acknowledged_ids, ack_overrides = _ack_snapshot() if assignment is None or wanted_label in {"acknowledged", "all except acknowledged"} else (None, {})
+    inventory_scope = assignment is None
     def matches_status(row: SalesOrderCache) -> bool:
+        if inventory_scope:
+            if wanted and wanted != "all" and wanted_label not in {"confirmed", "all except acknowledged"}:
+                return False
+            return _is_inventory_acknowledge_candidate(row, acknowledged_ids or set(), ack_overrides)
         if not wanted or wanted == "all":
             return True
         actual_status = _normalized_order_status(getattr(row, "raw_json", None) or {}) or str(row.order_status or "")
@@ -420,9 +433,7 @@ def _filtered_rows(db: Session, date_from: str | None, date_to: str | None, stat
         if is_delivered(raw):
             return "Delivered"
         return str(raw.get("shipment_status") or raw.get("shipping_status") or "Pending")
-    # Inventory tab / its exports (no assignment filter) never lists On Hold orders; Load Planning and Confirmed SO pass an assignment filter and are untouched.
-    hide_on_hold = assignment is None
-    return [row for row in rows if assignment_match(row) and not (hide_on_hold and live_sales_order_cache.is_on_hold(row)) and not (assignment == "assigned" and is_delivered(getattr(row, "raw_json", None) or {}) and row.assignment_status != "completed") and matches_status(row) and (not wanted_cities or (_shipping_city(row) or "").casefold() in wanted_cities) and (not vehicle_needle or vehicle_needle in str(row.vehicle_id or "").casefold()) and (not customer_needle or customer_needle in str(row.customer_name or "").casefold()) and (not delivery_needle or delivery_needle in row_delivery_status(row).casefold()) and (not needle or needle in " ".join(str(x or "") for x in (row.salesorder_number, row.customer_name, row.reference_number, row.vehicle_id, _shipping_city(row) or "")).lower())]
+    return [row for row in rows if assignment_match(row) and not (assignment == "unassigned" and live_sales_order_cache.is_on_hold(row)) and not (assignment == "assigned" and is_delivered(getattr(row, "raw_json", None) or {}) and row.assignment_status != "completed") and matches_status(row) and (not wanted_cities or (_shipping_city(row) or "").casefold() in wanted_cities) and (not vehicle_needle or vehicle_needle in str(row.vehicle_id or "").casefold()) and (not customer_needle or customer_needle in str(row.customer_name or "").casefold()) and (not delivery_needle or delivery_needle in row_delivery_status(row).casefold()) and (not needle or needle in " ".join(str(x or "") for x in (row.salesorder_number, row.customer_name, row.reference_number, row.vehicle_id, _shipping_city(row) or "")).lower())]
 
 
 def _hydrate_export_rows(db: Session, rows: list[SalesOrderCache]) -> list[SalesOrderCache]:

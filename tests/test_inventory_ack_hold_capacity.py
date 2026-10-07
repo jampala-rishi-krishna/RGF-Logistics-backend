@@ -140,9 +140,10 @@ class OnHoldFilterTests(ZohoBackedTestCase):
     def test_search_cannot_surface_an_on_hold_order(self):
         self.assertEqual(self.inventory(search="SO-03")["total"], 0)
 
-    def test_load_planning_and_confirmed_scopes_are_untouched(self):
+    def test_load_planning_excludes_on_hold(self):
         rows = load_planning._filtered_rows(SimpleNamespace(), SHIP, SHIP, None, None, "unassigned")
-        self.assertEqual(len(rows), 10)  # On Hold rows still reach the (status-filtered) Load Planning query
+        self.assertEqual(len(rows), 8)
+        self.assertFalse({"SO-03", "SO-07"} & {row.salesorder_number for row in rows})
 
     def test_on_hold_sales_substatus_is_on_hold(self):
         """Production: Zoho's "ON HOLD(SALES)" sub-status of Confirmed has code cs_onholds (not cs_onhold)."""
@@ -171,6 +172,24 @@ class OnHoldFilterTests(ZohoBackedTestCase):
 
 
 class AcknowledgeLeavesInventoryTests(ZohoBackedTestCase):
+    def test_inventory_only_lists_confirmed_unacknowledged_orders(self):
+        self.zoho.orders["id3"]["status"] = "draft"
+        self.zoho.orders["id4"]["status"] = "partially_shipped"
+        self.zoho.orders["id5"]["status"] = "closed"
+        self.zoho.orders["id6"]["current_sub_status"] = self.zoho.orders["id6"]["order_sub_status"] = "cs_onhold"
+        self.zoho.orders["id7"]["current_sub_status"] = self.zoho.orders["id7"]["order_sub_status"] = "cs_acknowl"
+        self.restart_backend()
+        page = self.inventory(status="All")
+        self.assertEqual(self.numbers(page), ["SO-01", "SO-02", "SO-08", "SO-09", "SO-10"])
+        self.assertEqual(page["total"], 5)
+        self.assertEqual(self.numbers(self.inventory(status="Confirmed")), ["SO-01", "SO-02", "SO-08", "SO-09", "SO-10"])
+        self.assertEqual(self.numbers(self.inventory(status="Acknowledged")), [])
+
+    def test_load_planning_still_lists_acknowledged_orders(self):
+        self.zoho.orders["id2"]["current_sub_status"] = self.zoho.orders["id2"]["order_sub_status"] = "cs_acknowl"
+        self.restart_backend()
+        self.assertEqual(self.numbers(self.inventory(status="Acknowledged", assignment="unassigned")), ["SO-02"])
+
     def test_bulk_ack_two_of_ten_list_and_count_show_eight(self):
         before = self.inventory()
         self.assertEqual((len(before["items"]), before["total"]), (10, 10))
@@ -180,7 +199,8 @@ class AcknowledgeLeavesInventoryTests(ZohoBackedTestCase):
         self.assertEqual(after["total"], 8)
         self.assertEqual(len(after["items"]), 8)
         self.assertFalse({"SO-02", "SO-05"} & set(self.numbers(after)))
-        self.assertEqual(self.numbers(self.inventory(status="Acknowledged")), ["SO-02", "SO-05"])
+        self.assertEqual(self.numbers(self.inventory(status="Acknowledged")), [])
+        self.assertEqual(self.numbers(self.inventory(status="Acknowledged", assignment="unassigned")), ["SO-02", "SO-05"])
 
     def test_acknowledged_orders_appear_in_load_planning(self):
         self.acknowledge("id2", "id5")
