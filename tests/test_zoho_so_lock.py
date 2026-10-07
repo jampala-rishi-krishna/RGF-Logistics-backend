@@ -179,6 +179,30 @@ class AcknowledgeLockRouterTests(unittest.TestCase):
                 load_planning.acknowledge_sales_order_route("1", self.user)
         lock.assert_not_called()
 
+    def test_acknowledge_requires_confirmed_parent_status(self):
+        cached = SimpleNamespace(order_status="partially shipped", salesorder_number="SO-1", raw_json={})
+        with patch.object(load_planning.live_sales_order_cache, "find_cached", return_value=cached), \
+                patch.object(load_planning, "acknowledge_sales_order") as ack, \
+                patch.object(load_planning, "lock_salesorder") as lock:
+            with self.assertRaises(Exception) as caught:
+                load_planning.acknowledge_sales_order_route("1", self.user)
+        self.assertEqual(caught.exception.status_code, 409)
+        self.assertIn("only allows the Acknowledged sub-status on Confirmed", caught.exception.detail)
+        self.assertIn("partially shipped", caught.exception.detail)
+        ack.assert_not_called()
+        lock.assert_not_called()
+
+    def test_zoho_parent_status_error_returns_actionable_conflict(self):
+        cached = SimpleNamespace(order_status="confirmed", salesorder_number="SO-1", raw_json={})
+        with patch.object(load_planning.live_sales_order_cache, "find_cached", return_value=cached), \
+                patch.object(load_planning, "acknowledge_sales_order", side_effect=zoho_client.ZohoError("Zoho Inventory returned HTTP 400: Parent and Entity status differs..")), \
+                patch.object(load_planning, "lock_salesorder") as lock:
+            with self.assertRaises(Exception) as caught:
+                load_planning.acknowledge_sales_order_route("1", self.user)
+        self.assertEqual(caught.exception.status_code, 409)
+        self.assertIn("only allows the Acknowledged sub-status on Confirmed", caught.exception.detail)
+        lock.assert_not_called()
+
     def test_lock_failure_keeps_acknowledged_and_surfaces_error(self):
         cached = SimpleNamespace(order_status="confirmed", salesorder_number="SO-1", raw_json={})
         with patch.object(load_planning.live_sales_order_cache, "find_cached", return_value=cached), \
@@ -574,4 +598,3 @@ class ListAndDetailDoNotCallZohoLockTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-

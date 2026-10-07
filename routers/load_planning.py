@@ -168,6 +168,25 @@ def _is_acknowledged(row) -> bool:
     )
 
 
+def _acknowledge_parent_status(row) -> str:
+    raw = row.raw_json if isinstance(getattr(row, "raw_json", None), dict) else {}
+    return str(_normalized_order_status(raw) or getattr(row, "order_status", "") or "").strip().lower().replace("_", " ")
+
+
+def _acknowledge_status_conflict_message(row) -> str:
+    number = getattr(row, "salesorder_number", None) or getattr(row, "id", None) or "This sales order"
+    status = _acknowledge_parent_status(row) or "unknown"
+    return f"{number} cannot be acknowledged because Zoho only allows the Acknowledged sub-status on Confirmed sales orders. Current Zoho status: {status}."
+
+
+def _can_apply_acknowledged_sub_status(row) -> bool:
+    return _acknowledge_parent_status(row) == "confirmed"
+
+
+def _is_zoho_parent_status_error(exc: ZohoError) -> bool:
+    return "parent and entity status differs" in str(exc).lower()
+
+
 def _date(value: str | None) -> date | None:
     if not value:
         return None
@@ -632,13 +651,15 @@ def acknowledge_sales_order_route(salesorder_id: str, current_user: CurrentUser 
     cached = live_sales_order_cache.find_cached(salesorder_id) or live_sales_order_cache.ensure_zoho_data(salesorder_id)
     if cached is None:
         raise HTTPException(404, "Sales order was not found.")
-    current_status = str(cached.order_status or "").lower().replace("_", " ")
+    current_status = _acknowledge_parent_status(cached)
     if current_status in {"void", "cancelled", "canceled"}:
         raise HTTPException(409, "This sales order is locked and cannot be acknowledged.")
     if _is_acknowledged(cached):
         _set_acknowledged(salesorder_id, True)  # Zoho already says acknowledged; keep every list consistent with it
         lock_payload = _lock_after_acknowledge(salesorder_id, cached.salesorder_number, current_user)
         return {"acknowledged": True, "already_acknowledged": True, **lock_payload}  # retry path: no new acknowledge
+    if not _can_apply_acknowledged_sub_status(cached):
+        raise HTTPException(409, _acknowledge_status_conflict_message(cached))
     try:
         result = acknowledge_sales_order(salesorder_id)
         # Reflect the change on every cached copy instead of re-pulling and re-hydrating the
@@ -648,6 +669,8 @@ def acknowledge_sales_order_route(salesorder_id: str, current_user: CurrentUser 
         lock_payload = _lock_after_acknowledge(salesorder_id, cached.salesorder_number, current_user)
         return {**result, "acknowledged": True, **lock_payload}
     except ZohoError as exc:
+        if _is_zoho_parent_status_error(exc):
+            raise HTTPException(409, _acknowledge_status_conflict_message(cached)) from exc
         raise HTTPException(502, str(exc)) from exc
 
 
@@ -689,7 +712,7 @@ def acknowledge_filtered_sales_orders(
     current_user: CurrentUser = Depends(require_role("admin", "dispatcher", "warehouse")),
 ):
     rows = _filtered_rows(db, date_from, date_to, status, search)
-    eligible = [row for row in rows if str(row.order_status or "").lower().replace("_", " ") not in {"void", "cancelled", "canceled"} and not _is_acknowledged(row)]
+    eligible = [row for row in rows if _can_apply_acknowledged_sub_status(row) and not _is_acknowledged(row)]
     acknowledged = 0
     failed = 0
     results = []
@@ -701,9 +724,9 @@ def acknowledge_filtered_sales_orders(
             lock_payload = _lock_after_acknowledge(str(row.id), row.salesorder_number, current_user)
             results.append({"acknowledged": True, **lock_payload})
             acknowledged += 1
-        except ZohoError:
+        except ZohoError as exc:
             failed += 1
-            results.append({"so_id": str(row.id), "so_number": row.salesorder_number, "acknowledged": False, "locked": False, "lock_error": None, "acknowledge_failed": True})
+            results.append({"so_id": str(row.id), "so_number": row.salesorder_number, "acknowledged": False, "locked": False, "lock_error": None, "acknowledge_failed": True, "error": _acknowledge_status_conflict_message(row) if _is_zoho_parent_status_error(exc) else str(exc)})
     return {"filtered_count": len(rows), "eligible_count": len(eligible), "acknowledged_count": acknowledged, "failed_count": failed, "results": results}
 
 
