@@ -29,7 +29,7 @@ def _timestamp(minutes: float) -> str:
     return (base + timedelta(minutes=max(0, minutes))).isoformat().replace("+00:00", "Z")
 
 
-def build_request(data: FleetData) -> dict:
+def build_request(data: FleetData, *, avoid_tolls: bool = False) -> dict:
     vehicles = []
     cost_config = load_route_cost_config()
     for v in data.vehicles:
@@ -48,6 +48,9 @@ def build_request(data: FleetData) -> dict:
             "costPerKilometer": cost_per_km,
             "costPerHour": cost_per_hour,
         }
+        if avoid_tolls:
+            # The Route Optimization API does not price tolls; it can only be told to route around them.
+            vehicle["routeModifiers"] = {"avoidTolls": True}
         if getattr(v, "has_end_location", True):
             vehicle["endLocation"] = {"latitude": v.end_lat, "longitude": v.end_lng}
         if v.shift_start or v.shift_end:
@@ -88,7 +91,7 @@ def _error(response: httpx.Response) -> GoogleOptimizationError:
     return GoogleOptimizationError(f"Google Route Optimization failed ({code}): {message}")
 
 
-async def optimize(data: FleetData) -> dict:
+async def optimize(data: FleetData, *, avoid_tolls: bool = False) -> dict:
     try:
         credentials, project_id = google.auth.default(scopes=SCOPES)
         if not credentials.valid:
@@ -99,7 +102,7 @@ async def optimize(data: FleetData) -> dict:
         raise GoogleOptimizationError("Google Route Optimization requires configured Application Default Credentials (ADC).") from exc
     if not access_token:
         raise GoogleOptimizationError("ADC did not provide an OAuth2 access token.")
-    body = build_request(data)
+    body = build_request(data, avoid_tolls=avoid_tolls)
     async with httpx.AsyncClient(timeout=45) as client:
         response = await client.post(ENDPOINT, json=body, headers={"Authorization": f"Bearer {access_token}", "Content-Type": "application/json"})
     logger.info("provider=google operation=optimizeTours endpoint=%s status=%s", "/v1/projects/rarechain-logistics-508805:optimizeTours", response.status_code)

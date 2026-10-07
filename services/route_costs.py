@@ -5,7 +5,8 @@ Per leg:
     distance cost = km * ROUTE_DISTANCE_COST_PER_KM                                   (maintenance/tyres/depreciation)
     time cost     = hours * (ROUTE_DRIVER_COST_PER_HOUR [+ ROUTE_HELPER_COST_PER_HOUR if a helper is assigned])
     refrigeration = refrigeration_hours * litres/hour * ROUTE_DIESEL_PRICE_PER_LITER
-    leg total     = fuel + distance cost + time cost + refrigeration
+    tolls         = Google leg toll estimate (Class 1, PHP) * class multiplier (Class 2 = ROUTE_TOLL_CLASS2_MULTIPLIER, ...)
+    leg total     = fuel + distance cost + time cost + refrigeration + tolls (known fees only)
 
 The old ROUTE_FUEL_COST_PER_KM, ROUTE_REFRIGERATION_COST_PER_HOUR, REFRIGERATION_ON_RETURN_LEG and
 ROUTE_FIXED_COST_PER_ROUTE names are no longer read; leaving them set on Render is harmless.
@@ -30,6 +31,9 @@ class RouteCostConfig(TypedDict):
     refrigeration_liters_per_hour_chilled: float
     refrigeration_liters_per_hour_frozen: float
     refrigeration_on_return_leg: bool
+    tolls_enabled: bool
+    toll_vehicle_class: int
+    toll_multiplier: float
 
 
 def _read_float_env(name: str, default: float) -> tuple[float, bool]:
@@ -40,6 +44,15 @@ def _read_float_env(name: str, default: float) -> tuple[float, bool]:
         return float(raw), True
     except ValueError:
         return default, False
+
+
+def toll_multiplier_for_class(vehicle_class: int, class2: float = 2.0, class3: float = 3.0) -> float:
+    """Google returns the Class 1 (car/SUV) fee; TRB Class 2 = 2.0x, Class 3 = 3.0x. Unknown class -> Class 2."""
+    if vehicle_class == 1:
+        return 1.0
+    if vehicle_class == 3:
+        return class3 if class3 > 0 else 3.0
+    return class2 if class2 > 0 else 2.0
 
 
 def build_route_cost_config(
@@ -53,6 +66,10 @@ def build_route_cost_config(
     refrigeration_liters_per_hour_frozen: float,
     refrigeration_on_return_leg: bool = False,
     distance_rate_configured: bool = True,
+    tolls_enabled: bool = True,
+    toll_vehicle_class: int = 2,
+    toll_class2_multiplier: float = 2.0,
+    toll_class3_multiplier: float = 3.0,
 ) -> RouteCostConfig:
     km_per_liter = fuel_km_per_liter if fuel_km_per_liter > 0 else 7.0
     return {
@@ -66,6 +83,9 @@ def build_route_cost_config(
         "refrigeration_liters_per_hour_chilled": refrigeration_liters_per_hour_chilled,
         "refrigeration_liters_per_hour_frozen": refrigeration_liters_per_hour_frozen,
         "refrigeration_on_return_leg": refrigeration_on_return_leg,
+        "tolls_enabled": tolls_enabled,
+        "toll_vehicle_class": toll_vehicle_class if toll_vehicle_class in (1, 2, 3) else 2,
+        "toll_multiplier": toll_multiplier_for_class(toll_vehicle_class, toll_class2_multiplier, toll_class3_multiplier),
     }
 
 
@@ -81,7 +101,31 @@ def load_route_cost_config() -> RouteCostConfig:
         refrigeration_liters_per_hour_chilled=_read_float_env("ROUTE_REFRIGERATION_LITERS_PER_HOUR_CHILLED", 0.8)[0],
         refrigeration_liters_per_hour_frozen=_read_float_env("ROUTE_REFRIGERATION_LITERS_PER_HOUR_FROZEN", 1.2)[0],
         refrigeration_on_return_leg=os.environ.get("ROUTE_REFRIGERATION_ON_RETURN_LEG", "").strip().lower() in {"1", "true", "yes", "on"},
+        tolls_enabled=os.environ.get("ROUTE_TOLLS_ENABLED", "true").strip().lower() in {"1", "true", "yes", "on"},
+        toll_vehicle_class=int(_read_float_env("ROUTE_TOLL_VEHICLE_CLASS", 2.0)[0]),
+        toll_class2_multiplier=_read_float_env("ROUTE_TOLL_CLASS2_MULTIPLIER", 2.0)[0],
+        toll_class3_multiplier=_read_float_env("ROUTE_TOLL_CLASS3_MULTIPLIER", 3.0)[0],
     )
+
+
+def leg_toll(toll_info: dict | None, config: RouteCostConfig) -> dict:
+    """Toll for one leg from Google's tollInfo ({"present": bool, "price": Class-1 PHP | None}).
+    present + price -> amount = price x class multiplier; present + no price -> unknown fee
+    (never costed as 0); not present (or tolls disabled) -> nothing."""
+    if not config.get("tolls_enabled", True) or not toll_info or not toll_info.get("present"):
+        return {"present": False, "amount": 0.0, "unknown": False}
+    price = toll_info.get("price")
+    if price is None:
+        return {"present": True, "amount": 0.0, "unknown": True}
+    return {"present": True, "amount": round(float(price) * config["toll_multiplier"], 2), "unknown": False}
+
+
+def sum_tolls(tolls: list[dict]) -> dict:
+    return {
+        "present": any(t["present"] for t in tolls),
+        "amount": round(sum(t["amount"] for t in tolls), 2),
+        "unknown": any(t["unknown"] for t in tolls),
+    }
 
 
 def refrigeration_cost_per_hour(config: RouteCostConfig, *, frozen: bool = False) -> float:
@@ -107,6 +151,9 @@ def describe_rates(config: RouteCostConfig) -> dict:
         "refrigerationCostPerHourChilled": round(refrigeration_cost_per_hour(config, frozen=False), 2),
         "refrigerationCostPerHourFrozen": round(refrigeration_cost_per_hour(config, frozen=True), 2),
         "refrigerationOnReturnLeg": config["refrigeration_on_return_leg"],
+        "tollsEnabled": config["tolls_enabled"],
+        "tollVehicleClass": config["toll_vehicle_class"],
+        "tollMultiplier": config["toll_multiplier"],
     }
 
 
@@ -121,8 +168,10 @@ def compute_route_cost_breakdown(
     refrigerated: bool = True,
     distance_rate_per_km: float | None = None,
     time_rate_per_hour_override: float | None = None,
+    tolls: float = 0.0,
 ) -> dict:
-    """Cost of one leg. `refrigeration_hours` is the time the reefer unit runs on this leg
+    """Cost of one leg (`tolls` = known toll fee for the leg, already class-adjusted).
+    `refrigeration_hours` is the time the reefer unit runs on this leg
     (0 for a return leg unless ROUTE_REFRIGERATION_ON_RETURN_LEG is on); `refrigerated=False`
     (non-reefer truck) forces refrigeration to 0."""
     rates = config or load_route_cost_config()
@@ -133,12 +182,14 @@ def compute_route_cost_breakdown(
     time_cost = round((float(duration_min) / 60.0) * time_rate, 2)
     fuel_cost = round(float(distance_km) / rates["fuel_km_per_liter"] * rates["diesel_price_per_liter"], 2)
     refrigeration_cost = round(float(refrigeration_hours) * refrigeration_cost_per_hour(rates, frozen=frozen), 2) if refrigerated else 0.0
+    toll_cost = round(float(tolls), 2)
     return {
         "distance": distance_cost,
         "time": time_cost,
         "fuel": fuel_cost,
         "refrigeration": refrigeration_cost,
-        "total": round(distance_cost + time_cost + fuel_cost + refrigeration_cost, 2),
+        "tolls": toll_cost,
+        "total": round(distance_cost + time_cost + fuel_cost + refrigeration_cost + toll_cost, 2),
     }
 
 

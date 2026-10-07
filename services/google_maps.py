@@ -95,11 +95,48 @@ def _decode_polyline(encoded: str) -> list[list[float]]:
     return points
 
 
-async def fetch_route_polyline(locations: list[list[float]], *, optimize_waypoint_order: bool = False) -> dict:
+ROUTE_FIELD_MASK = "routes.distanceMeters,routes.duration,routes.polyline.encodedPolyline,routes.legs.distanceMeters,routes.legs.duration,routes.optimizedIntermediateWaypointIndex"
+TOLL_FIELD_MASK = ",routes.travelAdvisory.tollInfo,routes.legs.travelAdvisory.tollInfo"
+
+
+def parse_toll_info(advisory: dict | None) -> dict:
+    """Google's travelAdvisory -> {"present", "price"}. Prices are Class 1 (non-commercial) PHP.
+    tollInfo present with no estimatedPrice = a toll exists but Google has no fee ("price": None).
+    Money in a currency other than PHP is not guessed at, so it also counts as an unknown fee."""
+    advisory = advisory or {}
+    if "tollInfo" not in advisory:
+        return {"present": False, "price": None}
+    prices = (advisory.get("tollInfo") or {}).get("estimatedPrice") or []
+    php = [m for m in prices if str(m.get("currencyCode", "")).upper() == "PHP"]
+    if not php:
+        return {"present": True, "price": None}
+    return {"present": True, "price": sum(float(m.get("units") or 0) + float(m.get("nanos") or 0) / 1e9 for m in php)}
+
+
+def _legs_with_tolls(route: dict, include_tolls: bool) -> list[dict]:
+    legs = []
+    for leg in route.get("legs") or []:
+        item = {"distance_km": leg.get("distanceMeters", 0) / 1000, "duration_min": _seconds(leg.get("duration")) / 60}
+        if include_tolls:
+            item["toll"] = parse_toll_info(leg.get("travelAdvisory"))
+        legs.append(item)
+    # A single-leg route may carry its toll only at route level.
+    if include_tolls and len(legs) == 1 and not legs[0]["toll"]["present"]:
+        legs[0]["toll"] = parse_toll_info(route.get("travelAdvisory"))
+    return legs
+
+
+async def fetch_route_polyline(locations: list[list[float]], *, optimize_waypoint_order: bool = False, include_tolls: bool = False, avoid_tolls: bool = False) -> dict:
+    """include_tolls requests extraComputations=TOLLS (a higher-billed SKU: only the Calculate flow
+    asks for it). avoid_tolls sets routeModifiers.avoidTolls."""
     key = _key()
     body = {"origin": _waypoint(*locations[0]), "destination": _waypoint(*locations[-1]), "intermediates": [_waypoint(*p) for p in locations[1:-1]], "travelMode": "DRIVE", "routingPreference": "TRAFFIC_AWARE", "optimizeWaypointOrder": bool(optimize_waypoint_order)}
+    if include_tolls:
+        body["extraComputations"] = ["TOLLS"]
+    if avoid_tolls:
+        body["routeModifiers"] = {"avoidTolls": True}
     async with httpx.AsyncClient(timeout=30) as client:
-        response = await client.post(ROUTES, json=body, headers={"X-Goog-Api-Key": key, "X-Goog-FieldMask": "routes.distanceMeters,routes.duration,routes.polyline.encodedPolyline,routes.legs.distanceMeters,routes.legs.duration,routes.optimizedIntermediateWaypointIndex"})
+        response = await client.post(ROUTES, json=body, headers={"X-Goog-Api-Key": key, "X-Goog-FieldMask": ROUTE_FIELD_MASK + (TOLL_FIELD_MASK if include_tolls else "")})
     logger.info("provider=google endpoint=%s status=%s", "/directions/v2:computeRoutes", response.status_code)
     if response.status_code != 200: raise _failure(response, "Routes API")
     route = (response.json().get("routes") or [None])[0]
@@ -112,7 +149,9 @@ async def fetch_route_polyline(locations: list[list[float]], *, optimize_waypoin
         "traffic_aware": True,
         "distance_km": route.get("distanceMeters", 0) / 1000,
         "duration_min": _seconds(route.get("duration")) / 60,
-        "legs": [{"distance_km": leg.get("distanceMeters", 0) / 1000, "duration_min": _seconds(leg.get("duration")) / 60} for leg in route.get("legs") or []],
+        "legs": _legs_with_tolls(route, include_tolls),
+        "tolls_requested": bool(include_tolls),
+        "avoid_tolls": bool(avoid_tolls),
         "optimized_waypoint_order": route.get("optimizedIntermediateWaypointIndex") or [],
         "calculated_at": datetime.now(timezone.utc).isoformat(),
         "departure_time": None,

@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import os
 
+from typing import Literal
+
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 from sqlalchemy import select
@@ -13,7 +15,7 @@ from models.route import LoadManifest, ManifestItem
 from models.vehicle import Vehicle
 from services import live_gps_store, memory_tables, optimizer
 from services.google_maps import OrsError, fetch_route_matrix, fetch_route_polyline, geocode_address, route_requires_ferry, search_addresses
-from services.route_costs import DEFAULT_SERVICE_MIN_PER_STOP, compute_route_cost_breakdown, describe_rates, load_route_cost_config
+from services.route_costs import DEFAULT_SERVICE_MIN_PER_STOP, compute_route_cost_breakdown, describe_rates, leg_toll, load_route_cost_config, sum_tolls
 from services.serialize import row_to_dict
 from services.time_utils import minutes_since_midnight
 from services.warehouses import ReturnWarehouseRequired, list_warehouses, resolve_return_warehouse
@@ -74,6 +76,8 @@ class RoutePlanBody(BaseModel):
     refrigerated: bool = True
     # "frozen" if any order on the route is frozen cold chain; None/"chilled" -> chilled (None = "assumed chilled").
     coldChainCategory: str | None = None
+    # "compare" = two Routes API calls (normal + avoidTolls) returned as tollOptions; the others are one call.
+    expressways: Literal["compare", "expressway", "avoid"] = "expressway"
 
 
 class OptimizeStopsBody(BaseModel):
@@ -86,6 +90,7 @@ class OptimizeStopsBody(BaseModel):
     hasHelper: bool = False
     refrigerated: bool = True
     coldChainCategory: str | None = None
+    expressways: Literal["compare", "expressway", "avoid"] = "expressway"
 
 
 @router.get("/routes/warehouses")
@@ -93,7 +98,8 @@ def route_warehouses():
     return {"warehouses": list_warehouses()}
 
 
-def _leg_part(distance_km: float, duration_min: float, cost_config: dict, *, refrigeration_hours: float, has_helper: bool, frozen: bool, refrigerated: bool) -> dict:
+def _leg_part(distance_km: float, duration_min: float, cost_config: dict, *, refrigeration_hours: float, has_helper: bool, frozen: bool, refrigerated: bool, toll: dict | None = None) -> dict:
+    toll = toll or {"present": False, "amount": 0.0, "unknown": False}
     return {
         "distanceKm": round(float(distance_km), 2),
         "durationMin": round(float(duration_min), 1),
@@ -105,7 +111,10 @@ def _leg_part(distance_km: float, duration_min: float, cost_config: dict, *, ref
             refrigeration_hours=refrigeration_hours,
             frozen=frozen,
             refrigerated=refrigerated,
+            tolls=toll["amount"],
         ),
+        # present + unknown: a toll road with no Google fee. Its fee is NOT in the total.
+        "toll": toll,
     }
 
 
@@ -132,19 +141,24 @@ def _split_round_trip(
     return_distance = sum(float(leg.get("distance_km") or 0) for leg in return_legs)
     return_duration = sum(float(leg.get("duration_min") or 0) for leg in return_legs)
     common = dict(has_helper=has_helper, frozen=frozen, refrigerated=refrigerated)
-    outbound = _leg_part(outbound_distance, outbound_duration, cost_config, refrigeration_hours=(outbound_duration + service_min) / 60.0, **common)
+    def leg_tolls(group: list[dict]) -> dict:
+        return sum_tolls([leg_toll(leg.get("toll"), cost_config) for leg in group])
+
+    outbound = _leg_part(outbound_distance, outbound_duration, cost_config, refrigeration_hours=(outbound_duration + service_min) / 60.0, toll=leg_tolls(outbound_legs), **common)
     return_leg = None
     if return_to_warehouse:
         return_leg = _leg_part(
             return_distance, return_duration, cost_config,
             refrigeration_hours=(return_duration / 60.0) if cost_config.get("refrigeration_on_return_leg") else 0.0,
+            toll=leg_tolls(return_legs),
             **common,
         )
     parts = [outbound] + ([return_leg] if return_leg else [])
     total = {
         "distanceKm": round(sum(p["distanceKm"] for p in parts), 2),
         "durationMin": round(sum(p["durationMin"] for p in parts), 1),
-        "costBreakdown": {key: round(sum(p["costBreakdown"][key] for p in parts), 2) for key in ("distance", "time", "fuel", "refrigeration", "total")},
+        "costBreakdown": {key: round(sum(p["costBreakdown"][key] for p in parts), 2) for key in ("distance", "time", "fuel", "refrigeration", "tolls", "total")},
+        "toll": sum_tolls([p["toll"] for p in parts]),
     }
     return {"outbound": outbound, "return": return_leg, "total": total}
 
@@ -188,12 +202,26 @@ async def plan_route(body: RoutePlanBody):
         ferry_issue = await route_requires_ferry(coordinates)
         if ferry_issue:
             raise HTTPException(422, ferry_issue)
+        cost_config = load_route_cost_config()
+        tolls_on = bool(cost_config["tolls_enabled"])
+        # Comparing needs Google's toll prices; with tolls disabled it degrades to one normal call.
+        preference = "expressway" if body.expressways == "compare" and not tolls_on else body.expressways
         matrix = await fetch_route_matrix(coordinates)
-        route_geometry = await fetch_route_polyline(coordinates, optimize_waypoint_order=body.optimizeStopOrder)
+        # TOLLS is only requested here (Calculate / optimize-stops), never on map interactions.
+        primary = await fetch_route_polyline(coordinates, optimize_waypoint_order=body.optimizeStopOrder, include_tolls=tolls_on, avoid_tolls=preference == "avoid")
+        secondary = None
+        if preference == "compare":
+            # The stop order is decided by the first call, so the avoid-tolls route visits the same stops.
+            ordered = primary.get("optimized_waypoint_order") or []
+            second_stops = [intermediates[i] for i in ordered] if body.optimizeStopOrder and len(ordered) == len(intermediates) else intermediates
+            secondary = await fetch_route_polyline(
+                [[origin["lng"], origin["lat"]], *[[p["lng"], p["lat"]] for p in second_stops], [final_point["lng"], final_point["lat"]]],
+                include_tolls=tolls_on, avoid_tolls=True,
+            )
     except OrsError as e:
         raise HTTPException(502, str(e))
 
-    optimized_order = route_geometry.get("optimized_waypoint_order") or []
+    optimized_order = primary.get("optimized_waypoint_order") or []
     if body.optimizeStopOrder and len(optimized_order) == len(intermediates):
         intermediates = [intermediates[i] for i in optimized_order]
         deliveries = intermediates if return_warehouse else [*intermediates, {"label": body.destination, **destination}]
@@ -206,20 +234,40 @@ async def plan_route(body: RoutePlanBody):
     else:
         destination_label = body.destination
 
-    cost_config = load_route_cost_config()
-    legs = route_geometry.get("legs") or []
-    if not legs:
-        legs = [{"distance_km": float(route_geometry.get("distance_km") or matrix["distance_matrix_km"][0][-1]), "duration_min": float(route_geometry.get("duration_min") or matrix["duration_matrix_min"][0][-1])}]
     frozen = (body.coldChainCategory or "").strip().lower() == "frozen"
-    round_trip = _split_round_trip(
-        legs, bool(return_warehouse), cost_config,
-        service_min=DEFAULT_SERVICE_MIN_PER_STOP * len(deliveries),
-        has_helper=body.hasHelper, frozen=frozen, refrigerated=body.refrigerated,
-    )
-    distance_km = round_trip["total"]["distanceKm"]
-    duration_min = round_trip["total"]["durationMin"]
-    cost_breakdown = round_trip["total"]["costBreakdown"]
-    cost = cost_breakdown["total"]
+
+    def build_option(key: str, label: str, geometry: dict) -> dict:
+        legs = geometry.get("legs") or []
+        if not legs:
+            legs = [{"distance_km": float(geometry.get("distance_km") or matrix["distance_matrix_km"][0][-1]), "duration_min": float(geometry.get("duration_min") or matrix["duration_matrix_min"][0][-1])}]
+        trip = _split_round_trip(
+            legs, bool(return_warehouse), cost_config,
+            service_min=DEFAULT_SERVICE_MIN_PER_STOP * len(deliveries),
+            has_helper=body.hasHelper, frozen=frozen, refrigerated=body.refrigerated,
+        )
+        return {
+            "key": key,
+            "label": label,
+            "distanceKm": trip["total"]["distanceKm"],
+            "durationMin": trip["total"]["durationMin"],
+            "cost": trip["total"]["costBreakdown"]["total"],
+            "costBreakdown": trip["total"]["costBreakdown"],
+            "roundTrip": trip,
+            "toll": trip["total"]["toll"],
+            "tollsAvoided": key == "avoid",
+            "geometry": geometry["polyline"],
+        }
+
+    if preference == "compare":
+        options = [build_option("expressway", "Via expressway", primary), build_option("avoid", "Avoid tolls", secondary)]
+        active = _choose_option(options, body.mode)
+        cheapest = min(options, key=lambda o: o["cost"])["key"]
+        fastest = min(options, key=lambda o: o["durationMin"])["key"]
+    else:
+        key = "avoid" if preference == "avoid" else "expressway"
+        options = [build_option(key, "Avoid tolls" if key == "avoid" else "Via expressway", primary)]
+        active, cheapest, fastest = options[0], options[0]["key"], options[0]["key"]
+    route_geometry = primary
     if body.mode == "cheapest":
         objective_note = "Lowest estimated operating cost, based on configured fuel, distance, driver time, and refrigeration rates."
     elif body.mode == "shortest":
@@ -236,11 +284,18 @@ async def plan_route(body: RoutePlanBody):
         "returnWarehouse": return_warehouse,
         "mode": body.mode,
         "objectiveNote": objective_note,
-        "distanceKm": distance_km,
-        "durationMin": duration_min,
-        "cost": cost,
-        "costBreakdown": cost_breakdown,
-        "roundTrip": round_trip,
+        "distanceKm": active["distanceKm"],
+        "durationMin": active["durationMin"],
+        "cost": active["cost"],
+        "costBreakdown": active["costBreakdown"],
+        "roundTrip": active["roundTrip"],
+        "toll": active["toll"],
+        "tollsEnabled": tolls_on,
+        "expressways": preference,
+        "tollOptions": options if preference == "compare" else [],
+        "activeOption": active["key"],
+        "cheapestOption": cheapest,
+        "fastestOption": fastest,
         "costAssumptions": {
             "hasHelper": body.hasHelper,
             "refrigerated": body.refrigerated,
@@ -262,9 +317,31 @@ async def plan_route(body: RoutePlanBody):
             "fallbackUsed": bool(matrix.get("fallback_used") or route_geometry.get("fallback_used")),
             "fallbackReason": matrix.get("fallback_reason") or route_geometry.get("fallback_reason"),
         },
-        "geometry": route_geometry["polyline"],
+        "geometry": active["geometry"],
         "warnings": ([route_geometry["skippedReason"]] if route_geometry["skippedReason"] else []) + (["Distance and geometry were returned by different providers."] if matrix.get("provider") != route_geometry.get("provider") else []),
     }
+
+
+def _choose_option(options: list[dict], mode: str) -> dict:
+    """The option that is active by default for the objective. Totals include known tolls."""
+    if mode == "cheapest":
+        return min(options, key=lambda o: o["cost"])
+    if mode == "shortest":
+        return min(options, key=lambda o: o["distanceKm"])
+    if mode == "balanced":
+        def weight(name: str, default: float) -> float:
+            try:
+                return float(os.environ.get(name, default))
+            except ValueError:
+                return default
+
+        wt, wd, wc = weight("ROUTE_BALANCED_TIME_WEIGHT", 0.5), weight("ROUTE_BALANCED_DISTANCE_WEIGHT", 0.2), weight("ROUTE_BALANCED_COST_WEIGHT", 0.3)
+
+        def top(field: str) -> float:
+            return max(o[field] for o in options) or 1.0
+
+        return min(options, key=lambda o: o["durationMin"] / top("durationMin") * wt + o["distanceKm"] / top("distanceKm") * wd + o["cost"] / top("cost") * wc)
+    return min(options, key=lambda o: o["durationMin"])
 
 
 @router.post("/routes/optimize-stops")
@@ -284,6 +361,7 @@ async def optimize_stop_order(body: OptimizeStopsBody):
         returnToWarehouse=body.returnToWarehouse,
         returnWarehouseId=body.returnWarehouseId,
         optimizeStopOrder=True,
+        expressways=body.expressways,
         hasHelper=body.hasHelper, refrigerated=body.refrigerated, coldChainCategory=body.coldChainCategory,
     ))
     result["optimizedStopOrder"] = [stop.get("label") for stop in result["stops"]]

@@ -168,7 +168,7 @@ class RoutingContractTests(unittest.TestCase):
     def _plan(self, **overrides):
         captured = {}
 
-        async def fake_polyline(locations, *, optimize_waypoint_order=False):
+        async def fake_polyline(locations, *, optimize_waypoint_order=False, **_kwargs):
             captured["locations"] = locations
             captured["optimize"] = optimize_waypoint_order
             n = len(locations) - 1

@@ -37,6 +37,7 @@ class PreviewBody(BaseModel):
     objective: str = "recommended"
     returnToWarehouse: bool = False
     returnWarehouseId: str | None = None
+    avoidTolls: bool = False
 
 
 class ReoptimizeBody(BaseModel):
@@ -46,6 +47,7 @@ class ReoptimizeBody(BaseModel):
     objective: str = "recommended"
     returnToWarehouse: bool = False
     returnWarehouseId: str | None = None
+    avoidTolls: bool = False
 
 
 async def _run_optimization(
@@ -57,6 +59,7 @@ async def _run_optimization(
     objective: str,
     return_to_warehouse: bool = False,
     return_warehouse_id: str | None = None,
+    avoid_tolls: bool = False,
 ) -> dict:
     try:
         fleet_data = await fetch_fleet_data(db, mode=mode, vehicle_ids=vehicle_ids, order_ids=order_ids, return_to_warehouse=return_to_warehouse, return_warehouse_id=return_warehouse_id)
@@ -87,7 +90,7 @@ async def _run_optimization(
         raise HTTPException(502, f"Road travel data unavailable. Optimization could not be completed. ({e})")
 
     try:
-        google_payload = await google_optimize(fleet_data)
+        google_payload = await google_optimize(fleet_data, avoid_tolls=avoid_tolls)
         google_routes = parse_google_optimization(google_payload, fleet_data)
     except GoogleOptimizationError as e:
         raise HTTPException(502, str(e))
@@ -132,7 +135,7 @@ async def _run_optimization(
         "calculated_at": matrix.get("calculated_at"),
         "departure_time": matrix.get("departure_time"),
     }
-    snapshot = {**fleet_data.data_snapshot, "routing": routing_metadata}
+    snapshot = {**fleet_data.data_snapshot, "routing": routing_metadata, "avoid_tolls": avoid_tolls}
     run = memory_tables.optimization_runs.create(
         status="proposed",
         objective=objective,
@@ -223,20 +226,23 @@ async def _run_optimization(
         "routing": routing_metadata,
         "returnToWarehouse": fleet_data.return_to_warehouse,
         "returnWarehouse": fleet_data.return_warehouse,
+        "avoidTolls": avoid_tolls,
+        # Route Optimization does not compute tolls: fleet costs exclude them unless they are avoided.
+        "costNote": "Tolls avoided" if avoid_tolls else "tolls not included",
     }
 
 
 @router.post("/preview")
 async def preview_optimization(body: PreviewBody, db: Session = Depends(get_db)):
     mode = "reoptimize" if body.mode == "reoptimize" else "initial"
-    return await _run_optimization(db, mode=mode, vehicle_ids=body.vehicleIds, order_ids=body.orderIds, objective=body.objective, return_to_warehouse=body.returnToWarehouse, return_warehouse_id=body.returnWarehouseId)
+    return await _run_optimization(db, mode=mode, vehicle_ids=body.vehicleIds, order_ids=body.orderIds, objective=body.objective, return_to_warehouse=body.returnToWarehouse, return_warehouse_id=body.returnWarehouseId, avoid_tolls=body.avoidTolls)
 
 
 @router.post("/reoptimize")
 async def reoptimize(body: ReoptimizeBody, db: Session = Depends(get_db)):
     if not body.reason:
         raise HTTPException(400, 'reason is required (e.g. "vehicle_deviation", "urgent_delivery", "delay").')
-    result = await _run_optimization(db, mode="reoptimize", vehicle_ids=body.vehicleIds, order_ids=body.orderIds, objective=body.objective, return_to_warehouse=body.returnToWarehouse, return_warehouse_id=body.returnWarehouseId)
+    result = await _run_optimization(db, mode="reoptimize", vehicle_ids=body.vehicleIds, order_ids=body.orderIds, objective=body.objective, return_to_warehouse=body.returnToWarehouse, return_warehouse_id=body.returnWarehouseId, avoid_tolls=body.avoidTolls)
     return {**result, "reason": body.reason}
 
 
@@ -345,7 +351,7 @@ async def apply_optimization(body: ApplyBody, db: Session = Depends(get_db), cur
 
         polyline_warning = None
         if len(ordered_coords) >= 2:
-            polyline_result = await fetch_route_polyline(ordered_coords)
+            polyline_result = await fetch_route_polyline(ordered_coords, avoid_tolls=bool(stored_snapshot.get("avoid_tolls")))
             if polyline_result["polyline"]:
                 memory_tables.routes.update(route_id, polyline_geojson=polyline_result["polyline"])
             else:
