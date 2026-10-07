@@ -120,9 +120,15 @@ def _legs_with_tolls(route: dict, include_tolls: bool) -> list[dict]:
         if include_tolls:
             item["toll"] = parse_toll_info(leg.get("travelAdvisory"))
         legs.append(item)
-    # A single-leg route may carry its toll only at route level.
-    if include_tolls and len(legs) == 1 and not legs[0]["toll"]["present"]:
-        legs[0]["toll"] = parse_toll_info(route.get("travelAdvisory"))
+    # Only route-level tollInfo: a single leg takes it whole; several legs get it apportioned by
+    # distance (Google does not say which leg crosses the toll road), marked "apportioned".
+    if include_tolls and legs and not any(leg["toll"]["present"] for leg in legs):
+        route_toll = parse_toll_info(route.get("travelAdvisory"))
+        if route_toll["present"]:
+            total_km = sum(leg["distance_km"] for leg in legs) or 1.0
+            for leg in legs:
+                price = None if route_toll["price"] is None else route_toll["price"] * leg["distance_km"] / total_km
+                leg["toll"] = {"present": True, "price": price, **({"apportioned": True} if len(legs) > 1 else {})}
     return legs
 
 

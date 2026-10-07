@@ -316,6 +316,120 @@ class PlanRouteTollTests(unittest.TestCase):
         self.assertEqual([s["label"] for s in result["stops"]], ["B", "A"])
 
 
+class TollDiagnosisFixTests(unittest.TestCase):
+    """Regressions from the live Santa Maria -> Blumentritt -> Mets run: Google returned no tollInfo at all."""
+
+    def test_multiple_php_entries_are_summed_and_other_currencies_ignored(self):
+        info = parse_toll_info({"tollInfo": {"estimatedPrice": [money(39), money(20, 250_000_000), money(5, 0, "USD")]}})
+        self.assertEqual(info, {"present": True, "price": 59.25})
+
+    def test_units_string_and_integer_nanos(self):
+        self.assertEqual(parse_toll_info({"tollInfo": {"estimatedPrice": [{"currencyCode": "PHP", "units": "105", "nanos": 0}]}})["price"], 105.0)
+        self.assertEqual(parse_toll_info({"tollInfo": {"estimatedPrice": [{"currencyCode": "PHP", "nanos": 500000000}]}})["price"], 0.5)  # units omitted
+
+    def test_route_level_toll_is_apportioned_by_distance_when_legs_have_none(self):
+        from services.google_maps import _legs_with_tolls
+        route = {"travelAdvisory": {"tollInfo": {"estimatedPrice": [money(100)]}},
+                 "legs": [{"distanceMeters": 25000, "duration": "60s"}, {"distanceMeters": 75000, "duration": "60s"}]}
+        legs = _legs_with_tolls(route, True)
+        self.assertEqual([round(leg["toll"]["price"], 2) for leg in legs], [25.0, 75.0])
+        self.assertTrue(all(leg["toll"]["apportioned"] for leg in legs))
+        unknown = _legs_with_tolls({"travelAdvisory": {"tollInfo": {}}, "legs": route["legs"]}, True)
+        self.assertTrue(all(leg["toll"] == {"present": True, "price": None, "apportioned": True} for leg in unknown))
+
+    def test_leg_level_toll_wins_over_route_level(self):
+        from services.google_maps import _legs_with_tolls
+        route = {"travelAdvisory": {"tollInfo": {"estimatedPrice": [money(999)]}},
+                 "legs": [{"distanceMeters": 1000, "duration": "60s", "travelAdvisory": {"tollInfo": {"estimatedPrice": [money(39)]}}}, {"distanceMeters": 1000, "duration": "60s"}]}
+        legs = _legs_with_tolls(route, True)
+        self.assertEqual(legs[0]["toll"]["price"], 39.0)
+        self.assertFalse(legs[1]["toll"]["present"])
+
+    def _plan(self, expressway_legs, avoid_legs, expressway_poly="E", avoid_poly="A", mode="fastest", env=None):
+        async def fake_polyline(locations, *, optimize_waypoint_order=False, include_tolls=False, avoid_tolls=False):
+            legs = avoid_legs if avoid_tolls else expressway_legs
+            return {"polyline": avoid_poly if avoid_tolls else expressway_poly, "skippedReason": None, "provider": "google", "profile": "DRIVE", "traffic_aware": True,
+                    "legs": [dict(leg) for leg in legs], "optimized_waypoint_order": []}
+
+        async def fake_matrix(locations):
+            n = len(locations)
+            return {"distance_matrix_km": [[1.0] * n] * n, "duration_matrix_min": [[1.0] * n] * n, "provider": "google"}
+
+        async def no_ferry(_locations):
+            return None
+
+        body = RoutePlanBody(origin="S", destination="D", originLat=14.8, originLng=120.97, destinationLat=14.6, destinationLng=120.99,
+                             returnToWarehouse=True, returnWarehouseId="mets", expressways="compare", mode=mode)
+        with mock.patch("routers.routes.fetch_route_polyline", fake_polyline), mock.patch("routers.routes.fetch_route_matrix", fake_matrix), \
+                mock.patch("routers.routes.route_requires_ferry", no_ferry), mock.patch.dict(os.environ, {**ENV, **(env or {})}):
+            return asyncio.run(plan_route(body))
+
+    # the real Google answer: no tollInfo anywhere, but the avoid-tolls route is different (and 2x slower)
+    EXPRESSWAY = [{"distance_km": 27.891, "duration_min": 52.6, "toll": {"present": False, "price": None}}, {"distance_km": 48.764, "duration_min": 63.1, "toll": {"present": False, "price": None}}]
+    AVOID = [{"distance_km": 30.954, "duration_min": 107.2, "toll": {"present": False, "price": None}}, {"distance_km": 45.700, "duration_min": 128.0, "toll": {"present": False, "price": None}}]
+
+    def test_no_tollinfo_but_a_different_avoid_route_means_fee_unknown_not_zero(self):
+        result = self._plan(self.EXPRESSWAY, self.AVOID)
+        expressway, avoid = result["tollOptions"]
+        self.assertTrue(expressway["toll"]["unknown"])
+        self.assertTrue(expressway["toll"]["inferred"])
+        self.assertTrue(expressway["roundTrip"]["outbound"]["toll"]["unknown"])
+        self.assertTrue(expressway["roundTrip"]["return"]["toll"]["unknown"])
+        self.assertEqual(expressway["costBreakdown"]["tolls"], 0.0)  # nothing invented...
+        self.assertFalse(expressway["tollDataAvailable"])           # ...and the UI is told Google had no data
+        self.assertFalse(avoid["toll"]["present"])
+
+    def test_unknown_toll_disqualifies_the_cheapest_badge_but_fastest_still_applies(self):
+        result = self._plan(self.EXPRESSWAY, self.AVOID)
+        self.assertIsNone(result["cheapestOption"])
+        self.assertEqual(result["fastestOption"], "expressway")
+
+    def test_cheapest_badge_is_given_when_every_toll_is_known(self):
+        known = [{**leg, "toll": {"present": True, "price": 39.0}} for leg in self.EXPRESSWAY]
+        result = self._plan(known, self.AVOID)
+        self.assertIn(result["cheapestOption"], {"expressway", "avoid"})
+
+    def test_google_toll_data_is_never_overridden_by_the_inference(self):
+        priced = [{**self.EXPRESSWAY[0], "toll": {"present": True, "price": 39.0}}, self.EXPRESSWAY[1]]
+        result = self._plan(priced, self.AVOID)
+        expressway = result["tollOptions"][0]
+        self.assertFalse(expressway["toll"]["unknown"])
+        self.assertEqual(expressway["costBreakdown"]["tolls"], 78.0)
+        self.assertTrue(expressway["tollDataAvailable"])
+
+    def test_avoid_card_uses_its_own_distance_duration_and_cost(self):
+        result = self._plan(self.EXPRESSWAY, self.AVOID)
+        expressway, avoid = result["tollOptions"]
+        # totals coincide (76.65 km, as in the live run) yet the legs differ, so each card must come from its own legs
+        self.assertEqual((expressway["distanceKm"], avoid["distanceKm"]), (76.65, 76.65))
+        self.assertEqual(expressway["roundTrip"]["outbound"]["distanceKm"], 27.89)
+        self.assertGreater(avoid["durationMin"], expressway["durationMin"] * 1.8)
+        self.assertEqual(avoid["roundTrip"]["outbound"]["distanceKm"], 30.95)
+        self.assertEqual(avoid["geometry"], "A")
+        self.assertEqual(expressway["geometry"], "E")
+        self.assertNotEqual(expressway["cost"], avoid["cost"])
+
+    def test_identical_distance_with_different_roads_is_not_a_duplicate(self):
+        same_km = [{**leg} for leg in self.EXPRESSWAY]
+        slow = [{**leg, "duration_min": leg["duration_min"] * 2} for leg in same_km]
+        result = self._plan(same_km, slow)  # same distances, different polyline + time
+        self.assertFalse(result["noTollFreeAlternative"])
+        self.assertEqual(len(result["tollOptions"]), 2)
+
+    def test_same_route_returns_no_toll_free_alternative_instead_of_a_duplicate_card(self):
+        result = self._plan(self.EXPRESSWAY, self.EXPRESSWAY, expressway_poly="SAME", avoid_poly="SAME")
+        self.assertTrue(result["noTollFreeAlternative"])
+        self.assertEqual([o["key"] for o in result["tollOptions"]], ["expressway"])
+        self.assertIsNone(result["cheapestOption"])
+        self.assertIsNone(result["fastestOption"])
+        self.assertFalse(result["roundTrip"]["total"]["toll"]["unknown"])  # no inference when nothing differs
+
+    def test_same_route_detected_by_matching_legs_even_if_the_encoding_differs(self):
+        retimed = [{**leg, "duration_min": leg["duration_min"] * 1.01} for leg in self.EXPRESSWAY]
+        result = self._plan(self.EXPRESSWAY, retimed, expressway_poly="X", avoid_poly="Y")
+        self.assertTrue(result["noTollFreeAlternative"])
+
+
 class FleetOptimizationTollTests(unittest.TestCase):
     def _request(self, **kwargs):
         vehicle = SimpleNamespace(id=1, start_lat=14.0, start_lng=121.0, end_lat=15.0, end_lng=122.0, has_end_location=True, capacity_kg=1000,

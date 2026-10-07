@@ -1,0 +1,86 @@
+[
+  {
+    "name": "1440",
+    "innerWidth": 1440,
+    "docScrollWidth": 1440,
+    "bodyScrollWidth": 1440,
+    "tableVisible": true,
+    "cardsVisible": false,
+    "tableScrolls": false,
+    "actionBarPosition": "static",
+    "inputHeights": [
+      44,
+      44
+    ],
+    "inputFont": [
+      "16px",
+      "16px"
+    ],
+    "tapTargetsUnder44": [],
+    "offenders": [],
+    "errors": []
+  },
+  {
+    "name": "1024",
+    "innerWidth": 1024,
+    "docScrollWidth": 1024,
+    "bodyScrollWidth": 1024,
+    "tableVisible": false,
+    "cardsVisible": true,
+    "tableScrolls": false,
+    "actionBarPosition": "static",
+    "inputHeights": [
+      44,
+      44
+    ],
+    "inputFont": [
+      "16px",
+      "16px"
+    ],
+    "tapTargetsUnder44": [],
+    "offenders": [],
+    "errors": []
+  },
+  {
+    "name": "768",
+    "innerWidth": 768,
+    "docScrollWidth": 768,
+    "bodyScrollWidth": 768,
+    "tableVisible": true,
+    "cardsVisible": false,
+    "tableScrolls": true,
+    "actionBarPosition": "static",
+    "inputHeights": [
+      44,
+      44
+    ],
+    "inputFont": [
+      "16px",
+      "16px"
+    ],
+    "tapTargetsUnder44": [],
+    "offenders": [],
+    "errors": []
+  },
+  {
+    "name": "390",
+    "innerWidth": 390,
+    "docScrollWidth": 390,
+    "bodyScrollWidth": 390,
+    "tableVisible": false,
+    "cardsVisible": true,
+    "tableScrolls": false,
+    "actionBarPosition": "fixed",
+    "inputHeights": [
+      44,
+      44
+    ],
+    "inputFont": [
+      "16px",
+      "16px"
+    ],
+    "tapTargetsUnder44": [],
+    "offenders": [],
+    "errors": []
+  }
+]

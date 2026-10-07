@@ -1,68 +1,148 @@
-// Renders Confirmed SO with mocked API data and saves screenshots + measured control heights.
+// Renders the real Routes tab (vite dev server on :5199) with mocked API + stubbed Google Maps and saves screenshots.
+// Scratch only - not committed. Usage: node shoot.mjs [outDir]
 import { createRequire } from "node:module";
-import fs from "node:fs";
 const require = createRequire("C:/Users/dexte/Downloads/RGF/RGF/projects/IntelliFleet-Logistics-Platform/IntelliFleet-Logistics-Platform/artifacts/intellifleet/package.json");
 const { chromium } = require("playwright");
-const OUT = "C:/Users/dexte/Downloads/RGF/RGF/projects/IntelliFleet-Logistics-Platform/IntelliFleet-Logistics-Platform/backend/scratch/ui";
+import fs from "node:fs";
+import path from "node:path";
 
-const order = (n) => ({
-  id: `id${n}`, salesorder_number: `SO26-${18000 + n}`, customer_name: ["EMBLUJU INC.", "Denny's Philippines", "Golden Arches Dev Corp", "Jollibee Foods Corp"][n % 4] + ` #${n}`,
-  order_status: "confirmed", expected_shipment_date: "2026-10-06", total: 12500.5 * n, synced_at: "2026-10-05T07:00:00Z",
-  assignment_status: "assigned", vehicle_id: n % 2 ? "NFX5791" : "DCD8953", driver_id: 3, driver_name: "Juan Dela Cruz",
-  shipping_city: "Makati", shipping_address: { address: "12 Ayala Ave", city: "Makati", state: "NCR" },
-  notes: "Deliver before 9am", product_count: 2, zoho_lock: n % 3 === 0 ? { is_locked: true, config_name: "For Fulfillment" } : { is_locked: false },
-  products: [{ name: "Wagyu Striploin", sku: "WS-1", quantity: 4, unit: "case", total_weight_kg: 40 + n, line_item_id: `l${n}a`, item_id: `i${n}a`, quantity_packed: 0, quantity_shipped: 0 }, { name: "Fries", sku: "FR-2", quantity: 2, unit: "case", total_weight_kg: n % 2 ? null : 20, line_item_id: `l${n}b`, item_id: `i${n}b`, quantity_packed: 0, quantity_shipped: 0 }],
-  raw_json: { line_items: [{ line_item_id: `l${n}a`, item_id: `i${n}a`, sku: "WS-1", quantity: 4, unit: "case", location_name: "Mets" }, { line_item_id: `l${n}b`, item_id: `i${n}b`, sku: "FR-2", quantity: 2, unit: "case", location_name: "Glacier" }] },
+const OUT = process.argv[2] || "./";
+fs.mkdirSync(OUT, { recursive: true });
+const BASE = "http://127.0.0.1:5199";
+
+const part = (km, min, distance, time, fuel, refrigeration, toll, total) => ({
+  distanceKm: km, durationMin: min,
+  costBreakdown: { distance, time, fuel, refrigeration, tolls: toll.amount, total },
+  toll,
 });
+const unknown = { present: true, amount: 0, unknown: true, inferred: true };
+const none = { present: false, amount: 0, unknown: false };
+const expressway = {
+  key: "expressway", label: "Via expressway", distanceKm: 76.7, durationMin: 115, cost: 1757.07, tollDataAvailable: false, geometry: null,
+  costBreakdown: { distance: 383.27, time: 229.93, fuel: 1040.32, refrigeration: 103.55, tolls: 0, total: 1757.07 },
+  toll: unknown,
+  roundTrip: {
+    outbound: part(27.9, 52, 139.45, 103.5, 378.52, 103.55, unknown, 725.02),
+    return: part(48.8, 63, 243.82, 126.43, 661.8, 0, unknown, 1032.05),
+    total: part(76.7, 115, 383.27, 229.93, 1040.32, 103.55, unknown, 1757.07),
+  },
+};
+const avoid = {
+  key: "avoid", label: "Avoid tolls", distanceKm: 76.7, durationMin: 232, cost: 2056.07, tollDataAvailable: false, geometry: null,
+  costBreakdown: { distance: 383.27, time: 464.0, fuel: 1040.32, refrigeration: 168.48, tolls: 0, total: 2056.07 },
+  toll: none,
+  roundTrip: {
+    outbound: part(31.0, 105, 155, 210, 420.7, 168.48, none, 954.18),
+    return: part(45.7, 127, 228.5, 254, 619.6, 0, none, 1102.1),
+    total: part(76.7, 232, 383.5, 464, 1040.3, 168.48, none, 2056.28),
+  },
+};
+const warehouses = [
+  { id: "mets", name: "Mets Cold Storage", address: "Mets Cold Storage, Km 41 Aguinaldo Hwy, Silang, Cavite, Philippines", google_place: "", lat: 14.29, lng: 121.01, place_id_hex: "", map_url: "https://maps.google.com/?q=mets" },
+  { id: "glacier", name: "Glacier Cold Storage", address: "Glacier Cold Storage, Tambo, Parañaque City, Metro Manila, Philippines", google_place: "", lat: 14.49, lng: 120.99, place_id_hex: "", map_url: "https://maps.google.com/?q=glacier" },
+];
+const plan = {
+  origin: { label: "Santa Maria, Bulacan, Philippines", lat: 14.83, lng: 120.98 },
+  destination: { label: "Blumentritt Rd, Sampaloc, Manila, Metro Manila, Philippines", lat: 14.62, lng: 121.0 },
+  stops: [], mode: "fastest", objectiveNote: "", returnToWarehouse: true, returnWarehouse: warehouses[0],
+  ...expressway, geometry: null, warnings: [], tollsEnabled: true, expressways: "compare", tollOptions: [expressway, avoid],
+  activeOption: "expressway", cheapestOption: null, fastestOption: "expressway", noTollFreeAlternative: false, tollDataAvailable: false,
+  rates: {
+    dieselPricePerLiter: 95, fuelKmPerLiter: 7, fuelCostPerKm: 13.57, distanceCostPerKm: 5, driverCostPerHour: 120, helperCostPerHour: 120,
+    refrigerationLitersPerHourChilled: 0.8, refrigerationLitersPerHourFrozen: 1.2, refrigerationCostPerHourChilled: 76, refrigerationCostPerHourFrozen: 114,
+    refrigerationOnReturnLeg: false, tollsEnabled: true, tollVehicleClass: 2, tollMultiplier: 2,
+  },
+  costAssumptions: { hasHelper: false, refrigerated: true, coldChain: "chilled", coldChainAssumed: true, serviceMinPerStop: 30 },
+  routing: { provider: "google", profile: "DRIVE", trafficAware: true, calculatedAt: new Date(Date.now() - 11 * 60000).toISOString() },
+};
+plan.roundTrip = expressway.roundTrip;
 
-async function run(browser, width, rows, { kpi = false, name }) {
-  const ctx = await browser.newContext({ viewport: { width, height: width < 700 ? 900 : 900 } });
-  const page = await ctx.newPage();
-  await page.addInitScript((mode) => { localStorage.setItem("if-access-token", "t"); localStorage.setItem("intellifleet.confirmedSo.viewMode", mode); }, kpi ? "kpi" : "spreadsheet");
-  await page.route("http://mock.test/**", async (route) => {
-    const url = new URL(route.request().url());
-    const json = (body) => route.fulfill({ status: 200, contentType: "application/json", headers: { "access-control-allow-origin": "*" }, body: JSON.stringify(body) });
-    if (route.request().method() === "OPTIONS") return route.fulfill({ status: 204, headers: { "access-control-allow-origin": "*", "access-control-allow-headers": "*", "access-control-allow-methods": "*" } });
-    if (url.pathname.endsWith("/auth/session")) return json({ user: { id: "1", fullName: "Pau", email: "p@x.com", role: "admin", status: "active" } });
-    if (url.pathname.endsWith("/inventory/sales-orders")) return json({ items: rows, page: 1, per_page: 100, total: rows.length, has_more: false, stock_pending: false });
-    return json({});
+const MAPS_STUB = `(function(){
+  var d = (window.google = window.google || {}).maps = (window.google && window.google.maps) || {};
+  var stub = new Proxy(function(){}, { get: function(t,p){ return p === 'then' ? undefined : stub; }, apply: function(){ return stub; }, construct: function(){ return stub; } });
+  window.__acs = [];
+  function Autocomplete(input){ this.input = input; this.l = []; window.__acs.push(this); }
+  Autocomplete.prototype.addListener = function(e, cb){ this.l.push(cb); };
+  Autocomplete.prototype.getPlace = function(){ return this.place; };
+  function FakeMap(el){ el.innerHTML = '<div style="display:grid;place-items:center;height:100%;min-height:inherit;background:linear-gradient(135deg,#e8efe8,#dfe8f0);color:#55565a;font:12px DM Sans,sans-serif">Google Map (stub)</div>'; return new Proxy(this, { get: function(t,p){ return p in t ? t[p] : function(){}; } }); }
+  ['Marker','Polyline','LatLngBounds','Size','Point','InfoWindow','OverlayView','Circle','LatLng'].forEach(function(n){ d[n] = stub; });
+  d.Map = FakeMap; d.event = stub; d.SymbolPath = stub; d.Animation = stub;
+  d.importLibrary = function(){ return Promise.resolve({ Autocomplete: Autocomplete }); };
+  if (typeof d.__ib__ === 'function') d.__ib__();
+})();`;
+
+const json = (route, body, status = 200) => route.fulfill({ status, contentType: "application/json", headers: { "access-control-allow-origin": "*" }, body: JSON.stringify(body) });
+
+async function mockApi(page) {
+  await page.route(/maps\.googleapis\.com\/maps\/api\/js/, (route) => route.fulfill({ contentType: "text/javascript", body: MAPS_STUB }));
+  await page.route(/fonts\.(googleapis|gstatic)\.com/, (route) => route.continue());
+  await page.route("http://mock.test/**", (route) => {
+    const req = route.request();
+    if (req.method() === "OPTIONS") return route.fulfill({ status: 204, headers: { "access-control-allow-origin": "*", "access-control-allow-headers": "*", "access-control-allow-methods": "*" } });
+    const url = new URL(req.url());
+    const p = url.pathname;
+    if (p === "/auth/session") return json(route, { user: { id: 1, email: "admin@rgf.com", role: "admin", full_name: "Admin", status: "active" } });
+    if (p === "/routes/warehouses") return json(route, { warehouses });
+    if (p === "/routes/plan" && req.method() === "POST") return json(route, plan);
+    if (p.startsWith("/routes") || p.startsWith("/vehicles") || p.startsWith("/orders") || p.startsWith("/manifests")) return json(route, []);
+    return json(route, {});
   });
-  await page.goto("http://127.0.0.1:5199/app/loads");
-  const TAB = process.env.TAB || "Confirmed SO";
-  await page.getByRole("button", { name: TAB, exact: true }).click();
-  await page.waitForSelector('[data-testid="lp-toolbar"]');
-  await page.waitForTimeout(rows.length ? 1200 : 800);
-  const heights = await page.evaluate(() => {
-    const h = (el) => (el ? Math.round(el.getBoundingClientRect().height * 10) / 10 : null);
-    const tb = document.querySelector('[data-testid="lp-toolbar"]');
-    const q = (sel) => tb.querySelector(sel);
-    const btn = (t) => [...tb.querySelectorAll("button")].find((b) => b.textContent.trim().startsWith(t));
-    const fs = (el) => (el ? getComputedStyle(el).fontSize : null);
-    const inputs = [...tb.querySelectorAll("input[type=date]")];
-    return {
-      "Search": [h(q('input[aria-label^="Search"]')), fs(q('input[aria-label^="Search"]'))],
-      "From": [h(inputs[0]), fs(inputs[0])], "To": [h(inputs[1]), fs(inputs[1])], "Order status": [h(q("select")), fs(q("select"))], "Weight text": [fs(q('[data-testid="load-planning-total-weight"]'))],
-      "Cities": [h(btn("All cities")), fs(btn("All cities"))], "Export": [h(btn("Export")), fs(btn("Export"))], "Send to Email": [h(btn("Send to Email")), fs(btn("Send to Email"))],
-      "Acknowledge": [h(btn("Acknowledge")), fs(btn("Acknowledge"))], "Refresh": [h(btn("Refresh")), fs(btn("Refresh"))],
-      "Toggle (box)": [h(q('[data-testid="view-toggle"]')), fs(q('[data-testid="view-toggle"] button'))],
-      "Toggle btn widths": [...tb.querySelectorAll('[data-testid="view-toggle"] button')].map((b) => Math.round(b.getBoundingClientRect().width)),
-      "scrollWidth>clientWidth (page)": document.documentElement.scrollWidth > document.documentElement.clientWidth,
-    };
-  });
-  await page.screenshot({ path: `${OUT}/${process.env.TAB ? "loadplanning-" : ""}${name}.png` });
-  const cards = await page.locator('[data-testid="sales-order-card"]').count();
-  await ctx.close();
-  return { name, width, rows: rows.length, cards, heights };
 }
+
+async function pickPlace(page, index, label, lat, lng) {
+  await page.evaluate(([i, text, la, ln]) => {
+    const ac = window.__acs[i];
+    ac.place = { formatted_address: text, geometry: { location: { lat: () => la, lng: () => ln } } };
+    ac.l.forEach((cb) => cb());
+  }, [index, label, lat, lng]);
+}
+
+const sizes = [
+  ["1440", 1440, 900],
+  ["1024", 1024, 800],
+  ["768", 768, 1024],
+  ["390", 390, 844],
+];
 
 const browser = await chromium.launch();
-const eight = Array.from({ length: 8 }, (_, i) => order(i + 1));
-const results = [];
-for (const w of (process.env.W ? [Number(process.env.W)] : [1440, 1024, 390])) {
-  results.push(await run(browser, w, [], { name: `confirmed-0rows-${w}` }));
-  results.push(await run(browser, w, eight, { name: `confirmed-8rows-${w}` }));
+const report = [];
+for (const [name, width, height] of sizes) {
+  const context = await browser.newContext({ viewport: { width, height }, deviceScaleFactor: 2, hasTouch: width < 700, isMobile: width < 700 });
+  await context.addInitScript(() => localStorage.setItem("if-access-token", "mock-token"));
+  const page = await context.newPage();
+  const errors = [];
+  page.on("pageerror", (e) => errors.push(String(e)));
+  await mockApi(page);
+  await page.goto(`${BASE}/app/routes`, { waitUntil: "domcontentloaded" });
+  await page.waitForSelector('text=Plan a live route', { timeout: 30000 });
+  await page.waitForFunction(() => (window.__acs || []).length >= 2, null, { timeout: 15000 });
+  await pickPlace(page, 0, plan.origin.label, 14.83, 120.98);
+  await pickPlace(page, 1, plan.destination.label, 14.62, 121.0);
+  await page.getByText("Mets Cold Storage").first().click();
+  await page.screenshot({ path: path.join(OUT, `${name}-builder.png`), fullPage: false });
+  await page.getByRole("button", { name: /Calculate route/ }).click();
+  await page.waitForSelector('[data-testid="route-cost-table"]', { timeout: 15000 });
+  await page.waitForTimeout(400);
+  await page.screenshot({ path: path.join(OUT, `${name}-full.png`), fullPage: true });
+  // expand "How this is calculated" for a second capture of the card
+  await page.locator(".rc-how summary").click();
+  await page.locator('[data-testid="route-cost-table"]').screenshot({ path: path.join(OUT, `${name}-cost-card-open.png`) });
+  const metrics = await page.evaluate(() => ({
+    innerWidth: window.innerWidth,
+    docScrollWidth: document.documentElement.scrollWidth,
+    bodyScrollWidth: document.body.scrollWidth,
+    tableVisible: !!document.querySelector(".rc-scroll") && getComputedStyle(document.querySelector(".rc-scroll")).display !== "none",
+    cardsVisible: !!document.querySelector(".rc-cards") && getComputedStyle(document.querySelector(".rc-cards")).display !== "none",
+    tableScrolls: (() => { const e = document.querySelector('.rc-scroll'); return e ? e.scrollWidth > e.clientWidth + 1 : null; })(),
+    actionBarPosition: getComputedStyle(document.querySelector(".route-action-bar")).position,
+    inputHeights: [...document.querySelectorAll("form input[type=text], form input:not([type])")].map((i) => Math.round(i.getBoundingClientRect().height)),
+    inputFont: [...document.querySelectorAll("form input:not([type=radio]):not([type=checkbox])")].map((i) => getComputedStyle(i).fontSize),
+    tapTargetsUnder44: [...document.querySelectorAll("form button, form .route-choice, summary")].filter((e) => { const r = e.getBoundingClientRect(); return r.height > 0 && r.height < 43.5; }).map((e) => (e.textContent || "").trim().slice(0, 30)),
+    offenders: [...document.querySelectorAll(".route-tab *")].filter((e) => { const r = e.getBoundingClientRect(); return r.width > 0 && r.right > window.innerWidth + 1 && !e.closest(".rc-scroll"); }).slice(0, 5).map((e) => e.className?.toString().slice(0, 50) || e.tagName),
+  }));
+  report.push({ name, ...metrics, errors });
+  await context.close();
 }
-for (const w of (process.env.W ? [] : [1440, 390])) results.push(await run(browser, w, eight, { kpi: true, name: `kpi-8rows-${w}` }));
 await browser.close();
-fs.writeFileSync(`${OUT}/measurements.json`, JSON.stringify(results, null, 1));
-for (const r of results) console.log(r.name, "cards=" + r.cards, JSON.stringify(r.heights));
+fs.writeFileSync(path.join(OUT, "report.json"), JSON.stringify(report, null, 2));
+console.log(JSON.stringify(report, null, 2));

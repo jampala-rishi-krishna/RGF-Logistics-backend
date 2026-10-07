@@ -115,9 +115,10 @@ def leg_toll(toll_info: dict | None, config: RouteCostConfig) -> dict:
     if not config.get("tolls_enabled", True) or not toll_info or not toll_info.get("present"):
         return {"present": False, "amount": 0.0, "unknown": False}
     price = toll_info.get("price")
+    extra = {"inferred": True} if toll_info.get("inferred") else {}
     if price is None:
-        return {"present": True, "amount": 0.0, "unknown": True}
-    return {"present": True, "amount": round(float(price) * config["toll_multiplier"], 2), "unknown": False}
+        return {"present": True, "amount": 0.0, "unknown": True, **extra}
+    return {"present": True, "amount": round(float(price) * config["toll_multiplier"], 2), "unknown": False, **extra}
 
 
 def sum_tolls(tolls: list[dict]) -> dict:
@@ -125,6 +126,7 @@ def sum_tolls(tolls: list[dict]) -> dict:
         "present": any(t["present"] for t in tolls),
         "amount": round(sum(t["amount"] for t in tolls), 2),
         "unknown": any(t["unknown"] for t in tolls),
+        **({"inferred": True} if any(t.get("inferred") for t in tolls) else {}),
     }
 
 

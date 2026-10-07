@@ -1,0 +1,37 @@
+{
+  "body": {
+    "origin": {
+      "location": {
+        "latLng": {
+          "latitude": 14.8289779,
+          "longitude": 120.9761599
+        }
+      }
+    },
+    "destination": {
+      "location": {
+        "latLng": {
+          "latitude": 14.2907776,
+          "longitude": 121.0134132
+        }
+      }
+    },
+    "intermediates": [
+      {
+        "location": {
+          "latLng": {
+            "latitude": 14.618704,
+            "longitude": 120.9982561
+          }
+        }
+      }
+    ],
+    "travelMode": "DRIVE",
+    "routingPreference": "TRAFFIC_AWARE",
+    "optimizeWaypointOrder": false,
+    "extraComputations": [
+      "TOLLS"
+    ]
+  },
+  "field_mask": "routes.distanceMeters,routes.duration,routes.polyline.encodedPolyline,routes.legs.distanceMeters,routes.legs.duration,routes.optimizedIntermediateWaypointIndex,routes.travelAdvisory.tollInfo,routes.legs.travelAdvisory.tollInfo"
+}

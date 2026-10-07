@@ -237,6 +237,7 @@ async def plan_route(body: RoutePlanBody):
     frozen = (body.coldChainCategory or "").strip().lower() == "frozen"
 
     def build_option(key: str, label: str, geometry: dict) -> dict:
+        data_available = any((leg.get("toll") or {}).get("present") and not (leg.get("toll") or {}).get("inferred") for leg in geometry.get("legs") or [])
         legs = geometry.get("legs") or []
         if not legs:
             legs = [{"distance_km": float(geometry.get("distance_km") or matrix["distance_matrix_km"][0][-1]), "duration_min": float(geometry.get("duration_min") or matrix["duration_matrix_min"][0][-1])}]
@@ -255,14 +256,24 @@ async def plan_route(body: RoutePlanBody):
             "roundTrip": trip,
             "toll": trip["total"]["toll"],
             "tollsAvoided": key == "avoid",
+            # False: Google returned no tollInfo for this route (it often has none for Philippine expressways).
+            "tollDataAvailable": data_available,
             "geometry": geometry["polyline"],
         }
 
+    no_toll_free_alternative = False
     if preference == "compare":
-        options = [build_option("expressway", "Via expressway", primary), build_option("avoid", "Avoid tolls", secondary)]
-        active = _choose_option(options, body.mode)
-        cheapest = min(options, key=lambda o: o["cost"])["key"]
-        fastest = min(options, key=lambda o: o["durationMin"])["key"]
+        if _same_route(primary, secondary):
+            # Google found no different route without tolls: one card plus a note, not a duplicate.
+            no_toll_free_alternative = True
+            options = [build_option("expressway", "Via expressway", primary)]
+            active, cheapest, fastest = options[0], None, None
+        else:
+            options = [build_option("expressway", "Via expressway", {**primary, "legs": _infer_tolls(primary.get("legs") or [], secondary.get("legs") or [])}), build_option("avoid", "Avoid tolls", secondary)]
+            active = _choose_option(options, body.mode)
+            # Cheapest is only meaningful when every cost is known: an unpriced toll disqualifies the badge.
+            cheapest = None if any(o["toll"]["unknown"] for o in options) else min(options, key=lambda o: o["cost"])["key"]
+            fastest = min(options, key=lambda o: o["durationMin"])["key"]
     else:
         key = "avoid" if preference == "avoid" else "expressway"
         options = [build_option(key, "Avoid tolls" if key == "avoid" else "Via expressway", primary)]
@@ -293,6 +304,8 @@ async def plan_route(body: RoutePlanBody):
         "tollsEnabled": tolls_on,
         "expressways": preference,
         "tollOptions": options if preference == "compare" else [],
+        "noTollFreeAlternative": no_toll_free_alternative,
+        "tollDataAvailable": active["tollDataAvailable"],
         "activeOption": active["key"],
         "cheapestOption": cheapest,
         "fastestOption": fastest,
@@ -320,6 +333,31 @@ async def plan_route(body: RoutePlanBody):
         "geometry": active["geometry"],
         "warnings": ([route_geometry["skippedReason"]] if route_geometry["skippedReason"] else []) + (["Distance and geometry were returned by different providers."] if matrix.get("provider") != route_geometry.get("provider") else []),
     }
+
+
+def _same_route(a: dict, b: dict) -> bool:
+    """Google returned the same road route for both requests (no toll-free alternative)."""
+    if a.get("polyline") == b.get("polyline"):
+        return True
+    la, lb = a.get("legs") or [], b.get("legs") or []
+    return bool(la) and len(la) == len(lb) and all(
+        abs(x["distance_km"] - y["distance_km"]) < 0.01 and abs(x["duration_min"] - y["duration_min"]) <= 0.03 * max(x["duration_min"], 1.0)
+        for x, y in zip(la, lb)
+    )
+
+
+def _infer_tolls(legs: list[dict], avoid_legs: list[dict]) -> list[dict]:
+    """Google has no Philippine toll data for many routes (no tollInfo at all). When it gave none, a leg
+    that the avoid-tolls request routes differently must use toll roads, so it is flagged "toll applies,
+    fee unknown" (inferred). No price is ever invented."""
+    if len(legs) != len(avoid_legs) or any((leg.get("toll") or {}).get("present") for leg in legs):
+        return legs
+    inferred = []
+    for leg, alt in zip(legs, avoid_legs):
+        km_diff = abs(leg["distance_km"] - alt["distance_km"]) / max(leg["distance_km"], 0.001)
+        min_diff = abs(leg["duration_min"] - alt["duration_min"]) / max(leg["duration_min"], 0.001)
+        inferred.append({**leg, "toll": {"present": True, "price": None, "inferred": True}} if km_diff > 0.01 or min_diff > 0.25 else leg)
+    return inferred
 
 
 def _choose_option(options: list[dict], mode: str) -> dict:
