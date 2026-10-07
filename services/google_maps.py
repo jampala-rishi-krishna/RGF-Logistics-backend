@@ -95,16 +95,30 @@ def _decode_polyline(encoded: str) -> list[list[float]]:
     return points
 
 
-async def fetch_route_polyline(locations: list[list[float]]) -> dict:
+async def fetch_route_polyline(locations: list[list[float]], *, optimize_waypoint_order: bool = False) -> dict:
     key = _key()
-    body = {"origin": _waypoint(*locations[0]), "destination": _waypoint(*locations[-1]), "intermediates": [_waypoint(*p) for p in locations[1:-1]], "travelMode": "DRIVE", "routingPreference": "TRAFFIC_AWARE"}
+    body = {"origin": _waypoint(*locations[0]), "destination": _waypoint(*locations[-1]), "intermediates": [_waypoint(*p) for p in locations[1:-1]], "travelMode": "DRIVE", "routingPreference": "TRAFFIC_AWARE", "optimizeWaypointOrder": bool(optimize_waypoint_order)}
     async with httpx.AsyncClient(timeout=30) as client:
-        response = await client.post(ROUTES, json=body, headers={"X-Goog-Api-Key": key, "X-Goog-FieldMask": "routes.distanceMeters,routes.duration,routes.polyline.encodedPolyline"})
+        response = await client.post(ROUTES, json=body, headers={"X-Goog-Api-Key": key, "X-Goog-FieldMask": "routes.distanceMeters,routes.duration,routes.polyline.encodedPolyline,routes.legs.distanceMeters,routes.legs.duration,routes.optimizedIntermediateWaypointIndex"})
     logger.info("provider=google endpoint=%s status=%s", "/directions/v2:computeRoutes", response.status_code)
     if response.status_code != 200: raise _failure(response, "Routes API")
     route = (response.json().get("routes") or [None])[0]
     if not route: raise OrsError("Google Routes API returned no route.")
-    return {"polyline": __import__("json").dumps({"type": "LineString", "coordinates": _decode_polyline(route["polyline"]["encodedPolyline"])}), "skippedReason": None, "provider": "google", "profile": "DRIVE", "traffic_aware": True, "distance_km": route.get("distanceMeters", 0) / 1000, "duration_min": _seconds(route.get("duration")) / 60, "calculated_at": datetime.now(timezone.utc).isoformat(), "departure_time": None, "fallback_used": False, "fallback_reason": None}
+    return {
+        "polyline": __import__("json").dumps({"type": "LineString", "coordinates": _decode_polyline(route["polyline"]["encodedPolyline"])}),
+        "skippedReason": None,
+        "provider": "google",
+        "profile": "DRIVE",
+        "traffic_aware": True,
+        "distance_km": route.get("distanceMeters", 0) / 1000,
+        "duration_min": _seconds(route.get("duration")) / 60,
+        "legs": [{"distance_km": leg.get("distanceMeters", 0) / 1000, "duration_min": _seconds(leg.get("duration")) / 60} for leg in route.get("legs") or []],
+        "optimized_waypoint_order": route.get("optimizedIntermediateWaypointIndex") or [],
+        "calculated_at": datetime.now(timezone.utc).isoformat(),
+        "departure_time": None,
+        "fallback_used": False,
+        "fallback_reason": None,
+    }
 
 
 async def fetch_route_matrix(locations: list[list[float]]) -> dict:

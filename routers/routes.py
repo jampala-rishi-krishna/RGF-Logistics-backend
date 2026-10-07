@@ -16,6 +16,7 @@ from services.google_maps import OrsError, fetch_route_matrix, fetch_route_polyl
 from services.route_costs import build_objective_cost_matrix, compute_route_cost_breakdown, load_route_cost_config
 from services.serialize import row_to_dict
 from services.time_utils import minutes_since_midnight
+from services.warehouses import get_warehouse, list_warehouses
 
 router = APIRouter(tags=["routes"], dependencies=[Depends(require_role("admin", "dispatcher"))])
 
@@ -35,6 +36,8 @@ class CreateRouteBody(BaseModel):
     durationMin: float | None = None
     cost: float | None = None
     status: str | None = None
+    returnToWarehouse: bool | None = None
+    returnWarehouseId: str | None = None
 
 
 @router.get("/routes/geocode")
@@ -63,6 +66,8 @@ class RoutePlanBody(BaseModel):
     destinationLat: float | None = None
     destinationLng: float | None = None
     stops: list[dict] = []
+    returnToWarehouse: bool = False
+    returnWarehouseId: str | None = None
 
 
 class OptimizeStopsBody(BaseModel):
@@ -70,6 +75,54 @@ class OptimizeStopsBody(BaseModel):
     destination: dict
     stops: list[dict]
     mode: str = "fastest"
+    returnToWarehouse: bool = False
+    returnWarehouseId: str | None = None
+
+
+@router.get("/routes/warehouses")
+def route_warehouses():
+    return {"warehouses": list_warehouses()}
+
+
+def _route_part(distance_km: float, duration_min: float, cost_config: dict, *, include_fixed: bool = False, include_refrigeration: bool = True) -> dict:
+    return {
+        "distanceKm": round(float(distance_km), 2),
+        "durationMin": round(float(duration_min), 1),
+        "costBreakdown": compute_route_cost_breakdown(
+            float(distance_km),
+            float(duration_min),
+            config=cost_config,
+            fixed_cost_per_route=cost_config["fixed_cost_per_route"] if include_fixed else 0.0,
+            include_refrigeration=include_refrigeration,
+        ),
+    }
+
+
+def _split_round_trip(legs: list[dict], return_to_warehouse: bool, cost_config: dict) -> dict:
+    if return_to_warehouse and legs:
+        outbound_legs = legs[:-1]
+        return_legs = legs[-1:]
+    else:
+        outbound_legs = legs
+        return_legs = []
+    outbound_distance = sum(float(leg.get("distance_km") or 0) for leg in outbound_legs)
+    outbound_duration = sum(float(leg.get("duration_min") or 0) for leg in outbound_legs)
+    return_distance = sum(float(leg.get("distance_km") or 0) for leg in return_legs)
+    return_duration = sum(float(leg.get("duration_min") or 0) for leg in return_legs)
+    outbound = _route_part(outbound_distance, outbound_duration, cost_config)
+    return_leg = _route_part(
+        return_distance,
+        return_duration,
+        cost_config,
+        include_refrigeration=bool(cost_config.get("refrigeration_on_return_leg")),
+    )
+    total = _route_part(outbound_distance + return_distance, outbound_duration + return_duration, cost_config, include_fixed=True)
+    total["costBreakdown"]["refrigeration"] = round(outbound["costBreakdown"]["refrigeration"] + return_leg["costBreakdown"]["refrigeration"], 2)
+    total["costBreakdown"]["total"] = round(
+        total["costBreakdown"]["distance"] + total["costBreakdown"]["time"] + total["costBreakdown"]["fuel"] + total["costBreakdown"]["refrigeration"] + total["costBreakdown"]["fixed"],
+        2,
+    )
+    return {"outbound": outbound, "return": return_leg, "total": total}
 
 
 @router.post("/routes/plan")
@@ -93,22 +146,29 @@ async def plan_route(body: RoutePlanBody):
                 if resolved is None:
                     raise HTTPException(404, f"Stop could not be found: {stop.get('label', 'Unnamed stop')}")
                 resolved_stops.append({"label": stop.get("label") or "Stop", **resolved})
+        return_warehouse = get_warehouse(body.returnWarehouseId) if body.returnToWarehouse else None
         points = [origin, *resolved_stops, destination]
+        if return_warehouse:
+            points.append(return_warehouse)
         coordinates = [[point["lng"], point["lat"]] for point in points]
         ferry_issue = await route_requires_ferry(coordinates)
         if ferry_issue:
             raise HTTPException(422, ferry_issue)
         matrix = await fetch_route_matrix(coordinates)
-        route_geometry = await fetch_route_polyline(
-            coordinates
-        )
+        route_geometry = await fetch_route_polyline(coordinates)
+    except KeyError:
+        raise HTTPException(400, "Unknown return warehouse.")
     except OrsError as e:
         raise HTTPException(502, str(e))
 
-    distance_km = round(float(route_geometry.get("distance_km") or matrix["distance_matrix_km"][0][-1]), 2)
-    duration_min = round(float(route_geometry.get("duration_min") or matrix["duration_matrix_min"][0][-1]), 1)
     cost_config = load_route_cost_config()
-    cost_breakdown = compute_route_cost_breakdown(distance_km, duration_min, config=cost_config)
+    legs = route_geometry.get("legs") or []
+    if not legs:
+        legs = [{"distance_km": float(route_geometry.get("distance_km") or matrix["distance_matrix_km"][0][-1]), "duration_min": float(route_geometry.get("duration_min") or matrix["duration_matrix_min"][0][-1])}]
+    round_trip = _split_round_trip(legs, bool(return_warehouse), cost_config)
+    distance_km = round_trip["total"]["distanceKm"]
+    duration_min = round_trip["total"]["durationMin"]
+    cost_breakdown = round_trip["total"]["costBreakdown"]
     cost = cost_breakdown["total"]
     if body.mode == "cheapest":
         objective_note = "Lowest estimated operating cost, based on configured distance, time, fuel, and refrigeration rates."
@@ -122,12 +182,15 @@ async def plan_route(body: RoutePlanBody):
         "origin": {"label": body.origin, **origin},
         "destination": {"label": body.destination, **destination},
         "stops": resolved_stops,
+        "returnToWarehouse": bool(return_warehouse),
+        "returnWarehouse": return_warehouse,
         "mode": body.mode,
         "objectiveNote": objective_note,
         "distanceKm": distance_km,
         "durationMin": duration_min,
         "cost": cost,
         "costBreakdown": cost_breakdown,
+        "roundTrip": round_trip,
         "routing": {
             "provider": matrix.get("provider"),
             "profile": matrix.get("profile"),
@@ -151,7 +214,12 @@ async def optimize_stop_order(body: OptimizeStopsBody):
     """Find an ordered stop sequence from a real road matrix, then build its geometry."""
     if len(body.stops) < 2:
         raise HTTPException(400, "At least two intermediate stops are required to optimize their order.")
-    points = [body.origin, *body.stops, body.destination]
+    try:
+        return_warehouse = get_warehouse(body.returnWarehouseId) if body.returnToWarehouse else None
+    except KeyError:
+        raise HTTPException(400, "Unknown return warehouse.")
+    delivery_points = [*body.stops, body.destination]
+    points = [body.origin, *delivery_points, return_warehouse] if return_warehouse else [body.origin, *body.stops, body.destination]
     if any(p.get("lat") is None or p.get("lng") is None for p in points):
         raise HTTPException(400, "Every origin, stop, and destination must have valid coordinates.")
     coordinates = [[float(p["lng"]), float(p["lat"])] for p in points]
@@ -172,15 +240,19 @@ async def optimize_stop_order(body: OptimizeStopsBody):
         order.append(next_stop)
         unvisited.remove(next_stop)
         current = next_stop
-    reordered = [body.stops[index - 1] for index in order]
+    reordered_deliveries = [delivery_points[index - 1] for index in order] if return_warehouse else [body.stops[index - 1] for index in order]
+    reordered_stops = reordered_deliveries[:-1] if return_warehouse else reordered_deliveries
+    reordered_destination = reordered_deliveries[-1] if return_warehouse else body.destination
     result = await plan_route(RoutePlanBody(
         origin=str(body.origin.get("label") or "Origin"),
-        destination=str(body.destination.get("label") or "Destination"),
+        destination=str(reordered_destination.get("label") or "Destination"),
         originLat=float(body.origin["lat"]), originLng=float(body.origin["lng"]),
-        destinationLat=float(body.destination["lat"]), destinationLng=float(body.destination["lng"]),
-        stops=reordered, mode=body.mode,
+        destinationLat=float(reordered_destination["lat"]), destinationLng=float(reordered_destination["lng"]),
+        stops=reordered_stops, mode=body.mode,
+        returnToWarehouse=body.returnToWarehouse,
+        returnWarehouseId=body.returnWarehouseId,
     ))
-    result["optimizedStopOrder"] = [stop.get("label") for stop in reordered]
+    result["optimizedStopOrder"] = [stop.get("label") for stop in reordered_stops]
     return result
 
 
@@ -193,6 +265,8 @@ def create_route(body: CreateRouteBody):
         duration_min=body.durationMin if isinstance(body.durationMin, (int, float)) else 0,
         cost=body.cost if isinstance(body.cost, (int, float)) else 0,
         status=body.status or "draft",
+        return_to_warehouse=bool(body.returnToWarehouse),
+        return_warehouse_id=body.returnWarehouseId,
     )
 
 

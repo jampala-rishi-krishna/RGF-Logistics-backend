@@ -14,6 +14,7 @@ from services.google_maps import geocode_address
 from services.item_weight import calculate_order_weight_kg
 from services.sales_order_location import address_lines
 from services.time_utils import minutes_since_midnight
+from services.warehouses import get_warehouse
 
 logger = logging.getLogger("optimization_data")
 
@@ -52,6 +53,7 @@ class VehiclePlan:
     start_lng: float
     end_lat: float
     end_lng: float
+    has_end_location: bool
     shift_start: int
     shift_end: int
     temperature_capabilities: list[str]
@@ -78,6 +80,9 @@ class FleetData:
     shipments: list[ShipmentPlan]
     warnings: list[str] = field(default_factory=list)
     data_snapshot: dict = field(default_factory=dict)
+    return_to_warehouse: bool = False
+    return_warehouse_id: str | None = None
+    return_warehouse: dict | None = None
 
 
 async def fetch_fleet_data(
@@ -86,6 +91,8 @@ async def fetch_fleet_data(
     mode: str,
     vehicle_ids: list | None,
     order_ids: list | None = None,
+    return_to_warehouse: bool = False,
+    return_warehouse_id: str | None = None,
 ) -> FleetData:
     vehicles_stmt = select(Vehicle)
     if vehicle_ids:
@@ -95,6 +102,7 @@ async def fetch_fleet_data(
         raise FleetDataError("No vehicles found in the fleet.")
 
     warnings: list[str] = []
+    return_warehouse = get_warehouse(return_warehouse_id) if return_to_warehouse else None
     vehicle_list: list[VehiclePlan] = []
     vehicle_fingerprints: list[str] = []
     now = datetime.now(timezone.utc)
@@ -137,8 +145,9 @@ async def fetch_fleet_data(
                 cost_per_hour=float(v.cost_per_hour) if v.cost_per_hour is not None else None,
                 start_lat=start_lat,
                 start_lng=start_lng,
-                end_lat=start_lat,  # closed tour for MVP
-                end_lng=start_lng,
+                end_lat=float(return_warehouse["lat"]) if return_warehouse else start_lat,
+                end_lng=float(return_warehouse["lng"]) if return_warehouse else start_lng,
+                has_end_location=bool(return_warehouse),
                 shift_start=minutes_since_midnight(v.shift_start) or 0,
                 shift_end=minutes_since_midnight(v.shift_end) or 1440,
                 temperature_capabilities=(v.temperature_capability.split(",") if v.temperature_capability else ["ambient"]),
@@ -231,5 +240,5 @@ async def fetch_fleet_data(
             f"Orders: {', '.join(str(i) for i in missing_coord_orders)}. Geocoding failed or the customer has no address on file."
         )
 
-    data_snapshot = {"vehicles": sorted(vehicle_fingerprints), "orders": sorted(order_fingerprints)}
-    return FleetData(vehicles=vehicle_list, shipments=shipments, warnings=warnings, data_snapshot=data_snapshot)
+    data_snapshot = {"vehicles": sorted(vehicle_fingerprints), "orders": sorted(order_fingerprints), "return_to_warehouse": bool(return_warehouse), "return_warehouse_id": return_warehouse_id if return_warehouse else None}
+    return FleetData(vehicles=vehicle_list, shipments=shipments, warnings=warnings, data_snapshot=data_snapshot, return_to_warehouse=bool(return_warehouse), return_warehouse_id=return_warehouse_id if return_warehouse else None, return_warehouse=return_warehouse)

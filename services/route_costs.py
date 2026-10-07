@@ -15,6 +15,7 @@ class RouteCostConfig(TypedDict):
     refrigeration_cost_configured: bool
     fixed_cost_per_route: float
     fixed_cost_configured: bool
+    refrigeration_on_return_leg: bool
 
 
 def _read_float_env(name: str, default: float) -> tuple[float, bool]:
@@ -33,6 +34,7 @@ def load_route_cost_config() -> RouteCostConfig:
     fuel_surcharge_per_km, fuel_surcharge_configured = _read_float_env("ROUTE_FUEL_COST_PER_KM", 0.0)
     refrigeration_cost_per_hour, refrigeration_cost_configured = _read_float_env("ROUTE_REFRIGERATION_COST_PER_HOUR", 0.0)
     fixed_cost_per_route, fixed_cost_configured = _read_float_env("ROUTE_FIXED_COST_PER_ROUTE", 0.0)
+    refrigeration_on_return_leg = os.environ.get("REFRIGERATION_ON_RETURN_LEG", "").strip().lower() in {"1", "true", "yes", "on"}
     return {
         "distance_rate_per_km": distance_rate_per_km,
         "distance_rate_configured": distance_rate_configured,
@@ -44,6 +46,7 @@ def load_route_cost_config() -> RouteCostConfig:
         "refrigeration_cost_configured": refrigeration_cost_configured,
         "fixed_cost_per_route": fixed_cost_per_route,
         "fixed_cost_configured": fixed_cost_configured,
+        "refrigeration_on_return_leg": refrigeration_on_return_leg,
     }
 
 
@@ -57,6 +60,7 @@ def compute_route_cost_breakdown(
     fuel_surcharge_per_km: float | None = None,
     refrigeration_cost_per_hour: float | None = None,
     fixed_cost_per_route: float | None = None,
+    include_refrigeration: bool = True,
 ) -> dict:
     rates = config or load_route_cost_config()
     distance_rate = float(distance_rate_per_km if distance_rate_per_km is not None else rates["distance_rate_per_km"])
@@ -70,7 +74,7 @@ def compute_route_cost_breakdown(
     distance_cost = float(distance_km) * distance_rate
     time_cost = (float(duration_min) / 60.0) * time_rate
     fuel_cost = float(distance_km) * fuel_rate
-    refrigeration_cost = (float(duration_min) / 60.0) * refrigeration_rate
+    refrigeration_cost = (float(duration_min) / 60.0) * refrigeration_rate if include_refrigeration else 0.0
     total = distance_cost + time_cost + fuel_cost + refrigeration_cost + fixed_cost
 
     return {

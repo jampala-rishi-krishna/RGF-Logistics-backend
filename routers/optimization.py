@@ -34,6 +34,8 @@ class PreviewBody(BaseModel):
     vehicleIds: list[int] | None = None
     orderIds: list[int] | None = None
     objective: str = "recommended"
+    returnToWarehouse: bool = False
+    returnWarehouseId: str | None = None
 
 
 class ReoptimizeBody(BaseModel):
@@ -41,6 +43,8 @@ class ReoptimizeBody(BaseModel):
     vehicleIds: list[int] | None = None
     orderIds: list[int] | None = None
     objective: str = "recommended"
+    returnToWarehouse: bool = False
+    returnWarehouseId: str | None = None
 
 
 async def _run_optimization(
@@ -50,19 +54,26 @@ async def _run_optimization(
     vehicle_ids: list | None,
     order_ids: list | None,
     objective: str,
+    return_to_warehouse: bool = False,
+    return_warehouse_id: str | None = None,
 ) -> dict:
     try:
-        fleet_data = await fetch_fleet_data(db, mode=mode, vehicle_ids=vehicle_ids, order_ids=order_ids)
+        fleet_data = await fetch_fleet_data(db, mode=mode, vehicle_ids=vehicle_ids, order_ids=order_ids, return_to_warehouse=return_to_warehouse, return_warehouse_id=return_warehouse_id)
     except FleetDataError as e:
         raise HTTPException(422, detail={"message": str(e), "issues": e.issues})
+    except KeyError:
+        raise HTTPException(400, "Unknown return warehouse.")
 
     # Node indexing: vehicle1.start(0), vehicle1.end(1), vehicle2.start(2), ... then shipments.
     locations: list[list[float]] = []
     for v in fleet_data.vehicles:
         v.start_node = len(locations)
         locations.append([v.start_lng, v.start_lat])
-        v.end_node = len(locations)
-        locations.append([v.end_lng, v.end_lat])
+        if v.has_end_location:
+            v.end_node = len(locations)
+            locations.append([v.end_lng, v.end_lat])
+        else:
+            v.end_node = v.start_node
     for s in fleet_data.shipments:
         s.node = len(locations)
         locations.append([s.lng, s.lat])
@@ -90,7 +101,7 @@ async def _run_optimization(
     shipment_by_id = {str(s.id): s for s in fleet_data.shipments}
     vehicle_by_id = {str(v.id): v for v in fleet_data.vehicles}
     node_coords = {v.start_node: [v.start_lng, v.start_lat] for v in fleet_data.vehicles}
-    node_coords.update({v.end_node: [v.end_lng, v.end_lat] for v in fleet_data.vehicles})
+    node_coords.update({v.end_node: [v.end_lng, v.end_lat] for v in fleet_data.vehicles if v.has_end_location})
     node_coords.update({s.node: [s.lng, s.lat] for s in fleet_data.shipments})
     for vr in result.routes:
         vehicle = vehicle_by_id.get(str(vr.vehicle_id))
@@ -101,7 +112,8 @@ async def _run_optimization(
             shipment = shipment_by_id.get(str(stop_id))
             if shipment is not None:
                 ordered_coords.append([shipment.lng, shipment.lat])
-        ordered_coords.append(node_coords[vehicle.end_node])
+        if vehicle.has_end_location:
+            ordered_coords.append(node_coords[vehicle.end_node])
         ferry_issue = await route_requires_ferry(ordered_coords)
         if ferry_issue:
             return {
@@ -206,20 +218,22 @@ async def _run_optimization(
         "totalDurationMin": round(total_duration, 1),
         "warnings": fleet_data.warnings,
         "routing": routing_metadata,
+        "returnToWarehouse": fleet_data.return_to_warehouse,
+        "returnWarehouse": fleet_data.return_warehouse,
     }
 
 
 @router.post("/preview")
 async def preview_optimization(body: PreviewBody, db: Session = Depends(get_db)):
     mode = "reoptimize" if body.mode == "reoptimize" else "initial"
-    return await _run_optimization(db, mode=mode, vehicle_ids=body.vehicleIds, order_ids=body.orderIds, objective=body.objective)
+    return await _run_optimization(db, mode=mode, vehicle_ids=body.vehicleIds, order_ids=body.orderIds, objective=body.objective, return_to_warehouse=body.returnToWarehouse, return_warehouse_id=body.returnWarehouseId)
 
 
 @router.post("/reoptimize")
 async def reoptimize(body: ReoptimizeBody, db: Session = Depends(get_db)):
     if not body.reason:
         raise HTTPException(400, 'reason is required (e.g. "vehicle_deviation", "urgent_delivery", "delay").')
-    result = await _run_optimization(db, mode="reoptimize", vehicle_ids=body.vehicleIds, order_ids=body.orderIds, objective=body.objective)
+    result = await _run_optimization(db, mode="reoptimize", vehicle_ids=body.vehicleIds, order_ids=body.orderIds, objective=body.objective, return_to_warehouse=body.returnToWarehouse, return_warehouse_id=body.returnWarehouseId)
     return {**result, "reason": body.reason}
 
 
@@ -257,6 +271,8 @@ async def apply_optimization(body: ApplyBody, db: Session = Depends(get_db), cur
             mode=run.get("mode") or "initial",
             vehicle_ids=scope_vehicle_ids,
             order_ids=scope_order_ids,
+            return_to_warehouse=bool(stored_snapshot.get("return_to_warehouse")),
+            return_warehouse_id=stored_snapshot.get("return_warehouse_id"),
         )
     except FleetDataError as e:
         memory_tables.optimization_runs.update(run["id"], status="failed")

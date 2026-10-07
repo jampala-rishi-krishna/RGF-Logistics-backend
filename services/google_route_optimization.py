@@ -34,11 +34,12 @@ def build_request(data: FleetData) -> dict:
         vehicle = {
             "label": str(v.id),
             "startLocation": {"latitude": v.start_lat, "longitude": v.start_lng},
-            "endLocation": {"latitude": v.end_lat, "longitude": v.end_lng},
             "loadLimits": {"weightKg": {"maxLoad": v.capacity_kg}},
             "costPerKilometer": v.cost_per_km or 0,
             "costPerHour": v.cost_per_hour or 0,
         }
+        if getattr(v, "has_end_location", True):
+            vehicle["endLocation"] = {"latitude": v.end_lat, "longitude": v.end_lng}
         if v.shift_start or v.shift_end:
             vehicle["startTimeWindows"] = [{"startTime": _timestamp(v.shift_start), "endTime": _timestamp(v.shift_end)}]
         vehicles.append(vehicle)
