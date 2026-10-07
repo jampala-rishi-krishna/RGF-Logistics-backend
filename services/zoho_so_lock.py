@@ -6,8 +6,6 @@ import os
 import re
 import threading
 import time
-from datetime import datetime
-from zoneinfo import ZoneInfo
 
 import httpx
 
@@ -15,7 +13,6 @@ from services import zoho_rate_limiter
 from services.zoho_client import REQUEST_TIMEOUT, ZohoError
 
 logger = logging.getLogger("zoho")
-PHT = ZoneInfo("Asia/Manila")
 
 _access_token: str | None = None
 _access_token_expires_at = 0.0
@@ -161,6 +158,32 @@ def _already_locked(payload: dict) -> bool:
 
 _SO_ID = re.compile(r"^\d{1,32}$")
 
+# Zoho rejects a lock reason of 100+ characters ("reason has less than 100 characters"); stay well under it.
+REASON_BASE = "Acknowledged by Supply Chain Department via IntelliFleet"
+REASON_MAX_LENGTH = 90
+
+
+def _encoded_length(text: str) -> int:
+    """Length of the reason as it travels inside JSONString (quotes and backslashes in a name grow when escaped)."""
+    return len(json.dumps(text, ensure_ascii=False)) - 2  # minus the surrounding quotes
+
+
+def build_reason(user: str | None) -> str:
+    """Base text, plus " - {user}" only while it fits in REASON_MAX_LENGTH; a long name is truncated.
+    No date/time: Zoho records lock_time and locked_by itself."""
+    actor = " ".join(str(user or "").split())
+    if not actor:
+        return REASON_BASE
+    name = actor
+    while name and _encoded_length(f"{REASON_BASE} - {name}") > REASON_MAX_LENGTH:
+        name = name[:-1]
+    name = name.rstrip()
+    return f"{REASON_BASE} - {name}" if name else REASON_BASE
+
+
+def _post_details(response: httpx.Response, payload: dict) -> dict:
+    return {"lock_http_status": response.status_code, "lock_zoho_code": payload.get("code")}
+
 
 def _empty_status(error: str, message: str | None = None) -> dict:
     status = {"is_locked": False, "config_id": "", "config_name": None, "locked_by": None, "lock_time": None, "reason": None, "lock_error": error}
@@ -222,8 +245,7 @@ def lock_salesorder(so_id: str, user: str | None = None) -> dict:
     config_id = _required("ZOHO_SO_LOCK_CONFIGURATION_ID")
     if status.get("is_locked"):
         return {"locked": True, "already_locked": True, "lock_status": status, "lock_error": None}
-    actor = (user or "unknown user").strip() or "unknown user"
-    reason = f"Acknowledged by Supply Chain Department via IntelliFleet ({actor}, {datetime.now(PHT).strftime('%Y-%m-%d %H:%M')} Asia/Manila)"
+    reason = build_reason(user)
     url = f"{_base_url()}/lock/{config_id}"
     response, error = _safe_request(
         "POST",
@@ -233,13 +255,14 @@ def lock_salesorder(so_id: str, user: str | None = None) -> dict:
     if error:
         return {"locked": False, "already_locked": False, "lock_status": status, "lock_error": error}
     payload = _payload(response)
+    details = _post_details(response, payload)
     if _scope_error(response.status_code, payload):
-        return {"locked": False, "already_locked": False, "lock_status": status, "lock_error": "lock_credential_lacks_scope", "message": payload.get("message")}
+        return {"locked": False, "already_locked": False, "lock_status": status, "lock_error": "lock_credential_lacks_scope", "message": payload.get("message"), **details}
     post_ok = 200 <= response.status_code < 300 and str(payload.get("code", 0)) == "0"
     already = _already_locked(payload)
     if not post_ok and not already:
-        return {"locked": False, "already_locked": False, "lock_status": status, "lock_error": payload.get("message") or f"HTTP {response.status_code}", "zoho_code": payload.get("code")}
+        return {"locked": False, "already_locked": False, "lock_status": status, "lock_error": payload.get("message") or f"HTTP {response.status_code}", "zoho_code": payload.get("code"), **details}
     verified = get_lock_status(so_id)
     if verified.get("is_locked") and str(verified.get("config_id") or "") == config_id:
-        return {"locked": True, "already_locked": bool(already), "lock_status": verified, "lock_error": None}
-    return {"locked": False, "already_locked": bool(already), "lock_status": verified, "lock_error": verified.get("lock_error") or "lock_verify_failed", "zoho_code": payload.get("code"), "message": payload.get("message")}
+        return {"locked": True, "already_locked": bool(already), "lock_status": verified, "lock_error": None, **details}
+    return {"locked": False, "already_locked": bool(already), "lock_status": verified, "lock_error": verified.get("lock_error") or "lock_verify_failed", "zoho_code": payload.get("code"), "message": payload.get("message"), **details}

@@ -639,6 +639,8 @@ def _lock_result_payload(salesorder_id: str, result: dict, *, so_number: str | N
         "already_locked": bool(result.get("already_locked")),
         "lock_status": result.get("lock_status"),
         "lock_error": result.get("lock_error"),
+        "lock_http_status": result.get("lock_http_status"),
+        "lock_zoho_code": result.get("lock_zoho_code"),
     }
     if result.get("message"):
         payload["lock_message"] = result.get("message")
@@ -653,7 +655,7 @@ def _lock_after_acknowledge(salesorder_id: str, so_number: str | None, user: Cur
         result = {"locked": False, "lock_error": "lock_unexpected_error"}
     payload = _lock_result_payload(salesorder_id, result, so_number=so_number)
     if not payload["locked"]:
-        logger.error("[ZOHO_SO_LOCK] acknowledge succeeded but lock failed so_number=%s error=%s", so_number or salesorder_id, payload.get("lock_error"))
+        logger.error("[ZOHO_SO_LOCK] acknowledge succeeded but lock failed so_number=%s error=%s lock_http_status=%s lock_zoho_code=%s", so_number or salesorder_id, payload.get("lock_error"), payload.get("lock_http_status"), payload.get("lock_zoho_code"))
     return payload
 
 

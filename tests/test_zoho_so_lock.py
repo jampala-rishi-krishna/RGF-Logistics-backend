@@ -79,7 +79,7 @@ class ZohoSoLockServiceTests(unittest.TestCase):
         reason = json.loads(post["data"]["JSONString"])["reason"]
         self.assertIn("Acknowledged by Supply Chain Department via IntelliFleet", reason)
         self.assertIn("Pau", reason)
-        self.assertIn("Asia/Manila", reason)
+        self.assertNotIn("Asia/Manila", reason)
         self.assertEqual(post["headers"]["Authorization"], "Zoho-oauthtoken LOCK-TOKEN")
 
     def test_already_locked_skips_post(self):
@@ -240,8 +240,6 @@ class AcknowledgeLockRouterTests(unittest.TestCase):
 # =============================================================================================
 import logging
 import re
-from datetime import datetime as _real_datetime
-from zoneinfo import ZoneInfo
 
 import httpx
 from fastapi import HTTPException
@@ -316,27 +314,45 @@ class LockRequestShapeTests(unittest.TestCase):
         # What httpx would really put on the wire:
         wire = httpx.Request("POST", post["url"], data=post["data"])
         self.assertEqual(wire.headers["content-type"], "application/x-www-form-urlencoded")
-        self.assertTrue(wire.content.decode().startswith("JSONString=%7B%22reason%22%3A%22Acknowledged+by+Supply+Chain+Department+via+IntelliFleet+%28Pau%2C+"))
+        self.assertTrue(wire.content.decode().startswith("JSONString=%7B%22reason%22%3A%22Acknowledged+by+Supply+Chain+Department+via+IntelliFleet+-+Pau%22%7D"))
         self.assertNotIn(b'"JSONString"', wire.content)  # not a JSON document
         self.assertEqual(wire.content.decode().count("JSONString="), 1)
 
-    def test_reason_text_has_user_and_manila_time(self):
-        class FixedClock:
-            @staticmethod
-            def now(tz=None):
-                return _real_datetime(2026, 10, 5, 9, 22, tzinfo=tz)
-
+    def test_reason_is_the_base_text_plus_the_user_with_no_date(self):
         rec = Recorder(response(body=so_payload(False)), response(body={"code": 0}), response(body=so_payload(True)))
-        with patch.object(zoho_so_lock, "datetime", FixedClock):
-            self.lock(rec, user="Jed Gatmaitan")
+        self.lock(rec, user="Jed Gatmaitan")
         value = rec.calls[1]["data"]["JSONString"]
-        self.assertEqual(json.loads(value), {"reason": "Acknowledged by Supply Chain Department via IntelliFleet (Jed Gatmaitan, 2026-10-05 09:22 Asia/Manila)"})
+        self.assertEqual(json.loads(value), {"reason": "Acknowledged by Supply Chain Department via IntelliFleet - Jed Gatmaitan"})
         self.assertTrue(value.startswith('{"reason":"'))  # compact, exactly the Deluge shape
 
-    def test_reason_time_format_without_clock_patch(self):
+    def test_reason_base_is_56_characters_and_used_alone_without_a_user(self):
+        self.assertEqual(len(zoho_so_lock.REASON_BASE), 56)
+        for user in (None, "", "   "):
+            self.assertEqual(zoho_so_lock.build_reason(user), zoho_so_lock.REASON_BASE)
+
+    def test_reason_stays_within_90_characters_even_for_a_60_character_name(self):
+        name = "Maria Cristina Dela Cruz-Santos de la Vega y Fernandez Reyes"[:60]
+        self.assertEqual(len(name), 60)
+        reason = zoho_so_lock.build_reason(name)
+        self.assertLessEqual(len(reason), 90)
+        self.assertTrue(reason.startswith(zoho_so_lock.REASON_BASE + " - Maria Cristina"))
+        # measured AFTER json.dumps, as it travels in JSONString
         rec = Recorder(response(body=so_payload(False)), response(body={"code": 0}), response(body=so_payload(True)))
-        self.lock(rec)
-        self.assertRegex(json.loads(rec.calls[1]["data"]["JSONString"])["reason"], r"\(Pau, \d{4}-\d{2}-\d{2} \d{2}:\d{2} Asia/Manila\)$")
+        self.lock(rec, user=name)
+        sent = json.loads(rec.calls[1]["data"]["JSONString"])["reason"]
+        self.assertLessEqual(len(json.dumps(sent, ensure_ascii=False)) - 2, 90)
+        self.assertLessEqual(len(sent), 90)
+
+    def test_reason_length_accounts_for_json_escaping(self):
+        name = '"' * 60  # every quote becomes \" inside JSON
+        reason = zoho_so_lock.build_reason(name)
+        self.assertLessEqual(len(json.dumps(reason, ensure_ascii=False)) - 2, 90)
+
+    def test_short_name_is_kept_whole_and_the_boundary_is_90(self):
+        self.assertEqual(zoho_so_lock.build_reason("Pau"), "Acknowledged by Supply Chain Department via IntelliFleet - Pau")
+        fits = "x" * (90 - 56 - 3)
+        self.assertEqual(len(zoho_so_lock.build_reason(fits)), 90)
+        self.assertEqual(len(zoho_so_lock.build_reason(fits + "y")), 90)  # one over: truncated back to 90
 
     def test_one_salesorder_per_call_and_malicious_ids_are_rejected(self):
         for bad in ("1,2", "1&entity_ids=2", "123/../x", "", "abc", "1 2"):
@@ -454,6 +470,35 @@ class LockRequestShapeTests(unittest.TestCase):
         text = "\n".join(logs.output)
         for secret in secrets:
             self.assertNotIn(secret, text)
+
+
+class LockErrorDetailTests(unittest.TestCase):
+    def setUp(self):
+        lock_case_setup(self)
+
+    def lock(self, recorder):
+        with patch.object(zoho_so_lock, "get_access_token", return_value="LOCK-TOKEN"), patch.object(zoho_so_lock.httpx, "request", recorder):
+            return zoho_so_lock.lock_salesorder("123", "Pau")
+
+    def test_post_failure_reports_the_raw_http_status_and_zoho_code(self):
+        result = self.lock(Recorder(response(body=so_payload(False)), response(status=400, body={"code": 4, "message": "reason has less than 100 characters"})))
+        self.assertEqual((result["lock_http_status"], result["lock_zoho_code"], result["lock_error"]), (400, 4, "reason has less than 100 characters"))
+
+    def test_scope_error_and_verify_failure_also_carry_them(self):
+        scope = self.lock(Recorder(response(body=so_payload(False)), response(status=403, body={"code": 57, "message": "not authorized"})))
+        self.assertEqual((scope["lock_http_status"], scope["lock_zoho_code"]), (403, 57))
+        verify = self.lock(Recorder(response(body=so_payload(False)), response(body={"code": 0}), response(body=so_payload(False))))
+        self.assertEqual((verify["lock_error"], verify["lock_http_status"], verify["lock_zoho_code"]), ("lock_verify_failed", 200, 0))
+
+    def test_success_carries_them_and_router_error_log_includes_them(self):
+        ok = self.lock(Recorder(response(body=so_payload(False)), response(body={"code": 0}), response(body=so_payload(True))))
+        self.assertEqual((ok["lock_http_status"], ok["lock_zoho_code"]), (200, 0))
+        failed = {"locked": False, "lock_error": "boom", "lock_http_status": 400, "lock_zoho_code": 4}
+        with patch.object(load_planning, "lock_salesorder", return_value=failed), self.assertLogs("load_planning", level="ERROR") as logs:
+            payload = load_planning._lock_after_acknowledge("123", "SO-1", SimpleNamespace(full_name="Pau"))
+        self.assertEqual((payload["lock_http_status"], payload["lock_zoho_code"]), (400, 4))
+        self.assertIn("lock_http_status=400", logs.output[0])
+        self.assertIn("lock_zoho_code=4", logs.output[0])
 
 
 class LockRouterBehaviourTests(unittest.TestCase):
