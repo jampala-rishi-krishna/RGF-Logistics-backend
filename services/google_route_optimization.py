@@ -9,6 +9,7 @@ import google.auth
 from google.auth.transport.requests import Request
 
 from services.optimization_data import FleetData
+from services.route_costs import arc_cost_rates, load_route_cost_config
 
 logger = logging.getLogger(__name__)
 ENDPOINT = "https://routeoptimization.googleapis.com/v1/projects/rarechain-logistics-508805:optimizeTours"
@@ -30,13 +31,22 @@ def _timestamp(minutes: float) -> str:
 
 def build_request(data: FleetData) -> dict:
     vehicles = []
+    cost_config = load_route_cost_config()
     for v in data.vehicles:
+        # Same per-km / per-hour rates the single-route cost table uses (distance + fuel per km;
+        # driver [+ reefer fuel] per hour), so the solver optimises the real operating cost.
+        cost_per_km, cost_per_hour = arc_cost_rates(
+            cost_config,
+            distance_rate_per_km=v.cost_per_km,
+            time_rate_per_hour_override=v.cost_per_hour,
+            refrigerated=any(str(c).strip().lower() not in ("", "ambient") for c in (getattr(v, "temperature_capabilities", None) or [])),
+        )
         vehicle = {
             "label": str(v.id),
             "startLocation": {"latitude": v.start_lat, "longitude": v.start_lng},
             "loadLimits": {"weightKg": {"maxLoad": v.capacity_kg}},
-            "costPerKilometer": v.cost_per_km or 0,
-            "costPerHour": v.cost_per_hour or 0,
+            "costPerKilometer": cost_per_km,
+            "costPerHour": cost_per_hour,
         }
         if getattr(v, "has_end_location", True):
             vehicle["endLocation"] = {"latitude": v.end_lat, "longitude": v.end_lng}

@@ -1,20 +1,34 @@
+"""Route cost model (all rates come from env; see .env.example).
+
+Per leg:
+    fuel          = km / ROUTE_FUEL_KM_PER_LITER * ROUTE_DIESEL_PRICE_PER_LITER      (distance only, counted once)
+    distance cost = km * ROUTE_DISTANCE_COST_PER_KM                                   (maintenance/tyres/depreciation)
+    time cost     = hours * (ROUTE_DRIVER_COST_PER_HOUR [+ ROUTE_HELPER_COST_PER_HOUR if a helper is assigned])
+    refrigeration = refrigeration_hours * litres/hour * ROUTE_DIESEL_PRICE_PER_LITER
+    leg total     = fuel + distance cost + time cost + refrigeration
+
+The old ROUTE_FUEL_COST_PER_KM, ROUTE_REFRIGERATION_COST_PER_HOUR, REFRIGERATION_ON_RETURN_LEG and
+ROUTE_FIXED_COST_PER_ROUTE names are no longer read; leaving them set on Render is harmless.
+"""
 from __future__ import annotations
 
 import os
 from typing import TypedDict
 
+# Assumed on-site time per delivery stop; refrigeration keeps running while the truck is stopped.
+DEFAULT_SERVICE_MIN_PER_STOP = 30.0
+
 
 class RouteCostConfig(TypedDict):
     distance_rate_per_km: float
     distance_rate_configured: bool
-    time_rate_per_hour: float
-    time_rate_configured: bool
-    fuel_surcharge_per_km: float
-    fuel_surcharge_configured: bool
-    refrigeration_cost_per_hour: float
-    refrigeration_cost_configured: bool
-    fixed_cost_per_route: float
-    fixed_cost_configured: bool
+    diesel_price_per_liter: float
+    fuel_km_per_liter: float
+    fuel_cost_per_km: float
+    driver_cost_per_hour: float
+    helper_cost_per_hour: float
+    refrigeration_liters_per_hour_chilled: float
+    refrigeration_liters_per_hour_frozen: float
     refrigeration_on_return_leg: bool
 
 
@@ -28,25 +42,71 @@ def _read_float_env(name: str, default: float) -> tuple[float, bool]:
         return default, False
 
 
-def load_route_cost_config() -> RouteCostConfig:
-    distance_rate_per_km, distance_rate_configured = _read_float_env("ROUTE_DISTANCE_COST_PER_KM", 32.0)
-    time_rate_per_hour, time_rate_configured = _read_float_env("ROUTE_DRIVER_COST_PER_HOUR", 180.0)
-    fuel_surcharge_per_km, fuel_surcharge_configured = _read_float_env("ROUTE_FUEL_COST_PER_KM", 0.0)
-    refrigeration_cost_per_hour, refrigeration_cost_configured = _read_float_env("ROUTE_REFRIGERATION_COST_PER_HOUR", 0.0)
-    fixed_cost_per_route, fixed_cost_configured = _read_float_env("ROUTE_FIXED_COST_PER_ROUTE", 0.0)
-    refrigeration_on_return_leg = os.environ.get("REFRIGERATION_ON_RETURN_LEG", "").strip().lower() in {"1", "true", "yes", "on"}
+def build_route_cost_config(
+    *,
+    distance_rate_per_km: float,
+    diesel_price_per_liter: float,
+    fuel_km_per_liter: float,
+    driver_cost_per_hour: float,
+    helper_cost_per_hour: float,
+    refrigeration_liters_per_hour_chilled: float,
+    refrigeration_liters_per_hour_frozen: float,
+    refrigeration_on_return_leg: bool = False,
+    distance_rate_configured: bool = True,
+) -> RouteCostConfig:
+    km_per_liter = fuel_km_per_liter if fuel_km_per_liter > 0 else 7.0
     return {
         "distance_rate_per_km": distance_rate_per_km,
         "distance_rate_configured": distance_rate_configured,
-        "time_rate_per_hour": time_rate_per_hour,
-        "time_rate_configured": time_rate_configured,
-        "fuel_surcharge_per_km": fuel_surcharge_per_km,
-        "fuel_surcharge_configured": fuel_surcharge_configured,
-        "refrigeration_cost_per_hour": refrigeration_cost_per_hour,
-        "refrigeration_cost_configured": refrigeration_cost_configured,
-        "fixed_cost_per_route": fixed_cost_per_route,
-        "fixed_cost_configured": fixed_cost_configured,
+        "diesel_price_per_liter": diesel_price_per_liter,
+        "fuel_km_per_liter": km_per_liter,
+        "fuel_cost_per_km": diesel_price_per_liter / km_per_liter,
+        "driver_cost_per_hour": driver_cost_per_hour,
+        "helper_cost_per_hour": helper_cost_per_hour,
+        "refrigeration_liters_per_hour_chilled": refrigeration_liters_per_hour_chilled,
+        "refrigeration_liters_per_hour_frozen": refrigeration_liters_per_hour_frozen,
         "refrigeration_on_return_leg": refrigeration_on_return_leg,
+    }
+
+
+def load_route_cost_config() -> RouteCostConfig:
+    distance_rate, distance_configured = _read_float_env("ROUTE_DISTANCE_COST_PER_KM", 32.0)
+    return build_route_cost_config(
+        distance_rate_per_km=distance_rate,
+        distance_rate_configured=distance_configured,
+        diesel_price_per_liter=_read_float_env("ROUTE_DIESEL_PRICE_PER_LITER", 95.0)[0],
+        fuel_km_per_liter=_read_float_env("ROUTE_FUEL_KM_PER_LITER", 7.0)[0],
+        driver_cost_per_hour=_read_float_env("ROUTE_DRIVER_COST_PER_HOUR", 120.0)[0],
+        helper_cost_per_hour=_read_float_env("ROUTE_HELPER_COST_PER_HOUR", 120.0)[0],
+        refrigeration_liters_per_hour_chilled=_read_float_env("ROUTE_REFRIGERATION_LITERS_PER_HOUR_CHILLED", 0.8)[0],
+        refrigeration_liters_per_hour_frozen=_read_float_env("ROUTE_REFRIGERATION_LITERS_PER_HOUR_FROZEN", 1.2)[0],
+        refrigeration_on_return_leg=os.environ.get("ROUTE_REFRIGERATION_ON_RETURN_LEG", "").strip().lower() in {"1", "true", "yes", "on"},
+    )
+
+
+def refrigeration_cost_per_hour(config: RouteCostConfig, *, frozen: bool = False) -> float:
+    liters = config["refrigeration_liters_per_hour_frozen"] if frozen else config["refrigeration_liters_per_hour_chilled"]
+    return liters * config["diesel_price_per_liter"]
+
+
+def time_rate_per_hour(config: RouteCostConfig, *, has_helper: bool = False) -> float:
+    return config["driver_cost_per_hour"] + (config["helper_cost_per_hour"] if has_helper else 0.0)
+
+
+def describe_rates(config: RouteCostConfig) -> dict:
+    """Live rate values for the 'Rates:' line under the cost table."""
+    return {
+        "dieselPricePerLiter": config["diesel_price_per_liter"],
+        "fuelKmPerLiter": config["fuel_km_per_liter"],
+        "fuelCostPerKm": round(config["fuel_cost_per_km"], 2),
+        "distanceCostPerKm": config["distance_rate_per_km"],
+        "driverCostPerHour": config["driver_cost_per_hour"],
+        "helperCostPerHour": config["helper_cost_per_hour"],
+        "refrigerationLitersPerHourChilled": config["refrigeration_liters_per_hour_chilled"],
+        "refrigerationLitersPerHourFrozen": config["refrigeration_liters_per_hour_frozen"],
+        "refrigerationCostPerHourChilled": round(refrigeration_cost_per_hour(config, frozen=False), 2),
+        "refrigerationCostPerHourFrozen": round(refrigeration_cost_per_hour(config, frozen=True), 2),
+        "refrigerationOnReturnLeg": config["refrigeration_on_return_leg"],
     }
 
 
@@ -55,39 +115,49 @@ def compute_route_cost_breakdown(
     duration_min: float,
     *,
     config: RouteCostConfig | None = None,
+    has_helper: bool = False,
+    refrigeration_hours: float = 0.0,
+    frozen: bool = False,
+    refrigerated: bool = True,
     distance_rate_per_km: float | None = None,
-    time_rate_per_hour: float | None = None,
-    fuel_surcharge_per_km: float | None = None,
-    refrigeration_cost_per_hour: float | None = None,
-    fixed_cost_per_route: float | None = None,
-    include_refrigeration: bool = True,
+    time_rate_per_hour_override: float | None = None,
 ) -> dict:
+    """Cost of one leg. `refrigeration_hours` is the time the reefer unit runs on this leg
+    (0 for a return leg unless ROUTE_REFRIGERATION_ON_RETURN_LEG is on); `refrigerated=False`
+    (non-reefer truck) forces refrigeration to 0."""
     rates = config or load_route_cost_config()
     distance_rate = float(distance_rate_per_km if distance_rate_per_km is not None else rates["distance_rate_per_km"])
-    time_rate = float(time_rate_per_hour if time_rate_per_hour is not None else rates["time_rate_per_hour"])
-    fuel_rate = float(fuel_surcharge_per_km if fuel_surcharge_per_km is not None else rates["fuel_surcharge_per_km"])
-    refrigeration_rate = float(
-        refrigeration_cost_per_hour if refrigeration_cost_per_hour is not None else rates["refrigeration_cost_per_hour"]
-    )
-    fixed_cost = float(fixed_cost_per_route if fixed_cost_per_route is not None else rates["fixed_cost_per_route"])
+    time_rate = float(time_rate_per_hour_override if time_rate_per_hour_override is not None else time_rate_per_hour(rates, has_helper=has_helper))
 
-    distance_cost = float(distance_km) * distance_rate
-    time_cost = (float(duration_min) / 60.0) * time_rate
-    fuel_cost = float(distance_km) * fuel_rate
-    refrigeration_cost = (float(duration_min) / 60.0) * refrigeration_rate if include_refrigeration else 0.0
-    total = distance_cost + time_cost + fuel_cost + refrigeration_cost + fixed_cost
-
+    distance_cost = round(float(distance_km) * distance_rate, 2)
+    time_cost = round((float(duration_min) / 60.0) * time_rate, 2)
+    fuel_cost = round(float(distance_km) / rates["fuel_km_per_liter"] * rates["diesel_price_per_liter"], 2)
+    refrigeration_cost = round(float(refrigeration_hours) * refrigeration_cost_per_hour(rates, frozen=frozen), 2) if refrigerated else 0.0
     return {
-        "distance": round(distance_cost, 2),
-        "time": round(time_cost, 2),
-        "fuel": round(fuel_cost, 2),
-        "fuelConfigured": bool(rates["fuel_surcharge_configured"]),
-        "refrigeration": round(refrigeration_cost, 2),
-        "refrigerationConfigured": bool(rates["refrigeration_cost_configured"]),
-        "fixed": round(fixed_cost, 2),
-        "fixedConfigured": bool(rates["fixed_cost_configured"]),
-        "total": round(total, 2),
+        "distance": distance_cost,
+        "time": time_cost,
+        "fuel": fuel_cost,
+        "refrigeration": refrigeration_cost,
+        "total": round(distance_cost + time_cost + fuel_cost + refrigeration_cost, 2),
     }
+
+
+def arc_cost_rates(
+    config: RouteCostConfig,
+    *,
+    distance_rate_per_km: float | None = None,
+    time_rate_per_hour_override: float | None = None,
+    has_helper: bool = False,
+    refrigerated: bool = False,
+    frozen: bool = False,
+) -> tuple[float, float]:
+    """(peso per km, peso per hour) used by solvers - the same rates compute_route_cost_breakdown
+    applies, folded into per-km (distance + fuel) and per-hour (driver/helper + reefer fuel)."""
+    per_km = float(distance_rate_per_km if distance_rate_per_km is not None else config["distance_rate_per_km"]) + config["fuel_cost_per_km"]
+    per_hour = float(time_rate_per_hour_override if time_rate_per_hour_override is not None else time_rate_per_hour(config, has_helper=has_helper))
+    if refrigerated:
+        per_hour += refrigeration_cost_per_hour(config, frozen=frozen)
+    return per_km, per_hour
 
 
 def build_objective_cost_matrix(
@@ -97,28 +167,26 @@ def build_objective_cost_matrix(
     objective: str,
     config: RouteCostConfig | None = None,
     distance_rate_per_km: float | None = None,
-    time_rate_per_hour: float | None = None,
-    fuel_surcharge_per_km: float | None = None,
-    refrigeration_cost_per_hour: float | None = None,
+    time_rate_per_hour_override: float | None = None,
+    has_helper: bool = False,
+    refrigerated: bool = False,
+    frozen: bool = False,
     balanced_time_weight: float = 0.4,
     balanced_distance_weight: float = 0.2,
     balanced_cost_weight: float = 0.4,
 ) -> list[list[float]]:
     rates = config or load_route_cost_config()
-    distance_rate = float(distance_rate_per_km if distance_rate_per_km is not None else rates["distance_rate_per_km"])
-    time_rate = float(time_rate_per_hour if time_rate_per_hour is not None else rates["time_rate_per_hour"])
-    fuel_rate = float(fuel_surcharge_per_km if fuel_surcharge_per_km is not None else rates["fuel_surcharge_per_km"])
-    refrigeration_rate = float(
-        refrigeration_cost_per_hour if refrigeration_cost_per_hour is not None else rates["refrigeration_cost_per_hour"]
+    per_km, per_hour = arc_cost_rates(
+        rates,
+        distance_rate_per_km=distance_rate_per_km,
+        time_rate_per_hour_override=time_rate_per_hour_override,
+        has_helper=has_helper,
+        refrigerated=refrigerated,
+        frozen=frozen,
     )
-    route_distance_rate = distance_rate + fuel_rate
-    route_time_rate = time_rate + refrigeration_rate
     n = len(distance_km)
     operating_cost = [
-        [
-            distance_km[i][j] * route_distance_rate + (duration_min[i][j] / 60.0) * route_time_rate
-            for j in range(n)
-        ]
+        [distance_km[i][j] * per_km + (duration_min[i][j] / 60.0) * per_hour for j in range(n)]
         for i in range(n)
     ]
     if objective == "shortest":

@@ -14,7 +14,7 @@ from services.google_maps import geocode_address
 from services.item_weight import calculate_order_weight_kg
 from services.sales_order_location import address_lines
 from services.time_utils import minutes_since_midnight
-from services.warehouses import get_warehouse
+from services.warehouses import resolve_return_warehouse
 
 logger = logging.getLogger("optimization_data")
 
@@ -102,7 +102,7 @@ async def fetch_fleet_data(
         raise FleetDataError("No vehicles found in the fleet.")
 
     warnings: list[str] = []
-    return_warehouse = get_warehouse(return_warehouse_id) if return_to_warehouse else None
+    return_warehouse = resolve_return_warehouse(return_to_warehouse, return_warehouse_id)
     vehicle_list: list[VehiclePlan] = []
     vehicle_fingerprints: list[str] = []
     now = datetime.now(timezone.utc)

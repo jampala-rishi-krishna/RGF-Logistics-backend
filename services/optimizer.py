@@ -5,7 +5,7 @@ from typing import Literal, Optional
 
 from pydantic import BaseModel
 
-from services.route_costs import build_objective_cost_matrix, load_route_cost_config
+from services.route_costs import RouteCostConfig, build_objective_cost_matrix, load_route_cost_config
 
 # CVRPTW solver used by the unified optimization service (same
 # tested algorithm) - now an in-process module called directly from routers/optimization.py
@@ -118,7 +118,7 @@ def _diagnose_unassigned(shipment: "Shipment", vehicles: list["Vehicle"]) -> Una
 def compute_cost_matrix(
     *, objective: str, distance_km: list[list[float]], duration_min: list[list[float]], vehicle: "Vehicle",
     configured_distance_rate: float, configured_time_rate: float,
-    configured_fuel_rate: float = 0.0, configured_refrigeration_rate: float = 0.0,
+    config: Optional[RouteCostConfig] = None, refrigerated: bool = False, has_helper: bool = False,
     balanced_time_weight: float, balanced_distance_weight: float, balanced_cost_weight: float,
 ) -> list[list[float]]:
     """The arc-cost matrix the solver actually optimizes against for one vehicle, given the
@@ -130,10 +130,11 @@ def compute_cost_matrix(
         distance_km,
         duration_min,
         objective=objective,
+        config=config,
         distance_rate_per_km=rate_km,
-        time_rate_per_hour=rate_hr,
-        fuel_surcharge_per_km=configured_fuel_rate,
-        refrigeration_cost_per_hour=configured_refrigeration_rate,
+        time_rate_per_hour_override=rate_hr,
+        has_helper=has_helper,
+        refrigerated=refrigerated,
         balanced_time_weight=balanced_time_weight,
         balanced_distance_weight=balanced_distance_weight,
         balanced_cost_weight=balanced_cost_weight,
@@ -195,9 +196,7 @@ def solve(request: OptimizeRequest) -> OptimizeResponse:
 
     route_cost_config = load_route_cost_config()
     configured_distance_rate = route_cost_config["distance_rate_per_km"]
-    configured_time_rate = route_cost_config["time_rate_per_hour"]
-    configured_fuel_rate = route_cost_config["fuel_surcharge_per_km"]
-    configured_refrigeration_rate = route_cost_config["refrigeration_cost_per_hour"]
+    configured_time_rate = route_cost_config["driver_cost_per_hour"]
     balanced_time_weight = float(os.environ.get("ROUTE_BALANCED_TIME_WEIGHT", "0.5"))
     balanced_distance_weight = float(os.environ.get("ROUTE_BALANCED_DISTANCE_WEIGHT", "0.2"))
     balanced_cost_weight = float(os.environ.get("ROUTE_BALANCED_COST_WEIGHT", "0.3"))
@@ -219,7 +218,8 @@ def solve(request: OptimizeRequest) -> OptimizeResponse:
         cost_matrix = compute_cost_matrix(
             objective=request.objective, distance_km=distance_km, duration_min=duration_min, vehicle=v,
             configured_distance_rate=configured_distance_rate, configured_time_rate=configured_time_rate,
-            configured_fuel_rate=configured_fuel_rate, configured_refrigeration_rate=configured_refrigeration_rate,
+            config=route_cost_config,
+            refrigerated=any(c.strip().lower() not in ("", "ambient") for c in v.temperature_capabilities),
             balanced_time_weight=balanced_time_weight, balanced_distance_weight=balanced_distance_weight,
             balanced_cost_weight=balanced_cost_weight,
         )

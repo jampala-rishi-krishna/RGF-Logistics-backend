@@ -20,6 +20,7 @@ from services.google_maps import fetch_route_matrix, fetch_route_polyline, route
 from services.google_route_optimization import GoogleOptimizationError, optimize as google_optimize, parse_response as parse_google_optimization
 from services.audit import write_audit_log
 from services.time_utils import eta_from_arrival_min
+from services.warehouses import ReturnWarehouseRequired
 
 router = APIRouter(prefix="/optimization", tags=["optimization"], dependencies=[Depends(require_role("admin", "dispatcher"))])
 
@@ -61,6 +62,8 @@ async def _run_optimization(
         fleet_data = await fetch_fleet_data(db, mode=mode, vehicle_ids=vehicle_ids, order_ids=order_ids, return_to_warehouse=return_to_warehouse, return_warehouse_id=return_warehouse_id)
     except FleetDataError as e:
         raise HTTPException(422, detail={"message": str(e), "issues": e.issues})
+    except ReturnWarehouseRequired as e:
+        raise HTTPException(400, str(e))
     except KeyError:
         raise HTTPException(400, "Unknown return warehouse.")
 

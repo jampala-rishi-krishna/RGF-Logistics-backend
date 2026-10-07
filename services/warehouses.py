@@ -1,8 +1,5 @@
 from __future__ import annotations
 
-from math import asin, cos, radians, sin, sqrt
-
-
 WAREHOUSES = {
     "mets": {
         "id": "mets",
@@ -17,7 +14,7 @@ WAREHOUSES = {
     "glacier": {
         "id": "glacier",
         "name": "Glacier Cold Storage",
-        "address": "Amvel Business Park, Ninoy Aquino Ave, Paranaque City",
+        "address": "Amvel Business Park, Ninoy Aquino Ave, Parañaque City",
         "google_place": "Glacier Megafridge Incorporated",
         "lat": 14.4922771,
         "lng": 120.9929815,
@@ -38,13 +35,15 @@ def get_warehouse(warehouse_id: str | None) -> dict:
     return dict(WAREHOUSES[key])
 
 
-def nearest_warehouse(lat: float, lng: float) -> dict:
-    return min(list_warehouses(), key=lambda wh: haversine_km(lat, lng, wh["lat"], wh["lng"]))
+class ReturnWarehouseRequired(ValueError):
+    """Return-to-warehouse was requested without the user choosing which warehouse."""
 
 
-def haversine_km(lat1: float, lng1: float, lat2: float, lng2: float) -> float:
-    radius = 6371.0
-    d_lat = radians(lat2 - lat1)
-    d_lng = radians(lng2 - lng1)
-    a = sin(d_lat / 2) ** 2 + cos(radians(lat1)) * cos(radians(lat2)) * sin(d_lng / 2) ** 2
-    return 2 * radius * asin(sqrt(a))
+def resolve_return_warehouse(return_to_warehouse: bool, warehouse_id: str | None) -> dict | None:
+    """One-way (unchecked) -> None. Checked -> the warehouse the user picked; never auto-selected.
+    Raises ReturnWarehouseRequired if none was chosen, KeyError if the id is unknown."""
+    if not return_to_warehouse:
+        return None
+    if not (warehouse_id or "").strip():
+        raise ReturnWarehouseRequired("Choose the return warehouse.")
+    return get_warehouse(warehouse_id)

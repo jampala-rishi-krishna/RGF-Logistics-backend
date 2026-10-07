@@ -115,14 +115,20 @@ services:
         sync: false
       - key: ROUTE_DISTANCE_COST_PER_KM
         sync: false
+      - key: ROUTE_DIESEL_PRICE_PER_LITER
+        value: "95"
+      - key: ROUTE_FUEL_KM_PER_LITER
+        value: "7"
       - key: ROUTE_DRIVER_COST_PER_HOUR
-        sync: false
-      - key: ROUTE_FUEL_COST_PER_KM
-        sync: false
-      - key: ROUTE_REFRIGERATION_COST_PER_HOUR
-        sync: false
-      - key: ROUTE_FIXED_COST_PER_ROUTE
-        sync: false
+        value: "120"
+      - key: ROUTE_HELPER_COST_PER_HOUR
+        value: "120"
+      - key: ROUTE_REFRIGERATION_LITERS_PER_HOUR_CHILLED
+        value: "0.8"
+      - key: ROUTE_REFRIGERATION_LITERS_PER_HOUR_FROZEN
+        value: "1.2"
+      - key: ROUTE_REFRIGERATION_ON_RETURN_LEG
+        value: "false"
       - key: ROUTE_BALANCED_TIME_WEIGHT
         sync: false
       - key: ROUTE_BALANCED_DISTANCE_WEIGHT
