@@ -153,12 +153,19 @@ def row_is_acknowledged(row, view_ids: set[str], overrides: dict[str, bool] | No
     sub_status = _explicit_sub_status(row)
     if sub_status:
         return sub_status == "csacknowl"
-    return order_id in view_ids or str(getattr(row, "order_status", "") or "").lower() == "acknowledged"
+    if order_id in view_ids or str(getattr(row, "order_status", "") or "").lower() == "acknowledged":
+        return True
+    return live_sales_order_cache.cached_detail_has_acknowledged_sub_status(order_id)
 
 
 def _is_acknowledged(row) -> bool:
     raw = row.raw_json if isinstance(getattr(row, "raw_json", None), dict) else {}
-    return str(raw.get("current_sub_status") or raw.get("order_sub_status") or "").lower() == "cs_acknowl" or str(row.order_status or "").lower() == "acknowledged"
+    order_id = str(getattr(row, "id", "") or "")
+    return (
+        live_sales_order_cache.record_has_acknowledged_sub_status(raw)
+        or str(row.order_status or "").lower() == "acknowledged"
+        or bool(order_id and live_sales_order_cache.cached_detail_has_acknowledged_sub_status(order_id))
+    )
 
 
 def _date(value: str | None) -> date | None:

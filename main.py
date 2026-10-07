@@ -4,6 +4,8 @@ import asyncio
 import threading
 import logging
 import os
+import socket
+import uuid
 from contextlib import asynccontextmanager
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
@@ -41,6 +43,19 @@ scheduler = AsyncIOScheduler()
 
 CARTRACK_CONFIGURED = bool(os.environ.get("CARTRACK_USERNAME") and os.environ.get("CARTRACK_API_KEY"))
 schema_state = {"ok": False, "current": None, "head": None}
+INSTANCE_ID = os.environ.get("RENDER_INSTANCE_ID") or os.environ.get("HOSTNAME") or socket.gethostname() or str(uuid.uuid4())
+
+
+def configured_worker_count() -> int:
+    for key in ("WEB_CONCURRENCY", "UVICORN_WORKERS", "WORKERS"):
+        value = os.environ.get(key)
+        if value:
+            try:
+                return int(value)
+            except ValueError:
+                logger.error("[CONFIG] invalid %s=%r", key, value)
+                return 1
+    return 1
 
 def check_schema() -> None:
     config = Config(os.path.join(os.path.dirname(__file__), "alembic.ini"))
@@ -94,6 +109,9 @@ async def lifespan(app: FastAPI):
         logger.error("[SCHEMA] Unable to verify migration state before cache queries: %s", exc)
         raise SystemExit(2) from exc
     from services import agent_tools
+    workers = configured_worker_count()
+    if workers > 1:
+        logger.error("[CONFIG] multiple workers detected, acknowledge state is per-process")
     agent_tools.log_internal_api_config()
     if not schema_state["ok"]:
         logger.error("[SCHEMA] Startup stopped before cache queries; run 'python -m alembic upgrade head'.")
@@ -220,9 +238,11 @@ app.include_router(voice.admin_router)
 @app.get("/health")
 def health():
     if not schema_state["ok"]:
-        return JSONResponse(status_code=503, content={"status": "schema_mismatch", **schema_state})
+        return JSONResponse(status_code=503, content={"status": "schema_mismatch", **schema_state, "workers": configured_worker_count(), "instance_id": INSTANCE_ID})
     return {
         "status": "ok",
+        "workers": configured_worker_count(),
+        "instance_id": INSTANCE_ID,
         "connected_ws_clients": manager.connection_count,
         "cartrack_poller": CARTRACK_CONFIGURED,
         "cartrack_poller_active": bool(CARTRACK_CONFIGURED and manager.connection_count > 0),

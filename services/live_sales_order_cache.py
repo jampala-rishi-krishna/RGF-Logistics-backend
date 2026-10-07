@@ -74,6 +74,16 @@ def _squash(value) -> str:
     return "".join(ch for ch in str(value or "").lower() if ch.isalnum())
 
 
+def is_acknowledged_sub_status(value) -> bool:
+    return _squash(value) == "csacknowl"
+
+
+def record_has_acknowledged_sub_status(record: dict | None) -> bool:
+    if not isinstance(record, dict):
+        return False
+    return any(is_acknowledged_sub_status(record.get(key)) for key in ("current_sub_status", "order_sub_status"))
+
+
 def is_on_hold(row_or_record) -> bool:
     """True for a Sales Order Zoho has put On Hold. Zoho models it as the built-in sub-status
     `cs_onhold` (current_sub_status / order_sub_status, status stays "confirmed"). Matching is
@@ -84,6 +94,18 @@ def is_on_hold(row_or_record) -> bool:
     sub_statuses = (record.get("current_sub_status"), record.get("order_sub_status"))
     if any(_squash(value) in _ON_HOLD_SUB_STATUSES for value in sub_statuses):
         return True
+    # Every hold sub-status (cs_onhold = Accounting, cs_onholds = "ON HOLD(SALES)", any future cs_onhold*).
+    if any(_squash(value).startswith("csonhold") for value in sub_statuses):
+        return True
+    # Detail payloads list the org's sub-statuses with display names; resolve this order's own by id/code.
+    current_id = str(record.get("current_sub_status_id") or record.get("order_sub_status_id") or "")
+    current_code = _squash(record.get("current_sub_status") or record.get("order_sub_status"))
+    for sub in record.get("sub_statuses") or []:
+        if not isinstance(sub, dict):
+            continue
+        if (current_id and str(sub.get("status_id")) == current_id) or (current_code and _squash(sub.get("status_code")) == current_code):
+            if "hold" in _squash(sub.get("display_name")):
+                return True
     return _squash(_normalized_order_status(record) or getattr(row_or_record, "order_status", "")) == "onhold"
 
 
@@ -384,6 +406,15 @@ def _remember_detail(rid: str, modified: str, fields: dict) -> None:
             _details.pop(next(iter(_details)), None)
 
 
+def cached_detail_has_acknowledged_sub_status(order_id: str) -> bool:
+    """True when this process has ever hydrated this SO detail and that latest detail said
+    acknowledged. Used as a hard exclusion signal for Inventory when Zoho's list/custom
+    view lags behind detail."""
+    with _detail_lock:
+        hit = _details.get(str(order_id))
+    return bool(hit and record_has_acknowledged_sub_status(hit[1]))
+
+
 def _hydrate_details(records: dict[str, dict]) -> None:
     # Reuse cached detail for every order whose last_modified_time is unchanged; fetch only
     # the rest. Keep fetching below Zoho's approximate 100 requests/minute ceiling.
@@ -472,7 +503,11 @@ def mark_acknowledged(order_id: str, acknowledged: bool) -> None:
     if assigned is not None:
         patch(assigned)
     with _detail_lock:
-        _details.pop(order_id, None)
+        if acknowledged:
+            modified = str((assigned.raw_json if assigned is not None and isinstance(assigned.raw_json, dict) else {}).get("last_modified_time") or f"ack:{time.monotonic()}")
+            _details[str(order_id)] = (modified, {"current_sub_status": sub_status, "order_sub_status": sub_status})
+        else:
+            _details.pop(order_id, None)
 
 
 def prewarm_default_windows() -> None:

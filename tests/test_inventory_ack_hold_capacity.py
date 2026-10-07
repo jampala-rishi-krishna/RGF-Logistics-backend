@@ -27,7 +27,7 @@ class FakeZoho:
     def __init__(self, count=10, on_hold=()):
         self.orders = {}
         for n in range(1, count + 1):
-            sub = "cs_onhold" if n in on_hold else "confirmed"
+            sub = ("cs_onholds" if n == 7 else "cs_onhold") if n in on_hold else "confirmed"
             self.orders[f"id{n}"] = {"salesorder_id": f"id{n}", "salesorder_number": f"SO-{n:02d}", "customer_name": f"Cust {n}", "status": "confirmed", "current_sub_status": sub, "order_sub_status": sub, "shipment_date": SHIP, "last_modified_time": "t0", "line_items": []}
         self.view_lags = False
         self.view_snapshot = set()
@@ -56,11 +56,13 @@ class FakeZoho:
         if order_id in self.fail_ack:
             raise ZohoError("Zoho refused")
         self.orders[order_id]["current_sub_status"] = self.orders[order_id]["order_sub_status"] = "cs_acknowl"
+        self.orders[order_id]["last_modified_time"] = f"ack-{self.calls['ack_post']}"
         return {"code": 0}
 
     def remove_ack(self, order_id):
         self.calls["remove_post"] += 1
         self.orders[order_id]["current_sub_status"] = self.orders[order_id]["order_sub_status"] = "confirmed"
+        self.orders[order_id]["last_modified_time"] = f"remove-{self.calls['remove_post']}"
         return {"code": 0}
 
 
@@ -141,6 +143,15 @@ class OnHoldFilterTests(ZohoBackedTestCase):
     def test_load_planning_and_confirmed_scopes_are_untouched(self):
         rows = load_planning._filtered_rows(SimpleNamespace(), SHIP, SHIP, None, None, "unassigned")
         self.assertEqual(len(rows), 10)  # On Hold rows still reach the (status-filtered) Load Planning query
+
+    def test_on_hold_sales_substatus_is_on_hold(self):
+        """Production: Zoho's "ON HOLD(SALES)" sub-status of Confirmed has code cs_onholds (not cs_onhold)."""
+        sales = {"status": "confirmed", "current_sub_status": "cs_onholds", "order_sub_status": "cs_onholds", "current_sub_status_id": "4489499000021973444"}
+        self.assertTrue(lc.is_on_hold(sales))
+        self.assertTrue(lc.is_on_hold({"status": "confirmed", "current_sub_status": "cs_zzz", "current_sub_status_id": "9", "sub_statuses": [{"status_id": "9", "status_code": "cs_zzz", "display_name": "ON HOLD(SALES)"}]}))
+        for ack in ({"status": "confirmed", "current_sub_status": "cs_acknowl", "current_sub_status_id": "1", "sub_statuses": [{"status_id": "1", "status_code": "cs_acknowl", "display_name": "ACKNOWLEDGED"}, {"status_id": "2", "status_code": "cs_onholds", "display_name": "ON HOLD(SALES)"}]},
+                    {"status": "confirmed", "current_sub_status": "cs_dh1gl2e"}):
+            self.assertFalse(lc.is_on_hold(ack))
 
     def test_is_on_hold_is_case_and_spacing_insensitive(self):
         for value in ("cs_onhold", "CS_ONHOLD", "On Hold", "on_hold", "ONHOLD"):
@@ -244,6 +255,28 @@ class AcknowledgeLeavesInventoryTests(ZohoBackedTestCase):
         self.assertEqual(self.zoho.calls["detail"], details)  # no per-order detail re-fetch
         self.assertEqual(self.zoho.calls["view"], view_calls)  # ack set served from cache + overlay
         self.assertEqual(self.zoho.calls["ack_post"], 2)  # exactly one POST per acknowledge
+
+    def test_other_process_excludes_after_window_ttl_even_when_view_lags(self):
+        # Process B warmed its own stale confirmed window before process A acknowledged.
+        self.inventory()
+        self.zoho.view_snapshot = set()
+        self.zoho.view_lags = True
+        self.acknowledge("id2")
+        # Simulate a different worker: it has no local overlay from process A, and its
+        # stale window can survive until the 60s TTL expires.
+        load_planning._ack_overrides.clear()
+        lc.invalidate_windows()
+        page = self.inventory()
+        self.assertNotIn("SO-02", self.numbers(page))
+        self.assertEqual(page["total"], 9)
+
+    def test_acknowledge_directly_in_zoho_is_absent_on_next_uncached_refresh(self):
+        self.inventory()
+        self.zoho.ack("id2")
+        lc.invalidate_windows()
+        load_planning._invalidate_ack_cache()
+        page = self.inventory()
+        self.assertNotIn("SO-02", self.numbers(page))
 
 
 class AcknowledgedMeansOwnSubStatusTests(ZohoBackedTestCase):
