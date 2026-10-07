@@ -1,0 +1,274 @@
+{
+  "390": {
+    "errors": [],
+    "empty": {
+      "mapState": "empty",
+      "mapHeight": 360,
+      "viewportH": 844,
+      "kpiCards": 0,
+      "costCard": false,
+      "compareCards": false,
+      "timeline": false,
+      "dashPlaceholders": 0,
+      "hintVisible": true,
+      "overlayVisible": false,
+      "markers": [
+        "Mets Cold Storage",
+        "Glacier Cold Storage"
+      ],
+      "lastFit": {
+        "points": 2,
+        "padding": 56,
+        "h": 358
+      },
+      "docScrollWidth": 390
+    },
+    "calculating": {
+      "mapState": "calculating",
+      "mapHeight": 360,
+      "viewportH": 844,
+      "kpiCards": 0,
+      "costCard": false,
+      "compareCards": false,
+      "timeline": false,
+      "dashPlaceholders": 0,
+      "hintVisible": false,
+      "overlayVisible": true,
+      "markers": [
+        "Mets Cold Storage",
+        "Glacier Cold Storage"
+      ],
+      "lastFit": {
+        "points": 2,
+        "padding": 56,
+        "h": 358
+      },
+      "docScrollWidth": 390
+    },
+    "result": {
+      "mapState": "result",
+      "mapHeight": 280,
+      "viewportH": 844,
+      "kpiCards": 3,
+      "costCard": true,
+      "compareCards": true,
+      "timeline": true,
+      "dashPlaceholders": 0,
+      "hintVisible": false,
+      "overlayVisible": false,
+      "markers": [
+        "Mets Cold Storage",
+        "Glacier Cold Storage",
+        "START",
+        "STOP 1",
+        "Mets Cold Storage",
+        "START",
+        "STOP 1",
+        "Mets Cold Storage"
+      ],
+      "lastFit": {
+        "points": 3,
+        "padding": 24,
+        "h": 278
+      },
+      "docScrollWidth": 390
+    },
+    "afterInputChange": {
+      "mapState": "empty",
+      "mapHeight": 360,
+      "viewportH": 844,
+      "kpiCards": 0,
+      "costCard": false,
+      "compareCards": false,
+      "timeline": false,
+      "dashPlaceholders": 0,
+      "hintVisible": true,
+      "overlayVisible": false,
+      "markers": [
+        "Mets Cold Storage",
+        "Glacier Cold Storage",
+        "START",
+        "STOP 1",
+        "Mets Cold Storage",
+        "START",
+        "STOP 1",
+        "Mets Cold Storage",
+        "Mets Cold Storage",
+        "Glacier Cold Storage"
+      ],
+      "lastFit": {
+        "points": 2,
+        "padding": 56,
+        "h": 358
+      },
+      "docScrollWidth": 390
+    },
+    "error": {
+      "mapState": "empty",
+      "mapHeight": 360,
+      "viewportH": 844,
+      "kpiCards": 0,
+      "costCard": false,
+      "compareCards": false,
+      "timeline": false,
+      "dashPlaceholders": 0,
+      "hintVisible": true,
+      "overlayVisible": false,
+      "markers": [
+        "Mets Cold Storage",
+        "Glacier Cold Storage",
+        "START",
+        "STOP 1",
+        "Mets Cold Storage",
+        "START",
+        "STOP 1",
+        "Mets Cold Storage",
+        "Mets Cold Storage",
+        "Glacier Cold Storage"
+      ],
+      "lastFit": {
+        "points": 2,
+        "padding": 56,
+        "h": 358
+      },
+      "docScrollWidth": 390,
+      "alertText": "Google Routes API returned no route."
+    }
+  },
+  "1440": {
+    "errors": [],
+    "empty": {
+      "mapState": "empty",
+      "mapHeight": 788,
+      "viewportH": 900,
+      "kpiCards": 0,
+      "costCard": false,
+      "compareCards": false,
+      "timeline": false,
+      "dashPlaceholders": 0,
+      "hintVisible": true,
+      "overlayVisible": false,
+      "markers": [
+        "Mets Cold Storage",
+        "Glacier Cold Storage"
+      ],
+      "lastFit": {
+        "points": 2,
+        "padding": 56,
+        "h": 786
+      },
+      "docScrollWidth": 1440
+    },
+    "calculating": {
+      "mapState": "calculating",
+      "mapHeight": 788,
+      "viewportH": 900,
+      "kpiCards": 0,
+      "costCard": false,
+      "compareCards": false,
+      "timeline": false,
+      "dashPlaceholders": 0,
+      "hintVisible": false,
+      "overlayVisible": true,
+      "markers": [
+        "Mets Cold Storage",
+        "Glacier Cold Storage"
+      ],
+      "lastFit": {
+        "points": 2,
+        "padding": 56,
+        "h": 786
+      },
+      "docScrollWidth": 1440
+    },
+    "result": {
+      "mapState": "result",
+      "mapHeight": 420,
+      "viewportH": 900,
+      "kpiCards": 3,
+      "costCard": true,
+      "compareCards": true,
+      "timeline": true,
+      "dashPlaceholders": 0,
+      "hintVisible": false,
+      "overlayVisible": false,
+      "markers": [
+        "Mets Cold Storage",
+        "Glacier Cold Storage",
+        "START",
+        "STOP 1",
+        "Mets Cold Storage",
+        "START",
+        "STOP 1",
+        "Mets Cold Storage"
+      ],
+      "lastFit": {
+        "points": 3,
+        "padding": 24,
+        "h": 418
+      },
+      "docScrollWidth": 1440
+    },
+    "afterInputChange": {
+      "mapState": "empty",
+      "mapHeight": 788,
+      "viewportH": 900,
+      "kpiCards": 0,
+      "costCard": false,
+      "compareCards": false,
+      "timeline": false,
+      "dashPlaceholders": 0,
+      "hintVisible": true,
+      "overlayVisible": false,
+      "markers": [
+        "Mets Cold Storage",
+        "Glacier Cold Storage",
+        "START",
+        "STOP 1",
+        "Mets Cold Storage",
+        "START",
+        "STOP 1",
+        "Mets Cold Storage",
+        "Mets Cold Storage",
+        "Glacier Cold Storage"
+      ],
+      "lastFit": {
+        "points": 2,
+        "padding": 56,
+        "h": 786
+      },
+      "docScrollWidth": 1440
+    },
+    "error": {
+      "mapState": "empty",
+      "mapHeight": 788,
+      "viewportH": 900,
+      "kpiCards": 0,
+      "costCard": false,
+      "compareCards": false,
+      "timeline": false,
+      "dashPlaceholders": 0,
+      "hintVisible": true,
+      "overlayVisible": false,
+      "markers": [
+        "Mets Cold Storage",
+        "Glacier Cold Storage",
+        "START",
+        "STOP 1",
+        "Mets Cold Storage",
+        "START",
+        "STOP 1",
+        "Mets Cold Storage",
+        "Mets Cold Storage",
+        "Glacier Cold Storage"
+      ],
+      "lastFit": {
+        "points": 2,
+        "padding": 56,
+        "h": 786
+      },
+      "docScrollWidth": 1440,
+      "alertText": "Google Routes API returned no route."
+    }
+  }
+}
