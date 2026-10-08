@@ -206,11 +206,14 @@ class _Pool:
         fn(*args, **kwargs)
 
 
-def _assign(monkeypatch, voice_provider="n8n", voice_mode="active", place_spy=None):
+def _assign(monkeypatch, voice_provider="n8n", voice_mode="active", place_spy=None, whatsapp_mode="active"):
     from routers import assignment as a
     from services import voice_control
 
-    monkeypatch.setitem(voice_control._state, "mode", voice_mode)  # these tests cover the active (pre-pause-switch) behaviour
+    monkeypatch.setitem(voice_control._state, "mode", voice_mode)
+    from services import whatsapp_control
+
+    monkeypatch.setitem(whatsapp_control._state, "mode", whatsapp_mode)  # these tests cover the active (pre-pause-switch) behaviour
 
     order = SimpleNamespace(id="SO-ID-1", salesorder_number="SO-1001", customer_name="Acme", shipping_address=None, raw_json={"line_items": [{"quantity": 1}], "shipping_address": {"address": "1 St", "city": "Manila"}})
     profile = SimpleNamespace(plate_no="NAN1234", capacity_note=None, is_third_party=False)

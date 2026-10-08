@@ -29,7 +29,7 @@ from services import gmail_sender
 from services.sales_order_location import address_lines
 from services.item_weight import calculate_order_weight_kg
 from services.delivery_status import is_delivered
-from services import staff_directory_cache, live_sales_order_cache, memory_tables, vapi_client, voice_calls, voice_control
+from services import staff_directory_cache, live_sales_order_cache, memory_tables, vapi_client, voice_calls, voice_control, whatsapp_control
 from services.sales_order_history_sync import sync_history_row
 from routers.fleet import invalidate_fleet_cache
 from routers.dispatch import normalize_ph_phone
@@ -62,6 +62,7 @@ _NOTIFICATION_WEBHOOKS = (
 )
 # Skipped when VOICE_PROVIDER=direct (services/voice_calls.py places the call instead).
 _VOICE_WEBHOOK = _NOTIFICATION_WEBHOOKS[-1]
+_WHATSAPP_WEBHOOK = _NOTIFICATION_WEBHOOKS[0]
 
 
 def _send_assignment_emails_direct(driver, driver_subject: str, driver_html: str, team_subject: str | None, team_html: str | None, assignment_key: str = "") -> None:
@@ -94,10 +95,44 @@ def _send_notification(url: str, secret: str, payload: dict) -> None:
         logger.error("Assignment notification failed channel=%s error=%s", url.rsplit("/", 1)[-1], exc)
 
 
+class ManualVehicleBody(BaseModel):
+    vehicle_id: str
+    vehicle_type: str = "Manual truck"
+    capacity_kg: float | None = None
+    capacity_note: str | None = None
+    reefer: bool | None = None
+    third_party: bool = True
+
+
+def _manual_vehicle_profile(body: ManualVehicleBody | None, vehicle_id: str):
+    if body is None:
+        return None
+    plate = (body.vehicle_id or vehicle_id or "").strip().upper()
+    if not plate:
+        raise HTTPException(400, "Manual truck plate/name is required.")
+    if plate != vehicle_id.strip().upper():
+        raise HTTPException(400, "Manual truck id must match the selected vehicle.")
+    vehicle_type = (body.vehicle_type or "Manual truck").strip() or "Manual truck"
+    capacity_note = (body.capacity_note or "").strip() or "Manual entry"
+    capacity_kg = body.capacity_kg
+    if capacity_kg is not None and capacity_kg < 0:
+        raise HTTPException(400, "Manual truck capacity must be zero or greater.")
+    return SimpleNamespace(
+        plate_no=plate,
+        vehicle_type=vehicle_type,
+        rated_capacity_kg=capacity_kg,
+        capacity_note=capacity_note,
+        is_reefer=body.reefer,
+        is_gps_tracked=False,
+        is_third_party=body.third_party,
+    )
+
+
 class AssignmentBody(BaseModel):
     salesorder_ids: list[str] = []
     vehicle_id: str
     driver_id: int | None = None
+    manual_vehicle: ManualVehicleBody | None = None
     # Multi-select driver assignment: every id here gets notified (email/WhatsApp/
     # SMS/voice) on send-assignment-email. The sales-order-history/live-cache
     # `driver_id` column only stores one integer, so persistence still records a
@@ -255,6 +290,8 @@ def assign_order(salesorder_id: str, body: AssignmentBody, current_user: Current
     orders = [o for o in (live_sales_order_cache.find_cached(oid) or live_sales_order_cache.ensure_zoho_data(oid) for oid in order_ids) if o is not None]
     order = live_sales_order_cache.find_cached(salesorder_id) or live_sales_order_cache.ensure_zoho_data(salesorder_id)
     profile = db.execute(select(Vehicle).where(Vehicle.plate_no == body.vehicle_id)).scalar_one_or_none()
+    manual_profile = _manual_vehicle_profile(body.manual_vehicle, body.vehicle_id)
+    profile = profile or manual_profile
     if not order or not profile or len(orders) != len(set(order_ids)):
         raise HTTPException(404, "Sales order or vehicle was not found.")
     if str(profile.plate_no or "").upper() in LOCKED_VEHICLES:
@@ -374,12 +411,14 @@ def send_assignment_email(body: AssignmentEmailBody, current_user: CurrentUser =
     orders = [o for o in (live_sales_order_cache.find_cached(oid) or live_sales_order_cache.ensure_zoho_data(oid) for oid in ids) if o is not None]
     driver_ids = body.all_driver_ids()
     driver_rows = [staff_directory_cache.get_by_id(driver_id) for driver_id in driver_ids]
+    profile = db.execute(select(Vehicle).where(Vehicle.plate_no == body.vehicle_id)).scalar_one_or_none()
+    manual_profile = _manual_vehicle_profile(body.manual_vehicle, body.vehicle_id)
+    profile = profile or manual_profile
     if not driver_ids and profile and profile.is_third_party:
         return {"skipped": True, "reason": "Third-party vehicle has no staff recipient."}
     if not driver_ids or any(row is None for row in driver_rows):
         raise HTTPException(404, "Driver was not found.")
     drivers = [SimpleNamespace(**row) for row in driver_rows]
-    profile = db.execute(select(Vehicle).where(Vehicle.plate_no == body.vehicle_id)).scalar_one_or_none()
     if len(orders) != len(set(ids)) or not profile:
         raise HTTPException(404, "Sales order or vehicle was not found.")
     def address(order):
@@ -403,6 +442,7 @@ def send_assignment_email(body: AssignmentEmailBody, current_user: CurrentUser =
     # The team confirmation email is only attached to the first driver's payload
     # so it doesn't fire once per driver.
     voice_direct = vapi_client.voice_provider() == "direct"
+    whatsapp_paused = not whatsapp_control.is_active()  # admin switch: no WhatsApp message while paused (email/SMS unaffected)
     voice_paused = not voice_control.is_active()  # master switch: every outbound AI call (direct Vapi or the n8n voice webhook) is skipped
     so_numbers = [order.salesorder_number for order in orders]
     assignment_key = f"{body.vehicle_id}|{','.join(sorted(map(str, ids)))}|{','.join(sorted(map(str, driver_ids)))}"
@@ -428,8 +468,12 @@ def send_assignment_email(body: AssignmentEmailBody, current_user: CurrentUser =
             _notification_pool.submit(_send_assignment_emails_direct, driver, payload["driverSubject"], driver_html, payload["teamSubject"], payload["teamHtmlBody"], assignment_key)
         if voice_paused:
             voice_control.log_skipped(so_numbers=so_numbers, driver=driver.name)
+        if whatsapp_paused:
+            whatsapp_control.log_skipped(so_numbers=so_numbers, recipient=driver.name)
         for webhook in _NOTIFICATION_WEBHOOKS:
             if webhook == _VOICE_WEBHOOK and (voice_direct or voice_paused):
+                continue
+            if webhook == _WHATSAPP_WEBHOOK and whatsapp_paused:
                 continue
             if not secret:
                 continue  # WhatsApp/SMS n8n webhooks cannot be called without their secret
@@ -451,5 +495,5 @@ def send_assignment_email(body: AssignmentEmailBody, current_user: CurrentUser =
     # sender, whose per-message outcome (sent/failed/skipped) is at GET /api/gmail/send-log.
     email_status = "queued" if gmail_sender.configured() else "not_configured"
     n8n_status = "queued" if secret else "skipped_missing_secret"
-    channels = {"email": email_status, "whatsapp": n8n_status, "sms": n8n_status, "voice": "paused" if voice_paused else ("queued_direct" if voice_direct else n8n_status)}
+    channels = {"email": email_status, "whatsapp": "paused" if whatsapp_paused else n8n_status, "sms": n8n_status, "voice": "paused" if voice_paused else ("queued_direct" if voice_direct else n8n_status)}
     return {"success": True, "dispatched": [name for name, state in channels.items() if state.startswith("queued")], "channels": channels, "emailStatus": email_status, "voice": channels["voice"], "voiceByDriver": {d.name: channels["voice"] for d in drivers}, "drivers": [d.name for d in drivers], "message": "Notifications dispatched asynchronously."}

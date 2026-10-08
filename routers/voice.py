@@ -12,7 +12,7 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 from auth.dependencies import CurrentUser, require_role
-from services import staff_directory_cache, vapi_client, voice_calls, voice_control
+from services import staff_directory_cache, vapi_client, voice_calls, voice_control, whatsapp_control
 
 logger = logging.getLogger("voice")
 
@@ -103,7 +103,20 @@ async def vapi_webhook(request: Request):
 @router.get("/settings")
 def voice_settings():
     """Read-only status for every logistics role (the Voice tab / assignment panel banner)."""
-    return voice_control.status()
+    return {**voice_control.status(), "whatsapp": whatsapp_control.status()}
+
+
+class WhatsappBody(BaseModel):
+    whatsapp: str
+
+
+@admin_router.put("/whatsapp")
+def set_whatsapp(body: WhatsappBody, current_user: CurrentUser = Depends(require_role("admin"))):
+    """Admin-only pause/resume of every outbound WhatsApp message. 403 for any other role."""
+    try:
+        return whatsapp_control.set_mode(body.whatsapp, actor_name=current_user.full_name or current_user.email, actor_id=current_user.id)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
 
 
 class VoiceCallsBody(BaseModel):

@@ -31,7 +31,7 @@ logging.getLogger("httpcore").setLevel(logging.WARNING)
 logger = logging.getLogger("main")
 
 from routers import admin, agent, alerts, assignment, auth, comms, communications, dispatch, fleet, gmail, load_planning, optimization, orders, reports, routes, voice, warehouse, pipeline
-from services import fleet_static_cache, gmail_sender, staff_directory_cache, live_sales_order_cache, voice_control, zoho_so_lock
+from services import fleet_static_cache, gmail_sender, staff_directory_cache, live_sales_order_cache, voice_control, whatsapp_control, zoho_so_lock
 from services.cartrack_poller import poll_cartrack_and_update, report_unmatched_roster_on_startup
 from services.ws_manager import manager
 from auth.security import hash_password, verify_password
@@ -250,6 +250,7 @@ def health():
         "gmail_identity": gmail_sender.identity_health(),
         "so_lock": zoho_so_lock.health_status(),
         "voice_calls": voice_control.mode(),
+        "whatsapp_messages": whatsapp_control.mode(),
     }
 
 @app.exception_handler(SQLAlchemyError)

@@ -16,7 +16,7 @@ from auth.dependencies import require_role
 from fastapi.concurrency import run_in_threadpool
 from html import escape as html_escape
 
-from services import email_conversations, gmail_sender, memory_tables, staff_directory_cache, vapi_client, voice_calls, voice_control
+from services import email_conversations, gmail_sender, memory_tables, staff_directory_cache, vapi_client, voice_calls, voice_control, whatsapp_control
 
 logger = logging.getLogger("dispatch")
 
@@ -522,6 +522,10 @@ async def send_message(body: SendMessageBody):
                 "severity": body.severity,
         }
         email_direct = channel == "email"  # email is Gmail-only; never routed to n8n
+        if channel == "whatsapp" and not whatsapp_control.is_active():
+            whatsapp_control.log_skipped(so_numbers=[body.related_so_number], recipient=recipient_name, what="dispatch message")
+            logged.append(memory_tables.message_log.update(row["id"], status="skipped"))
+            continue
         if channel == "voice" and not voice_control.is_active():
             voice_control.log_skipped(so_numbers=[body.related_so_number], driver=recipient_name, what="dispatch voice escalation")
             logged.append(memory_tables.message_log.update(row["id"], status="skipped"))
@@ -609,6 +613,9 @@ def notify_packed_orders_batch(orders: list[dict]) -> None:
                     ("whatsapp", normalize_ph_phone(staff.get("phone"))),
                 ):
                     if not contact:
+                        continue
+                    if channel == "whatsapp" and not whatsapp_control.is_active():
+                        whatsapp_control.log_skipped(so_numbers=[so_number], recipient=staff.get("name"), what="order packed")
                         continue
                     row = memory_tables.message_log.create(
                         audience="driver",
