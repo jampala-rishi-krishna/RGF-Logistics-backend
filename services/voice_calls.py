@@ -19,7 +19,7 @@ import time
 from datetime import datetime, timezone
 
 
-from services import staff_directory_cache, vapi_client
+from services import staff_directory_cache, vapi_client, voice_control
 from services.ws_manager import manager
 
 logger = logging.getLogger("voice_calls")
@@ -253,6 +253,10 @@ async def conversations_feed() -> dict:
 async def place_assignment_calls(*, assignment_id: str, salesorder_ids: list[str], vehicle_id: str, truck_plate: str, warehouse: str, sales_orders: list[dict], drivers: list[dict]) -> list[str]:
     """One call per selected driver, same payload as n8n."""
     call_ids: list[str] = []
+    if not voice_control.is_active():
+        for driver in drivers:
+            voice_control.log_skipped(so_numbers=[s.get("soNumber") for s in sales_orders], driver=driver.get("name"))
+        return call_ids  # nothing is queued; resuming does not replay this assignment
     batch = {"calls": {}, "drivers": [d.get("name") for d in drivers], "truckPlate": truck_plate, "warehouse": warehouse, "vehicle": vehicle_id, "salesOrders": sales_orders, "teamNotified": False}
     for driver in drivers:
         try:
@@ -265,6 +269,9 @@ async def place_assignment_calls(*, assignment_id: str, salesorder_ids: list[str
                 metadata={"assignment_id": assignment_id, "driver_id": driver.get("id"), "vehicle": vehicle_id},
             )
             call = await vapi_client.create_call(payload)
+        except voice_control.VoiceCallsPaused:
+            voice_control.log_skipped(so_numbers=[s.get("soNumber") for s in sales_orders], driver=driver.get("name"))
+            continue
         except vapi_client.VapiError as exc:
             logger.error("Vapi call failed driver=%s assignment=%s: %s", driver.get("name"), assignment_id, exc)
             continue
@@ -326,6 +333,9 @@ async def _maybe_call_team(assignment_id: str) -> None:
         if not batch or batch["teamNotified"] or not all(batch["calls"].values()):
             return
         batch["teamNotified"] = True
+    if not voice_control.is_active():
+        voice_control.log_skipped(so_numbers=[s.get("soNumber") for s in batch["salesOrders"]], driver=", ".join(n for n in batch["drivers"] if n), what="team confirmation call")
+        return  # teamNotified stays True: no retry, no backfill on resume
     for contact in staff_directory_cache.notify_list():
         try:
             payload = vapi_client.build_team_confirmation_call(
@@ -339,6 +349,9 @@ async def _maybe_call_team(assignment_id: str) -> None:
             )
             call = await vapi_client.create_call(payload)
             logger.info("Team confirmation call placed id=%s to=%s assignment=%s", call.get("id"), contact.get("name"), assignment_id)
+        except voice_control.VoiceCallsPaused:
+            voice_control.log_skipped(so_numbers=[s.get("soNumber") for s in batch["salesOrders"]], what="team confirmation call")
+            break
         except vapi_client.VapiError as exc:
             logger.error("Team confirmation call failed to=%s assignment=%s: %s", contact.get("name"), assignment_id, exc)
     invalidate_list_cache()

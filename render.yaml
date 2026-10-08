@@ -147,3 +147,5 @@ services:
         sync: false
       - key: ROUTE_BALANCED_COST_WEIGHT
         sync: false
+      - key: VOICE_CALLS_DEFAULT
+        value: "paused"

@@ -15,10 +15,9 @@ from services.sales_order_location import address_lines, shipping_city
 
 HEADERS = ["Expected Shipment Date", "Sales Order#", "Customer Name", "Item Description", "SKU", "Quantity", "Unit", "City", "Shipping Address", "Fulfillment Type", "Order Status", "Invoiced", "Payment", "Packed", "Shipped", "Amount"]
 # Confirmed SO export: every column the Confirmed SO screen shows, in the layout dispatch uses.
-CONFIRMED_HEADERS = ["Date", "Item", "SKU", "Quantity", "Unit", "SO Number", "Customer", "City", "Shipping Address", "Warehouse", "Mets Qty Available for Sale", "Glacier Qty Available for Sale", "Branch Warehouse (Qty Available for Sale)", "Notes", "Fulfillment Type", "Truck", "Driver/Helper"]
+CONFIRMED_HEADERS = ["Date", "Item", "SKU", "Quantity", "Unit", "SO Number", "Customer", "City", "Shipping Address", "Warehouse", "Mets Qty Available for Sale", "Glacier Qty Available for Sale", "Notes", "Fulfillment Type", "Truck", "Driver/Helper"]
 CONFIRMED_STOCK_COLUMNS = (10, 11)
-CONFIRMED_BRANCH_WAREHOUSE_COLUMN = 12  # text cell: "<qty> (<warehouse name>)"; red when negative
-CONFIRMED_WIDTHS = [50, 90, 58, 42, 30, 62, 75, 52, 108, 68, 52, 56, 80, 110, 62, 56, 80]
+CONFIRMED_WIDTHS = [50, 100, 58, 42, 30, 62, 85, 52, 118, 68, 52, 56, 150, 62, 56, 80]
 CYAN = colors.HexColor("#00FFFF")
 NEGATIVE_RED = colors.HexColor("#C00000")
 RARE_RED = colors.HexColor("#86000B")
@@ -69,20 +68,9 @@ def _line_warehouse(item: dict) -> str | None:
     return item.get("warehouse_name") or item.get("location_name") or nested.get("warehouse_name") or None
 
 
-def _branch_warehouse_text(stock: dict) -> str:
-    """The branch's own warehouse stock (figure + warehouse name), "" when the branch has none.
-    Negative figures are kept as-is, never clamped."""
-    value = stock.get("other")
-    if value is None:
-        return ""
-    figure = f"{value:,.0f}" if float(value).is_integer() else f"{value:,.2f}"
-    name = stock.get("other_name")
-    return f"{figure} ({name})" if name else figure
-
-
 def flatten_confirmed_order(order, stock_of, truck_driver) -> list[list]:
     """One row per real Zoho line item, in CONFIRMED_HEADERS order. `stock_of(item_id)` returns
-    {"mets", "glacier", optionally "other"/"other_name"} for that item (parsed for this order's branch); `truck_driver(order)` returns (truck, driver/helper)."""
+    {"mets", "glacier"} for that item (parsed for this order's branch); `truck_driver(order)` returns (truck, driver/helper)."""
     raw = getattr(order, "raw_json", None) or {}
     items = [item for item in (raw.get("line_items") or []) if isinstance(item, dict) and any(item.get(key) not in (None, "") for key in ("name", "item_description", "sku", "quantity", "unit"))]
     address_value = raw.get("shipping_address") or getattr(order, "shipping_address", None)
@@ -94,7 +82,7 @@ def flatten_confirmed_order(order, stock_of, truck_driver) -> list[list]:
     for item in items:
         item_id = _line_item_id(item)
         stock = (stock_of(item_id) if item_id else None) or {}
-        rows.append([_date(order.expected_shipment_date), item.get("name") or item.get("item_description"), item.get("sku"), item.get("quantity"), item.get("unit"), order.salesorder_number, order.customer_name, city, _address(address_value), _line_warehouse(item), stock.get("mets"), stock.get("glacier"), _branch_warehouse_text(stock), notes, _fulfillment_type(raw), truck, driver])
+        rows.append([_date(order.expected_shipment_date), item.get("name") or item.get("item_description"), item.get("sku"), item.get("quantity"), item.get("unit"), order.salesorder_number, order.customer_name, city, _address(address_value), _line_warehouse(item), stock.get("mets"), stock.get("glacier"), notes, _fulfillment_type(raw), truck, driver])
     return rows
 
 
@@ -131,11 +119,10 @@ def _make_confirmed_excel(rows: list[list]) -> BytesIO:
     sheet.row_dimensions[1].height = 48
     for row_number, row in enumerate(rows, 2):
         for column, value in enumerate(row, 1):
-            cell = sheet.cell(row_number, column, value); cell.alignment = Alignment(vertical="center", wrap_text=column in (9, 13, 14)); cell.border = border
+            cell = sheet.cell(row_number, column, value); cell.alignment = Alignment(vertical="center", wrap_text=column in (9, 13)); cell.border = border
             if isinstance(value, (int, float)) and column in (4, 11, 12): cell.number_format = _number_format(value)
-            if column == CONFIRMED_BRANCH_WAREHOUSE_COLUMN + 1 and isinstance(value, str) and value.startswith("-"): cell.font = Font(color="C00000", bold=True)
     sheet.freeze_panes = "A2"
-    widths = [13, 30, 14, 11, 8, 15, 28, 14, 48, 20, 16, 16, 30, 60, 18, 14, 22]
+    widths = [13, 30, 14, 11, 8, 15, 28, 14, 48, 20, 16, 16, 60, 18, 14, 22]
     for column, width in enumerate(widths, 1): sheet.column_dimensions[get_column_letter(column)].width = width
     output = BytesIO(); book.save(output); output.seek(0); return output
 
@@ -174,9 +161,6 @@ def make_pdf(rows: list[list], caption: str, layout: str = "default") -> BytesIO
             if confirmed and index in CONFIRMED_STOCK_COLUMNS and isinstance(value, (int, float)):
                 text = f"{value:,.0f}" if float(value).is_integer() else f"{value:,.2f}"
                 cells.append(Paragraph(escape(text), negative_style if value < 0 else style))
-                continue
-            if confirmed and index == CONFIRMED_BRANCH_WAREHOUSE_COLUMN and isinstance(value, str) and value.startswith("-"):
-                cells.append(Paragraph(escape(value), negative_style))
                 continue
             if not confirmed and index == 10:
                 style = cell_style.clone(f"status-{_text(value)}")

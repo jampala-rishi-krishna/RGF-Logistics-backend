@@ -16,7 +16,7 @@ from auth.dependencies import require_role
 from fastapi.concurrency import run_in_threadpool
 from html import escape as html_escape
 
-from services import email_conversations, gmail_sender, memory_tables, staff_directory_cache, vapi_client, voice_calls
+from services import email_conversations, gmail_sender, memory_tables, staff_directory_cache, vapi_client, voice_calls, voice_control
 
 logger = logging.getLogger("dispatch")
 
@@ -522,6 +522,10 @@ async def send_message(body: SendMessageBody):
                 "severity": body.severity,
         }
         email_direct = channel == "email"  # email is Gmail-only; never routed to n8n
+        if channel == "voice" and not voice_control.is_active():
+            voice_control.log_skipped(so_numbers=[body.related_so_number], driver=recipient_name, what="dispatch voice escalation")
+            logged.append(memory_tables.message_log.update(row["id"], status="skipped"))
+            continue
         if email_direct:
             sent, provider_message_id, email_error = await _send_email_direct(contact_for_channel, template_subject, rendered_body)
             if email_error:

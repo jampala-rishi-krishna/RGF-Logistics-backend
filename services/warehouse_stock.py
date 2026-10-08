@@ -27,18 +27,13 @@ def _parse_stock(entry: dict | None, item_id: str = "", branch_id: str | None = 
     location and must not replace the main Mets figure.
 
     With BRANCH_STOCK_MAPPING enabled and a branch that has a rule (services/branches.py), that
-    branch's own warehouses are used instead; a branch with a single non-Mets/Glacier warehouse
-    (SSI, Rare Cuts, Rare Food Shop) reports it as "other" with its warehouse name."""
+    branch's own warehouses are used instead (RGF and MSSI - the only handled branches)."""
     rule = branches.STOCK_RULES.get(str(branch_id or "")) if branches.stock_mapping_enabled() else None
     result: dict[str, float | None] = {"mets": None, "glacier": None}
-    if rule and rule.get("other"):
-        result["other"] = None
-        result["other_name"] = None
     for warehouse in (entry or {}).get("warehouses") or []:
         if not isinstance(warehouse, dict):
             continue
-        raw_name = str(warehouse.get("warehouse_name") or warehouse.get("name") or "").strip()
-        name = raw_name.casefold()
+        name = str(warehouse.get("warehouse_name") or warehouse.get("name") or "").strip().casefold()
         value = _stock_value(
             warehouse.get(
                 "warehouse_available_for_sale_stock",
@@ -48,9 +43,7 @@ def _parse_stock(entry: dict | None, item_id: str = "", branch_id: str | None = 
         if re.search(r"\(deactivated\)$", name, re.I) or name.startswith("(do not use)"):
             continue
         if rule:
-            if rule.get("other"):
-                site = "other" if name == rule["other"] else None
-            elif all(part in name for part in rule["mets"]) and not any(part in name for part in rule.get("mets_exclude", ())) and not name.startswith("chilled"):
+            if all(part in name for part in rule["mets"]) and not any(part in name for part in rule.get("mets_exclude", ())) and not name.startswith("chilled"):
                 site = "mets"
             elif all(part in name for part in rule["glacier"]):
                 site = "glacier"
@@ -60,8 +53,6 @@ def _parse_stock(entry: dict | None, item_id: str = "", branch_id: str | None = 
                 continue
             if value is not None:
                 result[site] = value
-                if site == "other":
-                    result["other_name"] = raw_name
             continue
         if METS_NAME in name and "near-expiry" not in name and "for supermarket" not in name and not name.startswith("chilled"):
             site = "mets"
@@ -101,16 +92,14 @@ def order_item_ids(orders) -> dict[str, list[str]]:
 
 
 def _combine(order_items: dict[str, list[str]], stock_of, order_branch=None) -> dict[str, float | None]:
-    """stock_of(item_id, branch_id) -> {"mets", "glacier", ["other", "other_name"]}."""
+    """stock_of(item_id, branch_id) -> {"mets", "glacier"}."""
     result: dict[str, float | None] = {}
     for order_id, ids in order_items.items():
         branch_id = (order_branch or {}).get(order_id)
         per_item = [stock_of(item_id, branch_id) or {} for item_id in ids]
-        for key in ("mets", "glacier", "other"):
+        for key in ("mets", "glacier"):
             values = [v for v in (stock.get(key) for stock in per_item) if v is not None]
             result[f"{order_id}:{key}"] = min(values) if values and len(values) == len(ids) else None
-        names = [stock.get("other_name") for stock in per_item if stock.get("other_name")]
-        result[f"{order_id}:other_name"] = names[0] if names else None
     return result
 
 

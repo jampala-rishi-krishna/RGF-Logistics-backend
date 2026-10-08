@@ -206,8 +206,11 @@ class _Pool:
         fn(*args, **kwargs)
 
 
-def _assign(monkeypatch, voice_provider="n8n"):
+def _assign(monkeypatch, voice_provider="n8n", voice_mode="active", place_spy=None):
     from routers import assignment as a
+    from services import voice_control
+
+    monkeypatch.setitem(voice_control._state, "mode", voice_mode)  # these tests cover the active (pre-pause-switch) behaviour
 
     order = SimpleNamespace(id="SO-ID-1", salesorder_number="SO-1001", customer_name="Acme", shipping_address=None, raw_json={"line_items": [{"quantity": 1}], "shipping_address": {"address": "1 St", "city": "Manila"}})
     profile = SimpleNamespace(plate_no="NAN1234", capacity_note=None, is_third_party=False)
@@ -218,7 +221,7 @@ def _assign(monkeypatch, voice_provider="n8n"):
     monkeypatch.setattr(a.staff_directory_cache, "get_by_id", lambda i, **kw: {"id": 1, "name": "Juan", "email": "juan@x.com", "phone": "0917", "warehouse": "METS"})
     monkeypatch.setattr(a.staff_directory_cache, "notify_list", lambda: [])
     monkeypatch.setattr(a.vapi_client, "voice_provider", lambda: voice_provider)
-    monkeypatch.setattr(a.voice_calls, "place_assignment_calls_sync", lambda **kw: [])
+    monkeypatch.setattr(a.voice_calls, "place_assignment_calls_sync", place_spy or (lambda **kw: []))
     monkeypatch.setattr(gmail_sender, "send_email", lambda **kw: {"id": "m", "threadId": "t", "to": [kw["to"]]})
     posts = []
     monkeypatch.setattr(httpx, "post", lambda url, **kw: posts.append(url) or SimpleNamespace(status_code=200, raise_for_status=lambda: None))

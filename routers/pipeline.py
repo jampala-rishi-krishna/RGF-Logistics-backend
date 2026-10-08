@@ -64,7 +64,7 @@ def _zoho_date_records(target: date_type, force: bool) -> tuple[dict[str, dict],
                 rows_after_filter += 1
         context = body.get("page_context") or {}
         more = context.get("has_more_page") is True or str(context.get("has_more_page")).lower() == "true"
-        if not batch or not more: break
+        if not body.get("raw_count", len(batch)) or not more: break  # raw_count: page size before the branch filter
         page += 1
     stats = {"pages_fetched": pages, "shipment_filter": "shipment_date_start/shipment_date_end", "cache": "cold" if force or cached is None else "expired", "rows_before_filter": rows_before_filter, "rows_after_filter": rows_after_filter}
     with zoho_acquisition.publication(epoch) as current:

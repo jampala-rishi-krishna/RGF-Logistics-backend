@@ -13,6 +13,8 @@ import re
 
 import httpx
 
+from services import voice_control
+
 logger = logging.getLogger("vapi_client")
 
 VAPI_BASE_URL = "https://api.vapi.ai"
@@ -160,6 +162,9 @@ def build_team_confirmation_call(*, staff_name: str, staff_phone: str, driver_na
 
 
 async def create_call(payload: dict) -> dict:
+    # Last line of defence: no outbound call is ever created while AI voice calls are paused.
+    if not voice_control.is_active():
+        raise voice_control.VoiceCallsPaused("AI voice calls are paused")
     # /call/phone, the endpoint the n8n workflows used.
     return _json_or_raise(await _request("POST", "/call/phone", json=payload), "Vapi create call")
 

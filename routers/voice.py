@@ -9,8 +9,10 @@ import httpx
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import StreamingResponse
 
-from auth.dependencies import require_role
-from services import staff_directory_cache, vapi_client, voice_calls
+from pydantic import BaseModel
+
+from auth.dependencies import CurrentUser, require_role
+from services import staff_directory_cache, vapi_client, voice_calls, voice_control
 
 logger = logging.getLogger("voice")
 
@@ -96,6 +98,25 @@ async def vapi_webhook(request: Request):
     elif kind == "tool-calls":
         return await voice_calls.handle_tool_calls(message)
     return {"ok": True}
+
+
+@router.get("/settings")
+def voice_settings():
+    """Read-only status for every logistics role (the Voice tab / assignment panel banner)."""
+    return voice_control.status()
+
+
+class VoiceCallsBody(BaseModel):
+    voice_calls: str
+
+
+@admin_router.put("/voice-calls")
+def set_voice_calls(body: VoiceCallsBody, current_user: CurrentUser = Depends(require_role("admin"))):
+    """Admin-only pause/resume of every outbound AI voice call. 403 for any other role."""
+    try:
+        return voice_control.set_mode(body.voice_calls, actor_name=current_user.full_name or current_user.email, actor_id=current_user.id)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
 
 
 @admin_router.post("/refresh-staff")

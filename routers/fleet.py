@@ -18,6 +18,7 @@ from database import get_db, SessionLocal
 from models.vehicle import Vehicle
 from models.inventory import SalesOrderCache
 from models.sales_order_history import SalesOrderHistory
+from services import branches as branch_service
 from models.sales_order_lines import SalesOrderLine
 from services import live_gps_store, live_sales_order_cache, memory_tables
 from services.sales_order_history_sync import sync_history_row
@@ -230,7 +231,7 @@ def list_vehicles(status: str | None = None, date: str | None = None, db: Sessio
             date = None
         else:
             vehicles = db.execute(select(Vehicle)).scalars().all()
-            history_rows = db.execute(select(SalesOrderHistory)).scalars().all()
+            history_rows = branch_service.filter_allowed(db.execute(select(SalesOrderHistory)).scalars().all())  # RGF/MSSI only
             history_rows = [row for row in history_rows if (_operational_date(row) or row.expected_shipment_date) == target]
             grouped: dict[str, list[SalesOrderHistory]] = {}
             for row in history_rows:

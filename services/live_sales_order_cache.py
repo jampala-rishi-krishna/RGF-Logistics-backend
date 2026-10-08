@@ -11,7 +11,7 @@ from datetime import date, datetime, timezone
 
 from models.inventory import SalesOrderCache
 from services.zoho_client import ZohoError, fetch_sales_order_detail, fetch_sales_orders, fetch_sales_orders_by_shipment_date
-from services import zoho_acquisition
+from services import branches, zoho_acquisition
 
 logger = logging.getLogger("live_sales_order_cache")
 
@@ -25,6 +25,8 @@ _assignment_state: dict[str, dict] = {}
 # Zoho business data (customer, weight, raw_json) for every id currently in _assignment_state,
 # fetched live from Zoho (not Neon) and kept warm regardless of which date window is cached.
 _assigned_zoho: dict[str, SalesOrderCache] = {}
+# Ids (-> number) of orders found to belong to a branch RareChain does not handle. Memory only.
+_excluded_ids: dict[str, str | None] = {}
 
 # --- Ordinary Inventory/unassigned windows: short-TTL cache of whatever Zoho returned for a
 # given (start, end) date range. ---
@@ -258,6 +260,8 @@ def ensure_zoho_data(order_id: str) -> SalesOrderCache | None:
     """Fetch this SO's Zoho detail if we don't already have it cached. Used for capacity
     checks and Confirmed SO's current/future view, which need the assigned set regardless
     of what date window Inventory happened to have cached."""
+    if order_id in _excluded_ids:
+        raise branches.BranchNotAllowed(_excluded_ids[order_id])  # no Zoho call for a known excluded order
     epoch = zoho_acquisition.generation()
     existing = _assigned_zoho.get(order_id)
     if existing is not None:
@@ -272,12 +276,22 @@ def ensure_zoho_data(order_id: str) -> SalesOrderCache | None:
 def publish_zoho_data(order_id: str, detail: dict, epoch: int) -> SalesOrderCache:
     """Publish an already acquired full detail using the existing snapshot shaping."""
     record = deepcopy(detail.get("salesorder") or detail)
+    if not branches.is_allowed(record):
+        _excluded_ids[str(order_id)] = record.get("salesorder_number")
+        raise branches.BranchNotAllowed(record.get("salesorder_number"))
     row = _build_transient(record)
     with zoho_acquisition.publication(epoch) as current:
         if current:
             _apply_assignment(row)
             _assigned_zoho[order_id] = row
     return row
+
+
+def require_allowed(order_id: str) -> None:
+    """Raise BranchNotAllowed (409) for an order already known to belong to a branch we do not
+    handle - without calling Zoho. Unknown ids pass; ensure_zoho_data classifies them on fetch."""
+    if str(order_id) in _excluded_ids:
+        raise branches.BranchNotAllowed(_excluded_ids[str(order_id)])
 
 
 def refresh_zoho_data(order_id: str) -> SalesOrderCache | None:
@@ -294,6 +308,15 @@ def get_assigned_snapshot() -> list[SalesOrderCache]:
     return rows
 
 
+def _ensure_or_skip(order_id: str):
+    """ensure_zoho_data for the snapshot fan-out: an order of a branch we do not handle is hidden
+    (remembered in _excluded_ids), not counted as a fetch failure."""
+    try:
+        return ensure_zoho_data(order_id), False
+    except branches.BranchNotAllowed:
+        return None, True
+
+
 def get_assigned_snapshot_ex() -> tuple[list[SalesOrderCache], bool]:
     """Same set as get_assigned_snapshot(), but also reports whether any assigned SO's
     Zoho detail fetch failed this call (had_failures). Right after a backend restart,
@@ -304,19 +327,22 @@ def get_assigned_snapshot_ex() -> tuple[list[SalesOrderCache], bool]:
     "-" indefinitely. Callers that cache their result (Fleet) should check had_failures
     and avoid latching so the next request retries instead of staying stuck."""
     with _state_lock:
-        ids = [oid for oid, s in _assignment_state.items() if (s.get("assignment_status") or "unassigned") != "unassigned"]
+        ids = [oid for oid, s in _assignment_state.items() if (s.get("assignment_status") or "unassigned") != "unassigned" and oid not in _excluded_ids]
     to_fetch = [oid for oid in ids if oid not in _assigned_zoho]
     had_failures = False
     if to_fetch:
         # Fan out like _hydrate_details, bounded well under Zoho's ~100 req/min ceiling,
         # so a cold cache with many assigned SOs doesn't fetch them one at a time.
         with ThreadPoolExecutor(max_workers=5) as executor:
-            futures = {executor.submit(contextvars.copy_context().run, ensure_zoho_data, oid): oid for oid in to_fetch}
+            futures = {executor.submit(contextvars.copy_context().run, _ensure_or_skip, oid): oid for oid in to_fetch}
             for future in as_completed(futures):
-                if future.result() is None:
+                row, excluded = future.result()
+                if row is None and not excluded:
                     had_failures = True
     rows = []
     for order_id in ids:
+        if order_id in _excluded_ids:
+            continue
         row = _assigned_zoho.get(order_id)
         if row is not None:
             rows.append(row)
@@ -348,7 +374,10 @@ def _pull_window(start: date | None, end: date | None) -> dict[str, dict]:
         if page == 1 and not _shipment_filter_applied(context):
             logger.warning("[LiveSalesOrderCache] shipment-date filter not applied by Zoho - using legacy window scan")
             return _pull_window_legacy(start, end)
-        page_records = payload.get("salesorders") or []
+        # Paging decisions use the raw page; only allowed-branch rows are kept (and so cached/hydrated).
+        raw_page = payload.get("salesorders") or []
+        page_records = branches.filter_allowed(raw_page)
+        raw_count = payload.get("raw_count", len(raw_page))  # pre-filter size when zoho_client already filtered
         fingerprint = tuple(str(r.get("salesorder_id") or r.get("id") or "") for r in page_records)
         if fingerprint and fingerprint in seen_fingerprints:
             break
@@ -362,7 +391,7 @@ def _pull_window(start: date | None, end: date | None) -> dict[str, dict]:
         has_more = context.get("has_more_page")
         if isinstance(has_more, str):
             has_more = has_more.strip().lower() == "true"
-        if not page_records or not has_more:
+        if not raw_count or not has_more:
             break
         page += 1
     return records
@@ -377,7 +406,10 @@ def _pull_window_legacy(start: date | None, end: date | None) -> dict[str, dict]
     lookup_start = start - timedelta(days=90) if start else None
     while True:
         payload = fetch_sales_orders(date_from=lookup_start, date_to=end, page=page, per_page=200)
-        page_records = payload.get("salesorders") or []
+        # Paging decisions use the raw page; only allowed-branch rows are kept (and so cached/hydrated).
+        raw_page = payload.get("salesorders") or []
+        page_records = branches.filter_allowed(raw_page)
+        raw_count = payload.get("raw_count", len(raw_page))  # pre-filter size when zoho_client already filtered
         fingerprint = tuple(str(r.get("salesorder_id") or r.get("id") or "") for r in page_records)
         if fingerprint and fingerprint in seen_fingerprints:
             break
@@ -392,7 +424,7 @@ def _pull_window_legacy(start: date | None, end: date | None) -> dict[str, dict]
         has_more = context.get("has_more_page")
         if isinstance(has_more, str):
             has_more = has_more.strip().lower() == "true"
-        if not page_records or (not has_more and len(page_records) < 200):
+        if not raw_count or (not has_more and raw_count < 200):
             break
         page += 1
     return records

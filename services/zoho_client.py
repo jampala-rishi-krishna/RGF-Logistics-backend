@@ -13,7 +13,7 @@ from datetime import date, datetime
 
 import httpx
 from dotenv import load_dotenv
-from services import zoho_acquisition, zoho_rate_limiter
+from services import branches, zoho_acquisition, zoho_rate_limiter
 
 load_dotenv()
 
@@ -260,9 +260,21 @@ def fetch_sales_orders(
         params.update({"date_start": date_from.isoformat(), "date_end": date_to.isoformat()})
     if filter_by:
         params["filter_by"] = filter_by
+    else:
+        # Zoho ignores branch_ids when filter_by is present (verified), so it is only sent without it.
+        params["branch_ids"] = branches.branch_param()
     if sort_column:
         params["sort_column"] = sort_column
-    return _request("GET", "salesorders", params)
+    return _only_allowed(_request("GET", "salesorders", params), "salesorders")
+
+
+def _only_allowed(payload: dict, key: str) -> dict:
+    """Drop rows of branches RareChain does not handle, right after the fetch (before any cache,
+    count, hydration or stock lookup). Works whether or not Zoho honored branch_ids."""
+    if isinstance(payload, dict) and isinstance(payload.get(key), list):
+        # raw_count lets paging code keep using the pre-filter page size.
+        payload = {**payload, key: branches.filter_allowed(payload[key]), "raw_count": len(payload[key])}
+    return payload
 
 
 def fetch_sales_order_detail(salesorder_id: str) -> dict:
@@ -277,12 +289,13 @@ def fetch_item_detail(item_id: str) -> dict:
 def fetch_sales_orders_by_customview(customview_id: str, page: int = 1, per_page: int = 200) -> dict:
     """List sales orders exactly as a saved Zoho Custom View would (e.g. Acknowledged),
     delegating the filtering logic to Zoho instead of reconstructing it locally."""
-    return _request("GET", "salesorders", {"customview_id": customview_id, "page": page, "per_page": min(per_page, 200)})
+    # branch_ids is NOT sent here: with a custom view Zoho drops the view's own filter when it is present.
+    return _only_allowed(_request("GET", "salesorders", {"customview_id": customview_id, "page": page, "per_page": min(per_page, 200)}), "salesorders")
 
 def fetch_sales_orders_by_shipment_date(start: date, end: date, page: int = 1, per_page: int = 200) -> dict:
     """Zoho shipment-date list filter. The caller still filters locally because
     Zoho tenants vary in whether this filter is honored."""
-    return _request("GET", "salesorders", {"shipment_date_start": start.isoformat(), "shipment_date_end": end.isoformat(), "page": page, "per_page": min(per_page, 200)})
+    return _only_allowed(_request("GET", "salesorders", {"shipment_date_start": start.isoformat(), "shipment_date_end": end.isoformat(), "page": page, "per_page": min(per_page, 200), "branch_ids": branches.branch_param()}), "salesorders")
 
 
 def acknowledge_sales_order(salesorder_id: str, status_code: str = "cs_acknowl") -> dict:
@@ -317,7 +330,8 @@ def fetch_packages(
         params["shipment_date_start"] = shipment_date_start.isoformat()
     if shipment_date_end:
         params["shipment_date_end"] = shipment_date_end.isoformat()
-    return _request("GET", "packages", params)
+    params["branch_ids"] = branches.branch_param()  # verified to filter packages at Zoho
+    return _only_allowed(_request("GET", "packages", params), "packages")
 
 
 def fetch_package_detail(package_id: str) -> dict:

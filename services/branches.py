@@ -4,18 +4,25 @@ A sales order's branch comes from Zoho's own `branch_id` / `branch_name` on the 
 detail both carry them). It is NEVER inferred from the order-number prefix: the Sari-suki series is
 "SS SO26-..." and "WM-SO26-..." (Wet Market) is a numbering series inside the RGF branch.
 
-IDs were read from Zoho's locations API on 2026-10-08. Unknown branch ids that show up in data are
-still handled (see `describe`): they are shown with their Zoho name and an initials badge.
+IDs were read from Zoho's locations API on 2026-10-08.
+
+ALLOWLIST: RareChain handles only RGF and Meat and Seafood Specialist Inc. (MSSI). Orders of every
+other branch (SariSuki, Rare Cuts, Rare Food Shop, and any branch never seen before) are never
+loaded, counted, cached, hydrated, listed, exported or acted on. Override with env ALLOWED_BRANCHES
+(comma-separated branch ids).
 """
 from __future__ import annotations
 
+import logging
 import os
 import re
+import threading
 
-# stock: how Mets/Glacier columns map to this branch's warehouses (used only when
-# BRANCH_STOCK_MAPPING is enabled; see services/warehouse_stock.py).
-#   mets / glacier  -> substrings that must ALL appear in the (casefolded) warehouse name
-#   other           -> exact (casefolded) warehouse name shown as the branch's own warehouse
+from fastapi import HTTPException
+
+logger = logging.getLogger("branches")
+
+# Directory of known Zoho branches (labels/badges). Only ALLOWED_BRANCH_IDS are ever loaded or offered.
 BRANCHES: list[dict] = [
     {"id": "4489499000001322444", "name": "Rare Global Food Trading Corp.", "code": "RGF", "label": "RGF"},
     {"id": "4489499000017295785", "name": "Meat and Seafood Specialist Inc.", "code": "MSSI", "label": "Meat and Seafood (MSSI)"},
@@ -25,14 +32,96 @@ BRANCHES: list[dict] = [
 ]
 _BY_ID = {b["id"]: b for b in BRANCHES}
 
-# Per-branch warehouse -> column mapping. Matching is on the casefolded warehouse name.
+# Per-branch warehouse -> column mapping (only for the handled branches). Matching is on the
+# casefolded warehouse name; used only when BRANCH_STOCK_MAPPING is enabled.
 STOCK_RULES: dict[str, dict] = {
     "4489499000001322444": {"mets": ("mets cold storage",), "mets_exclude": ("near-expiry", "for supermarket", "mssi"), "glacier": ("glacier south rgf",)},
     "4489499000017295785": {"mets": ("mets cold storage", "mssi"), "glacier": ("glacier south mssi",)},
-    "4489499000044793937": {"other": "sarisuki store inc. warehouse"},
-    "4489499000017304175": {"other": "production area rc"},
-    "4489499000267238651": {"other": "glacier rfs"},
 }
+
+_RGF_ID, _MSSI_ID = BRANCHES[0]["id"], BRANCHES[1]["id"]
+DEFAULT_ALLOWED_BRANCH_IDS = (_RGF_ID, _MSSI_ID)
+
+
+def _resolve_allowed() -> tuple[str, ...]:
+    raw = os.environ.get("ALLOWED_BRANCHES", "")
+    ids = tuple(part.strip() for part in raw.split(",") if part.strip())
+    return ids or DEFAULT_ALLOWED_BRANCH_IDS
+
+
+ALLOWED_BRANCH_IDS: tuple[str, ...] = _resolve_allowed()
+
+# A record with no branch_id at all (Zoho list/detail rows always carry one; Neon history rows keep none)
+# is judged by its number, and only against the allowlist: RGF numbering (SO..., WM-SO...) counts as RGF,
+# MSSI numbering (MS-SO...) as MSSI. Anything else is excluded.
+_NUMBER_RGF = re.compile(r"^\s*(?:SO|WM-SO)(?![A-Za-z])", re.I)
+_NUMBER_MSSI = re.compile(r"^\s*MS-SO(?![A-Za-z])", re.I)
+
+
+def _number_is_allowed(number: str) -> bool:
+    return bool((_NUMBER_RGF.match(number) and _RGF_ID in ALLOWED_BRANCH_IDS) or (_NUMBER_MSSI.match(number) and _MSSI_ID in ALLOWED_BRANCH_IDS))
+
+
+MESSAGE_NOT_HANDLED = "This branch isn't handled in RareChain"
+
+
+class BranchNotAllowed(HTTPException):
+    """409 for any read-by-id or write on an order of a branch RareChain does not handle."""
+
+    def __init__(self, number: str | None = None):
+        super().__init__(status_code=409, detail=MESSAGE_NOT_HANDLED)
+        self.salesorder_number = number
+
+
+_excluded_lock = threading.Lock()
+_excluded_count = 0
+
+
+def excluded_count() -> int:
+    return _excluded_count
+
+
+def allowed_branch_ids() -> tuple[str, ...]:
+    return ALLOWED_BRANCH_IDS
+
+
+def branch_param() -> str:
+    """Value for Zoho's `branch_ids` list parameter (verified to accept several ids in one call)."""
+    return ",".join(ALLOWED_BRANCH_IDS)
+
+
+def _record_of(row_or_record) -> dict:
+    record = row_or_record if isinstance(row_or_record, dict) else (getattr(row_or_record, "raw_json", None) or {})
+    return record if isinstance(record, dict) else {}
+
+
+def _number_of(row_or_record) -> str:
+    record = _record_of(row_or_record)
+    number = record.get("salesorder_number") or record.get("sales_order_number")
+    if not number and not isinstance(row_or_record, dict):
+        number = getattr(row_or_record, "salesorder_number", None)
+    return str(number or "")
+
+
+def is_allowed(row_or_record) -> bool:
+    """True when the order belongs to an allowed branch. A record without a branch id is allowed only
+    if its number is RGF/MSSI numbered. Unknown branches are excluded."""
+    record = _record_of(row_or_record)
+    branch_id = str(record.get("branch_id") or record.get("location_id") or "").strip()
+    if branch_id:
+        return branch_id in ALLOWED_BRANCH_IDS
+    return _number_is_allowed(_number_of(row_or_record))
+
+
+def filter_allowed(records: list) -> list:
+    """Drop disallowed records immediately after a Zoho fetch (before cache, count or hydration)."""
+    global _excluded_count
+    kept = [r for r in records if is_allowed(r)]
+    dropped = len(records) - len(kept)
+    if dropped:
+        with _excluded_lock:
+            _excluded_count += dropped
+    return kept
 
 
 def stock_mapping_enabled() -> bool:
@@ -71,14 +160,12 @@ def branch_id_of(row_or_record) -> str | None:
 
 
 def all_options(seen: list[dict] | None = None) -> list[dict]:
-    """Config branches (always all of them) plus any unknown branch seen in data."""
-    options = [dict(b) for b in BRANCHES]
-    known = {b["id"] for b in options}
+    """The allowed branches only (RGF and MSSI by default), in config order."""
+    by_id = {b["id"]: dict(b) for b in BRANCHES}
     for extra in seen or []:
-        if extra and extra["id"] not in known:
-            options.append(dict(extra))
-            known.add(extra["id"])
-    return options
+        if extra and extra["id"] in ALLOWED_BRANCH_IDS:
+            by_id.setdefault(extra["id"], dict(extra))
+    return [by_id[i] for i in ALLOWED_BRANCH_IDS if i in by_id]
 
 
 def parse_ids(value) -> set[str]:

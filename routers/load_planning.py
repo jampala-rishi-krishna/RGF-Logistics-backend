@@ -76,7 +76,7 @@ def _fetch_acknowledged_ids_from_zoho() -> set[str]:
         has_more = context.get("has_more_page")
         if isinstance(has_more, str):
             has_more = has_more.strip().lower() == "true"
-        if not records or not has_more:
+        if not payload.get("raw_count", len(records)) or not has_more:  # raw_count: page size before the branch filter
             break
         page += 1
     return ids
@@ -234,8 +234,6 @@ def _summary(row, db: Session | None = None, *, allow_fetch: bool = True) -> dic
     else:
         result["mets_qty_available_for_sale"] = getattr(row, "_mets_qty_available_for_sale", None)
         result["glacier_qty_available_for_sale"] = getattr(row, "_glacier_qty_available_for_sale", None)
-        result["other_qty_available_for_sale"] = getattr(row, "_other_qty_available_for_sale", None)
-        result["other_warehouse_name"] = getattr(row, "_other_warehouse_name", None)
 
     def number(item, *keys):
         for key in keys:
@@ -286,7 +284,7 @@ def _summary(row, db: Session | None = None, *, allow_fetch: bool = True) -> dic
             line_total_weight_kg = item_weight_kg(item, row.salesorder_number or row.id)
             stock_item_id = item.get("item_id") or item.get("itemid")
             item_stock = ((fetch_item_stock(str(stock_item_id), branch_id) if allow_fetch else cached_item_stock(str(stock_item_id), branch_id)) if stock_item_id else None) or {}
-            products.append({"mets_qty_available_for_sale": item_stock.get("mets"), "glacier_qty_available_for_sale": item_stock.get("glacier"), "other_qty_available_for_sale": item_stock.get("other"), "other_warehouse_name": item_stock.get("other_name"), "line_item_id": item.get("line_item_id"), "item_id": item.get("item_id") or item.get("itemid"), "name": item.get("name") or item.get("item_description") or item.get("description"), "sku": item.get("sku") or item.get("item_order") or item.get("item_id"), "quantity": quantity, "unit": unit or None, "total_weight_kg": line_total_weight_kg, "packaging_type": "pack" if "pack" in normalized else "case" if "case" in normalized or "carton" in normalized else None, "pack_quantity": quantity if "pack" in normalized else 0, "case_quantity": quantity if "case" in normalized or "carton" in normalized else 0, "quantity_packed": number(item, "quantity_packed"), "quantity_shipped": number(item, "quantity_shipped")})
+            products.append({"mets_qty_available_for_sale": item_stock.get("mets"), "glacier_qty_available_for_sale": item_stock.get("glacier"), "line_item_id": item.get("line_item_id"), "item_id": item.get("item_id") or item.get("itemid"), "name": item.get("name") or item.get("item_description") or item.get("description"), "sku": item.get("sku") or item.get("item_order") or item.get("item_id"), "quantity": quantity, "unit": unit or None, "total_weight_kg": line_total_weight_kg, "packaging_type": "pack" if "pack" in normalized else "case" if "case" in normalized or "carton" in normalized else None, "pack_quantity": quantity if "pack" in normalized else 0, "case_quantity": quantity if "case" in normalized or "carton" in normalized else 0, "quantity_packed": number(item, "quantity_packed"), "quantity_shipped": number(item, "quantity_shipped")})
         total_item_quantity = sum(number(item, "quantity") for item in items)
 
     result["product_count"] = len([p for p in products if p["name"]])
@@ -361,8 +359,6 @@ def list_sales_orders(
     for row in rows:
         setattr(row, "_mets_qty_available_for_sale", stock.get(f"{row.id}:mets"))
         setattr(row, "_glacier_qty_available_for_sale", stock.get(f"{row.id}:glacier"))
-        setattr(row, "_other_qty_available_for_sale", stock.get(f"{row.id}:other"))
-        setattr(row, "_other_warehouse_name", stock.get(f"{row.id}:other_name"))
     start_index = (page - 1) * per_page
     page_rows = rows[start_index : start_index + per_page]
     saved_page = [row.id for row in page_rows if isinstance(row, SalesOrderHistory)]
@@ -434,6 +430,8 @@ def _rows_any_branch(db: Session, date_from: str | None, date_to: str | None, st
         # Earlier calendar dates for Confirmed SO: Neon (sales_order_history) only - no
         # Zoho call, no live-cache, no sales_orders_cache read at all.
         rows = db.execute(select(SalesOrderHistory).where(SalesOrderHistory.expected_shipment_date >= start, SalesOrderHistory.expected_shipment_date <= end).order_by(SalesOrderHistory.expected_shipment_date.desc(), SalesOrderHistory.salesorder_number.desc())).scalars().all()
+        # Saved rows keep no branch: hide any that are not RGF/MSSI-numbered (nothing to hide today - checked 2026-10-08).
+        rows = branch_service.filter_allowed(rows)
     elif assignment == "assigned":
         # Current/future range for Confirmed SO: the in-memory assigned snapshot (Zoho data,
         # kept warm live; assignment state kept warm from sales_order_history at startup and
@@ -741,7 +739,9 @@ def acknowledge_sales_order_route(salesorder_id: str, current_user: CurrentUser 
 @router.post("/salesorders/{salesorder_id}/lock")
 def lock_sales_order_route(salesorder_id: str, current_user: CurrentUser = Depends(require_role("admin", "dispatcher", "warehouse"))):
     """Retry the Zoho lock for ONE already-acknowledged sales order."""
-    cached = live_sales_order_cache.find_cached(salesorder_id)  # cache only: no extra Zoho call
+    cached = live_sales_order_cache.find_cached(salesorder_id)  # cache only unless the order was never seen
+    if cached is None:
+        cached = live_sales_order_cache.ensure_zoho_data(salesorder_id)  # raises 409 for a branch we do not handle
     payload = _lock_after_acknowledge(salesorder_id, getattr(cached, "salesorder_number", None), current_user)
     return payload
 
@@ -798,6 +798,7 @@ def acknowledge_filtered_sales_orders(
 @router.get("/inventory/sales-orders/{salesorder_id}")
 @zoho_acquisition.operation("inventory-drawer")
 def get_sales_order(salesorder_id: str):
+    live_sales_order_cache.require_allowed(salesorder_id)
     cached = live_sales_order_cache.find_cached(salesorder_id)
     try:
         # List responses are intentionally compact. Fetch the detail payload on every
