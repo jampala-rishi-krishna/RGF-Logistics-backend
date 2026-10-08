@@ -29,7 +29,7 @@ from services import gmail_sender
 from services.sales_order_location import address_lines
 from services.item_weight import calculate_order_weight_kg
 from services.delivery_status import is_delivered
-from services import staff_directory_cache, live_sales_order_cache, memory_tables, vapi_client, voice_calls, voice_control, whatsapp_control
+from services import staff_directory_cache, live_sales_order_cache, memory_tables, vapi_client, vehicle_flags, voice_calls, voice_control, whatsapp_control
 from services.sales_order_history_sync import sync_history_row
 from routers.fleet import invalidate_fleet_cache
 from routers.dispatch import normalize_ph_phone
@@ -337,6 +337,16 @@ def assign_order(salesorder_id: str, body: AssignmentBody, current_user: Current
         live_sales_order_cache.set_assignment(item.id, vehicle_id=body.vehicle_id, driver_id=primary_driver_id, assigned_at=assigned_at, assigned_by=current_user.id, assignment_status="assigned")
         sync_history_row(db, item)
     db.commit()
+    # Fleet Health: an over-capacity assignment is recorded as an "overload" issue on that truck (never blocks the assignment).
+    for overage in over_capacity:
+        try:
+            vehicle_flags.report_issue(
+                body.vehicle_id, "overload", "warning",
+                f"Over capacity on {overage['ship_date']}: {overage['requested_kg']:.0f} kg planned on a {overage['capacity_kg']:.0f} kg truck (+{overage['over_kg']:.0f} kg)",
+                ref=", ".join(str(item.salesorder_number or item.id) for item in orders), reported_by=current_user.full_name or current_user.email,
+            )
+        except Exception as exc:  # noqa: BLE001 - issue tracking must never fail an assignment
+            logger.warning("[FLEET_HEALTH] overload issue not recorded for %s: %s", body.vehicle_id, exc)
     invalidate_fleet_cache()
     _invalidate_assignment_options_cache()
     return {"success": True, "salesorder_ids": [item.id for item in orders], "vehicle_id": body.vehicle_id, "driver_id": primary_driver_id, "driver_ids": driver_ids, "assignment_status": "assigned", "over_capacity": bool(over_capacity), "over_capacity_kg": max((o["over_kg"] for o in over_capacity), default=0.0), "over_capacity_percent": max((o["over_percent"] or 0.0 for o in over_capacity), default=0.0), "capacity_verified": all(value is not None for value in known_weights + existing_weights), "capacity_warning": None if all(value is not None for value in known_weights + existing_weights) else "Assignment completed, but one or more Zoho package weights were unavailable; capacity must be verified before dispatch."}

@@ -7,6 +7,8 @@ import os
 
 import httpx
 
+from services import cartrack_limiter
+
 logger = logging.getLogger("cartrack_client")
 
 MAX_RETRIES = 3
@@ -30,6 +32,7 @@ async def get_all_vehicles() -> list | None:
     url = f"{_base_url()}/rest/vehicles"
     for attempt in range(MAX_RETRIES):
         try:
+            cartrack_limiter.shared.note()  # counts against the shared budget; never delays the live poller
             async with httpx.AsyncClient(timeout=15.0) as client:
                 res = await client.get(url, headers=_headers())
             if res.status_code == 429:
@@ -58,6 +61,7 @@ async def get_vehicle_statuses() -> list | None:
     url = f"{_base_url()}/rest/vehicles/status"
     for attempt in range(MAX_RETRIES):
         try:
+            cartrack_limiter.shared.note()  # counts against the shared budget; never delays the live poller
             async with httpx.AsyncClient(timeout=15.0) as client:
                 res = await client.get(url, headers=_headers())
             if res.status_code == 429:
@@ -101,3 +105,46 @@ def parse_vehicle_status(raw: dict) -> dict:
         "fuel_pct": fuel.get("precentage_left") or 0,
         "address": location.get("position_description") or "",
     }
+
+
+class CartrackError(Exception):
+    def __init__(self, message: str, status_code: int | None = None):
+        super().__init__(message)
+        self.status_code = status_code
+
+
+async def get_json(path: str, params: dict | None = None, *, counter=None, limiter=None, sleep=asyncio.sleep, client_factory=None) -> dict | list:
+    """Rate-limited GET for Fleet Health jobs: waits for the shared 20/min budget, retries 429/5xx/timeouts
+    after 1, 2, 4, 8 s (honouring Cartrack's Retry-After hint when it is larger), then raises CartrackError."""
+    limiter = limiter or cartrack_limiter.shared
+    make_client = client_factory or (lambda: httpx.AsyncClient(timeout=30.0))
+    delays = cartrack_limiter.RETRY_DELAYS_SECONDS
+    last = "no attempt"
+    for attempt in range(len(delays) + 1):
+        await limiter.acquire()
+        if counter is not None:
+            counter.add(path)
+        status = None
+        hint = 0.0
+        try:
+            async with make_client() as client:
+                res = await client.get(f"{_base_url()}{path}", headers=_headers(), params=params)
+            status = res.status_code
+            if status == 200:
+                try:
+                    return res.json()
+                except ValueError:  # truncated/garbled body (seen once on a 300 KB trips page): retry like a 5xx
+                    last = "invalid JSON body"
+                    raise httpx.TransportError("invalid JSON body")
+            try:
+                hint = float(res.headers.get("X-RateLimit-Retry-After-Seconds") or res.headers.get("Retry-After") or 0)
+            except ValueError:
+                hint = 0.0
+            last = f"HTTP {status}"
+            if status != 429 and status < 500:
+                raise CartrackError(f"Cartrack GET {path} failed: HTTP {status}: {res.text[:200]}", status)
+        except (httpx.TimeoutException, httpx.TransportError) as exc:
+            last = type(exc).__name__
+        if attempt < len(delays):
+            await sleep(min(max(delays[attempt], hint), 60.0))
+    raise CartrackError(f"Cartrack GET {path} failed after retries ({last})", status)

@@ -30,7 +30,8 @@ logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.getLogger("httpcore").setLevel(logging.WARNING)
 logger = logging.getLogger("main")
 
-from routers import admin, agent, alerts, assignment, auth, comms, communications, dispatch, fleet, gmail, load_planning, optimization, orders, reports, routes, voice, warehouse, pipeline
+from routers import admin, agent, alerts, assignment, auth, comms, communications, dispatch, fleet, fleet_health, gmail, load_planning, optimization, orders, reports, routes, voice, warehouse, pipeline
+from services.fleet_health import sampler as fleet_health_sampler
 from services import fleet_static_cache, gmail_sender, staff_directory_cache, live_sales_order_cache, voice_control, whatsapp_control, zoho_so_lock
 from services.cartrack_poller import poll_cartrack_and_update, report_unmatched_roster_on_startup
 from services.ws_manager import manager
@@ -175,6 +176,9 @@ async def lifespan(app: FastAPI):
         manager.on_last_disconnect = lambda: scheduler.pause_job("cartrack_gps_poll")
         logger.info(f"Cartrack GPS poller registered - polling every {poll_interval}s while >=1 WS client is connected")
         asyncio.create_task(report_unmatched_roster_on_startup())
+        # Fleet Health: status sampler (ONE /rest/vehicles/status call per 10 min) and the 01:00 Manila nightly job.
+        from services.fleet_health import jobs as fleet_health_jobs
+        fleet_health_jobs.register(scheduler)
     else:
         logger.warning("CARTRACK_USERNAME/CARTRACK_API_KEY not configured - GPS poller disabled")
 
@@ -225,6 +229,7 @@ app.include_router(load_planning.router)
 app.include_router(assignment.optimize_router)
 app.include_router(assignment.router)
 app.include_router(pipeline.router)
+app.include_router(fleet_health.router)
 app.include_router(reports.router)
 app.include_router(dispatch.router)
 app.include_router(communications.router)
@@ -241,6 +246,7 @@ def health():
         return JSONResponse(status_code=503, content={"status": "schema_mismatch", **schema_state, "workers": configured_worker_count(), "instance_id": INSTANCE_ID})
     return {
         "status": "ok",
+        "schema_revision": schema_state["current"],
         "workers": configured_worker_count(),
         "instance_id": INSTANCE_ID,
         "connected_ws_clients": manager.connection_count,
@@ -250,6 +256,7 @@ def health():
         "gmail_identity": gmail_sender.identity_health(),
         "so_lock": zoho_so_lock.health_status(),
         "voice_calls": voice_control.mode(),
+        "fleet_health_sampler": fleet_health_sampler.health(),
         "whatsapp_messages": whatsapp_control.mode(),
     }
 

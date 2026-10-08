@@ -373,6 +373,22 @@ def _first_name(member: dict) -> str:
     return (str(member.get("name") or "").strip().split() or ["team"])[0]
 
 
+def _record_vehicle_issue(*, staff: dict, context: dict, action: str, driver_message: str, message_id: str) -> None:
+    """Fleet Health: a driver's reported issue / escalation becomes a flag on the truck(s) assigned to them today.
+    ESCALATE = critical, ACK_ISSUE = warning. Never raises: the driver reply and team notification come first."""
+    plates = [p.strip() for p in str(context.get("truckPlate") or "").split(",") if p.strip()]
+    if not plates:
+        return
+    from services import vehicle_flags
+
+    summary = " ".join(str(driver_message or "").split())[:200]
+    for plate in plates:
+        try:
+            vehicle_flags.report_issue(plate, "email", "critical" if action == "ESCALATE" else "warning", f"{staff.get('name') or 'Driver'} reported by email: {summary}", ref=f"email:{message_id}", reported_by=staff.get("name"))
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[FLEET_HEALTH] email issue not recorded for %s: %s", plate, exc)
+
+
 def _notify_team(*, driver: dict, context: dict, action: str, driver_message: str, message_id: str, reason: str | None = None) -> None:
     """One email per Logistics Team Notify List row, straight through Gmail."""
     members = [m for m in staff_directory_cache.notify_list() if m.get("email")]
@@ -486,6 +502,8 @@ def process_thread(thread: dict, *, dry_run: bool = False) -> dict:
     # Team: every NEW confirmation, every issue, an escalation once per thread. The state above was
     # rebuilt from the thread BEFORE this reply, so it says whether this is the first time.
     notify = (action == "ACK_CONFIRM" and not state["confirmed"]) or action == "ACK_ISSUE" or (action == "ESCALATE" and not state["escalated"])
+    if action in ("ACK_ISSUE", "ESCALATE"):
+        _record_vehicle_issue(staff=staff, context=context, action=action, driver_message=body, message_id=message_id)
     if notify:
         _notify_team(driver=staff, context=context, action=action, driver_message=body, message_id=message_id)
     return {**result, "status": "replied", "teamNotified": notify, "replyMessageId": sent.get("id"), "replyThreadId": sent.get("threadId"), "labels": sent.get("labels"), "inbox": inbox, "duplicate": bool(sent.get("duplicate"))}
