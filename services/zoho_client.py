@@ -13,7 +13,7 @@ from datetime import date, datetime
 
 import httpx
 from dotenv import load_dotenv
-from services import branches, zoho_acquisition, zoho_rate_limiter
+from services import branches, zoho_acquisition, zoho_rate_limiter, zoho_usage
 
 load_dotenv()
 
@@ -94,13 +94,14 @@ def _refresh_access_token() -> str:
         raise ZohoError("Zoho connection is unavailable.") from exc
 
 
-def _request(method: str, path: str, params: dict) -> dict:
+def _request(method: str, path: str, params: dict, *, feature: str = "other") -> dict:
+    feature = feature if feature != "other" else zoho_usage.current_feature()
     url = f"{os.environ.get('ZOHO_API_DOMAIN', 'https://www.zohoapis.com')}/inventory/v1/{path}"
     query = {"organization_id": _required("ZOHO_ORG_ID"), **params}
     if method == "GET":
         key = (method, url, os.environ.get("ZOHO_CLIENT_ID", ""), json.dumps(query, sort_keys=True))
         return zoho_acquisition.acquire(
-            key, lambda logical_id: _request_http(method, path, url, query, logical_id),
+            key, lambda logical_id: _request_http(method, path, url, query, logical_id, feature),
             meta={"method": method, "endpoint": path},
             reusable=path.startswith("salesorders/") and path.count("/") == 1,
             valid=lambda body: isinstance(body, dict) and body.get("code", 0) == 0
@@ -113,10 +114,15 @@ def _request(method: str, path: str, params: dict) -> dict:
     try:
         logical_id = uuid4().hex
         zoho_acquisition.event("logical_request", logical_id=logical_id, method=method, endpoint=path)
-        return _request_http(method, path, url, query, logical_id)
+        return _request_http(method, path, url, query, logical_id, feature)
     finally:
         with zoho_acquisition.invalidation():
             pass
+
+
+def _request_with_feature(method: str, path: str, params: dict, feature: str) -> dict:
+    with zoho_usage.feature(feature):
+        return _request(method, path, params)
 
 
 def _status_category(status: int) -> str:
@@ -155,7 +161,7 @@ def _fallback_delay(attempt: int) -> float:
     return base + random.uniform(0, base * RETRY_JITTER_FRACTION)
 
 
-def _request_http(method: str, path: str, url: str, query: dict, logical_id: str) -> dict:
+def _request_http(method: str, path: str, url: str, query: dict, logical_id: str, feature: str = "other") -> dict:
     """Every actual Zoho Inventory HTTP attempt - first try and each retry - goes through the
     shared org limiter. Backoff sleeps happen outside the limiter, so a waiting retry holds no
     concurrency slot. The retry policy (what is retried, and MAX_RETRIES) is unchanged."""
@@ -163,9 +169,17 @@ def _request_http(method: str, path: str, url: str, query: dict, logical_id: str
     for attempt in range(MAX_RETRIES + 1):
         started = time.monotonic()
         try:
+            route = zoho_acquisition.route_context()
+            if zoho_usage.should_skip_background(feature, background=route.get("route") == "background"):
+                raise ZohoError("Zoho background calls are paused outside working hours.")
+            try:
+                zoho_usage.enforce_budget(feature)
+            except zoho_usage.ZohoBudgetGuard as exc:
+                raise ZohoError(str(exc)) from exc
             token = get_access_token()  # Accounts endpoint: deliberately not gated as Inventory
             with limiter.admit() as ticket:
                 started = time.monotonic()
+                zoho_usage.record_call(feature)
                 metrics = _request_metrics.get()
                 if metrics is not None:
                     metrics["api_calls"] = int(metrics.get("api_calls", 0)) + 1
@@ -265,7 +279,7 @@ def fetch_sales_orders(
         params["branch_ids"] = branches.branch_param()
     if sort_column:
         params["sort_column"] = sort_column
-    return _only_allowed(_request("GET", "salesorders", params), "salesorders")
+    return _only_allowed(_request_with_feature("GET", "salesorders", params, "inventory_list"), "salesorders")
 
 
 def _only_allowed(payload: dict, key: str) -> dict:
@@ -278,39 +292,55 @@ def _only_allowed(payload: dict, key: str) -> dict:
 
 
 def fetch_sales_order_detail(salesorder_id: str) -> dict:
-    return _request("GET", f"salesorders/{salesorder_id}", {})
+    return _request_with_feature("GET", f"salesorders/{salesorder_id}", {}, "so_detail")
 
 
 def fetch_item_detail(item_id: str) -> dict:
     """Fetch structured Zoho item/package data for weight calculations."""
-    return _request("GET", f"items/{item_id}", {})
+    return _request_with_feature("GET", f"items/{item_id}", {}, "stock")
+
+
+def fetch_item_details_batch(item_ids: list[str]) -> dict:
+    """Fetch multiple item details in one list call when Zoho accepts item_ids.
+
+    This is kept as a separate helper so mocked tests can assert the batch path. If Zoho ever
+    rejects this tenant's item_ids parameter, callers may fall back to single item detail only
+    for user-opened/export paths.
+    """
+    ids = ",".join(dict.fromkeys(str(item_id) for item_id in item_ids if item_id))
+    if not ids:
+        return {"items": []}
+    return _request_with_feature("GET", "items", {"item_ids": ids, "per_page": min(200, len(ids.split(',')))}, "stock")
 
 
 def fetch_sales_orders_by_customview(customview_id: str, page: int = 1, per_page: int = 200) -> dict:
     """List sales orders exactly as a saved Zoho Custom View would (e.g. Acknowledged),
     delegating the filtering logic to Zoho instead of reconstructing it locally."""
     # branch_ids is NOT sent here: with a custom view Zoho drops the view's own filter when it is present.
-    return _only_allowed(_request("GET", "salesorders", {"customview_id": customview_id, "page": page, "per_page": min(per_page, 200)}), "salesorders")
+    return _only_allowed(_request_with_feature("GET", "salesorders", {"customview_id": customview_id, "page": page, "per_page": min(per_page, 200)}, "custom_view"), "salesorders")
 
-def fetch_sales_orders_by_shipment_date(start: date, end: date, page: int = 1, per_page: int = 200) -> dict:
+def fetch_sales_orders_by_shipment_date(start: date, end: date, page: int = 1, per_page: int = 200, sort_column: str | None = None) -> dict:
     """Zoho shipment-date list filter. The caller still filters locally because
     Zoho tenants vary in whether this filter is honored."""
-    return _only_allowed(_request("GET", "salesorders", {"shipment_date_start": start.isoformat(), "shipment_date_end": end.isoformat(), "page": page, "per_page": min(per_page, 200), "branch_ids": branches.branch_param()}), "salesorders")
+    params = {"shipment_date_start": start.isoformat(), "shipment_date_end": end.isoformat(), "page": page, "per_page": min(per_page, 200), "branch_ids": branches.branch_param()}
+    if sort_column:
+        params["sort_column"] = sort_column
+    return _only_allowed(_request_with_feature("GET", "salesorders", params, "inventory_list"), "salesorders")
 
 
 def acknowledge_sales_order(salesorder_id: str, status_code: str = "cs_acknowl") -> dict:
     """Apply Zoho's custom acknowledgement sub-status to a sales order."""
-    return _request("POST", f"salesorders/{salesorder_id}/substatus/{status_code}", {})
+    return _request_with_feature("POST", f"salesorders/{salesorder_id}/substatus/{status_code}", {}, "acknowledge")
 
 
 def remove_acknowledge_sales_order(salesorder_id: str) -> dict:
     """Reset the sales order sub-status to Zoho's plain Confirmed state."""
-    return _request("POST", f"salesorders/{salesorder_id}/substatus/confirmed", {})
+    return _request_with_feature("POST", f"salesorders/{salesorder_id}/substatus/confirmed", {}, "acknowledge")
 
 
 def confirm_sales_order(salesorder_id: str) -> dict:
     """Revert an acknowledged order to Zoho's supported Confirmed state."""
-    return _request("POST", f"salesorders/{salesorder_id}/status/confirmed", {})
+    return _request_with_feature("POST", f"salesorders/{salesorder_id}/status/confirmed", {}, "acknowledge")
 
 
 def fetch_packages(
@@ -331,25 +361,25 @@ def fetch_packages(
     if shipment_date_end:
         params["shipment_date_end"] = shipment_date_end.isoformat()
     params["branch_ids"] = branches.branch_param()  # verified to filter packages at Zoho
-    return _only_allowed(_request("GET", "packages", params), "packages")
+    return _only_allowed(_request_with_feature("GET", "packages", params, "packages"), "packages")
 
 
 def fetch_package_detail(package_id: str) -> dict:
-    return _request("GET", f"packages/{package_id}", {})
+    return _request_with_feature("GET", f"packages/{package_id}", {}, "packages")
 
 
 def fetch_transfer_orders(page: int = 1, per_page: int = 200, sort_column: str | None = None) -> dict:
     params: dict = {"page": page, "per_page": min(per_page, 200)}
     if sort_column:
         params["sort_column"] = sort_column
-    return _request("GET", "transferorders", params)
+    return _request_with_feature("GET", "transferorders", params, "reports")
 
 
 def fetch_inventory_adjustments(page: int = 1, per_page: int = 200, sort_column: str | None = None) -> dict:
     params: dict = {"page": page, "per_page": min(per_page, 200)}
     if sort_column:
         params["sort_column"] = sort_column
-    return _request("GET", "inventoryadjustments", params)
+    return _request_with_feature("GET", "inventoryadjustments", params, "reports")
 
 
 def fetch_invoices(page: int = 1, per_page: int = 200, filter_by: str | None = None, sort_column: str | None = None) -> dict:
@@ -358,15 +388,15 @@ def fetch_invoices(page: int = 1, per_page: int = 200, filter_by: str | None = N
         params["filter_by"] = filter_by
     if sort_column:
         params["sort_column"] = sort_column
-    return _request("GET", "invoices", params)
+    return _request_with_feature("GET", "invoices", params, "reports")
 
 
 def fetch_purchase_receives(page: int = 1, per_page: int = 200, sort_column: str | None = None) -> dict:
     params: dict = {"page": page, "per_page": min(per_page, 200)}
     if sort_column:
         params["sort_column"] = sort_column
-    return _request("GET", "purchasereceives", params)
+    return _request_with_feature("GET", "purchasereceives", params, "reports")
 
 
 def fetch_purchase_receive_detail(purchasereceive_id: str) -> dict:
-    return _request("GET", f"purchasereceives/{purchasereceive_id}", {})
+    return _request_with_feature("GET", f"purchasereceives/{purchasereceive_id}", {}, "reports")

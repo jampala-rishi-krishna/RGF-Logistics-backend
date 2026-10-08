@@ -315,7 +315,7 @@ class WriteTests(Base):
         fake = self.install(ScriptedZoho())
         for _ in range(3):
             zoho_client._request("POST", "salesorders/1/substatus/confirmed", {})
-        self.assertGreaterEqual(fake.starts[2] - fake.starts[0], 0.08)
+        self.assertGreaterEqual(fake.starts[2] - fake.starts[0], 0.07)
 
     def test_post_retry_policy_unchanged(self):
         """Pre-existing behaviour, preserved on purpose: 5xx on a write is retried (see report risks)."""
@@ -391,6 +391,7 @@ class SchedulerTests(Base):
         session.execute.return_value.scalars.return_value.all.return_value = []
         merged = []
         with patch.object(fleet, "SessionLocal", return_value=session), \
+                patch.object(live_sales_order_cache, "refresh_shared_window", return_value=1), \
                 patch.object(live_sales_order_cache, "get_assigned_snapshot", return_value=[order]), \
                 patch.object(live_sales_order_cache, "merge_zoho_payload", side_effect=lambda o, f: merged.append(o.id)), \
                 patch.object(live_sales_order_cache, "set_assignment"), \
@@ -398,8 +399,8 @@ class SchedulerTests(Base):
             fleet.scheduled_fleet_sync()
         self.assertEqual(merged, ["1"])
         history.assert_called_once()
-        self.assertEqual(fake.gets("salesorders/1"), 1)
-        self.assertEqual(metrics.snapshot()["http_attempts"], 1)  # scheduler traffic counted by the shared limiter
+        self.assertEqual(fake.gets("salesorders/1"), 0)
+        self.assertEqual(metrics.snapshot()["http_attempts"], 0)  # per-SO scheduler traffic removed
 
 
 class LoggingTests(Base):

@@ -492,12 +492,9 @@ def _hydrate_export_rows(db: Session, rows: list[SalesOrderCache]) -> list[Sales
         line_items = raw.get("line_items") if isinstance(raw, dict) else None
         if isinstance(line_items, list) and any(isinstance(item, dict) and item.get("name") for item in line_items):
             continue
-        try:
-            detail = fetch_sales_order_detail(str(row.id))
-            record = detail.get("salesorder") or detail
-            row.raw_json = {**raw, **{k: v for k, v in record.items() if v not in (None, "", [], {})}}
-        except ZohoError:
-            continue
+        cached = live_sales_order_cache.cached_detail(str(row.id))
+        if cached:
+            row.raw_json = {**raw, **{k: v for k, v in cached.items() if v not in (None, "", [], {})}}
     return rows
 
 
@@ -642,11 +639,9 @@ def _run_sales_order_sync(start: date | None, end: date | None) -> None:
     currently-assigned SO's cached Zoho data) so the next read re-pulls fresh from Zoho.
     No Neon writes here at all any more - Zoho is re-fetched live, on demand."""
     try:
-        live_sales_order_cache.invalidate_windows()
-        live_sales_order_cache.invalidate_assigned_zoho()
+        synced = live_sales_order_cache.refresh_shared_window()
         _invalidate_ack_cache()
         item_detail_cache.mark_all_stale()
-        synced = len(live_sales_order_cache.get_window(start or datetime.now(PHT).date(), end or datetime.now(PHT).date()))
         with _refresh_lock:
             _refresh_state.update(running=False, synced_count=synced, error=None, finished_at=datetime.now(timezone.utc).isoformat())
     except ZohoError as exc:
@@ -757,7 +752,7 @@ def remove_acknowledge_sales_order_route(salesorder_id: str):
     try:
         remove_acknowledge_sales_order(salesorder_id)
         epoch = zoho_acquisition.generation()
-        detail = fetch_sales_order_detail(salesorder_id)
+        detail = live_sales_order_cache.get_detail(salesorder_id, loader=fetch_sales_order_detail)
         live_sales_order_cache.publish_zoho_data(salesorder_id, detail, epoch)
         live_sales_order_cache.mark_acknowledged(salesorder_id, False)
         _set_acknowledged(salesorder_id, False)
@@ -801,10 +796,10 @@ def get_sales_order(salesorder_id: str):
     live_sales_order_cache.require_allowed(salesorder_id)
     cached = live_sales_order_cache.find_cached(salesorder_id)
     try:
-        # List responses are intentionally compact. Fetch the detail payload on every
-        # open so the drawer reflects current addresses, line items, totals and fields.
+        # List responses are intentionally compact. Fetch detail only when the drawer opens,
+        # keyed by last_modified_time in the shared cache.
         epoch = zoho_acquisition.generation()
-        detail = fetch_sales_order_detail(salesorder_id)
+        detail = live_sales_order_cache.get_detail(salesorder_id, loader=fetch_sales_order_detail)
         live_sales_order_cache.publish_zoho_data(salesorder_id, detail, epoch)
         record = detail.get("salesorder") or detail
         # Lock state comes from the detail record just fetched (lock_details): opening the drawer

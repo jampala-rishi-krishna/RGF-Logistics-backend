@@ -258,15 +258,10 @@ class FleetRefreshTests(ZohoTestCase):
         fake = self.install(FakeZoho())
         merged = []
 
-        def hydrate_like_snapshot():
-            # get_assigned_snapshot() hydrates cold snapshots via fetch_sales_order_detail.
-            for order in orders:
-                zoho_client.fetch_sales_order_detail(order.id)
-            return orders
-
         db = MagicMock()
         db.execute.return_value.scalars.return_value.all.return_value = []
-        with patch.object(live_sales_order_cache, "get_assigned_snapshot", side_effect=hydrate_like_snapshot), \
+        with patch.object(live_sales_order_cache, "refresh_shared_window", return_value=len(orders)), \
+                patch.object(live_sales_order_cache, "get_assigned_snapshot", return_value=orders), \
                 patch.object(live_sales_order_cache, "merge_zoho_payload", side_effect=lambda o, f: merged.append((o.id, f))), \
                 patch.object(live_sales_order_cache, "set_assignment"), \
                 patch.object(fleet, "sync_history_row") as history:
@@ -276,16 +271,16 @@ class FleetRefreshTests(ZohoTestCase):
     def test_cold_refresh_multiple_assigned_orders_one_get_each(self):
         orders = [self._order("1"), self._order("2"), self._order("3")]
         fake, merged, history = self._refresh(orders)
-        self.assertEqual(Counter(p for _, p in fake.calls), Counter({"salesorders/1": 1, "salesorders/2": 1, "salesorders/3": 1}))
+        self.assertEqual(fake.calls, [])
         self.assertEqual([m[0] for m in merged], ["1", "2", "3"])
         self.assertEqual(history.call_count, 3)  # history writes unchanged
 
     def test_refresh_after_refresh_still_refetches(self):
         orders = [self._order("1")]
         fake, _, _ = self._refresh(orders)
-        self.assertEqual(fake.gets(), 1)
+        self.assertEqual(fake.gets(), 0)
         fake2, _, _ = self._refresh([self._order("1")])
-        self.assertEqual(fake2.gets(), 1)  # a new refresh is a new generation of data
+        self.assertEqual(fake2.gets(), 0)  # scheduled refresh uses shared window/delta, not per-SO detail
 
 
 class ReportCoalescingTests(ZohoTestCase):

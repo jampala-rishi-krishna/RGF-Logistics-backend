@@ -38,6 +38,10 @@ def generation() -> int:
         return _generation
 
 
+def route_context() -> dict:
+    return {"source": _source.get(), "route": _route.get(), "request_id": _request.get()}
+
+
 @contextmanager
 def publication(expected: int):
     """Atomic generation check + memory publication; never put I/O in this block."""

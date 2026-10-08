@@ -9,7 +9,7 @@ import time
 
 import httpx
 
-from services import zoho_rate_limiter
+from services import zoho_rate_limiter, zoho_usage
 from services.zoho_client import REQUEST_TIMEOUT, ZohoError
 
 logger = logging.getLogger("zoho")
@@ -126,6 +126,7 @@ def _request(method: str, url: str, *, params: dict | None = None, data: dict | 
     limiter = zoho_rate_limiter.limiter_for(org_id)
     token = get_access_token()  # Accounts endpoint: not gated as Inventory (same as the main client)
     with limiter.admit():
+        zoho_usage.record_call("lock_status")
         return httpx.request(
             method,
             url,
@@ -243,6 +244,7 @@ def _lock_via_webhook(so_id: str, status: dict) -> dict:
         url = _required("ZOHO_SO_LOCK_WEBHOOK_URL")
         limiter = zoho_rate_limiter.limiter_for(_required("ZOHO_ORG_ID"))
         with limiter.admit():
+            zoho_usage.record_call("lock_status")
             response = httpx.request("POST", url, json={"salesorder_id": so_id}, timeout=REQUEST_TIMEOUT)
     except ZohoError as exc:
         return {"locked": False, "already_locked": False, "lock_status": status, "lock_error": _connection_error(exc)}

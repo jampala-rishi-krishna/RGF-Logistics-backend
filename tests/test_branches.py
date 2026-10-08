@@ -109,7 +109,7 @@ class ExcludedBranchesNeverAppearTests(BranchTestCase):
 
     def test_no_detail_gets_for_excluded_orders(self):
         self.listing()
-        self.assertTrue(self.detail_ids)
+        self.assertTrue(set(self.detail_ids) <= {"r1", "r2", "w1", "m1", "m2", "n1", "n3"})
         self.assertFalse({"s1", "s2", "c1", "f1", "u1", "n2"} & set(self.detail_ids))
 
     def test_load_planning_and_acknowledged_views_exclude_them(self):

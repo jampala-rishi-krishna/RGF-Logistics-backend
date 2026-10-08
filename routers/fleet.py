@@ -27,7 +27,7 @@ from services.ws_manager import manager
 from services.sales_order_location import shipping_city
 from services.item_weight import calculate_line_weight_kg
 from services.delivery_status import is_delivered, sales_order_delivery_status
-from services.zoho_client import fetch_sales_order_detail, ZohoError
+from services.zoho_client import ZohoError
 from services import zoho_acquisition
 
 router = APIRouter(tags=["fleet"])
@@ -301,6 +301,7 @@ def refresh_vehicles(force: bool = False, db: Session = Depends(get_db)):
         raise HTTPException(409, "Fleet refresh already in progress")
     started = time.monotonic()
     try:
+        live_sales_order_cache.refresh_shared_window()
         assigned = [o for o in live_sales_order_cache.get_assigned_snapshot() if o.assignment_status == "assigned"]
         fresh_orders: dict[str, dict] = {}
         sync_errors: list[str] = []
@@ -313,12 +314,7 @@ def refresh_vehicles(force: bool = False, db: Session = Depends(get_db)):
                 continue
             zoho_id = str(zoho_id)
             if zoho_id not in request_cache:
-                try:
-                    response = fetch_sales_order_detail(zoho_id)
-                    request_cache[zoho_id] = response.get("salesorder") if isinstance(response, dict) and isinstance(response.get("salesorder"), dict) else response
-                except ZohoError:
-                    sync_errors.append(str(order.salesorder_number or order.id))
-                    continue
+                request_cache[zoho_id] = raw
             fresh_orders[str(order.id)] = request_cache[zoho_id]
         # Persist successful Zoho snapshots and release a whole truck batch only
         # when every active SO is delivered. This preserves history while removing

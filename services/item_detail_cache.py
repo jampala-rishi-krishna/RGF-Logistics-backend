@@ -16,7 +16,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from typing import Iterable
 
-from services.zoho_client import ZohoError, fetch_item_detail
+from services.zoho_client import ZohoError, fetch_item_detail, fetch_item_details_batch
 
 logger = logging.getLogger("item_detail_cache")
 
@@ -92,6 +92,32 @@ def _refresh_worker(key: str) -> None:
             _inflight.discard(key)
 
 
+def _batch_refresh_worker(keys: list[str]) -> None:
+    try:
+        try:
+            payload = fetch_item_details_batch(keys)
+            items = payload.get("items") if isinstance(payload, dict) else []
+            by_id = {}
+            for item in items or []:
+                if isinstance(item, dict):
+                    item_id = str(item.get("item_id") or item.get("id") or "")
+                    if item_id:
+                        by_id[item_id] = _trim(item)
+            now = time.monotonic()
+            with _lock:
+                for key, entry in by_id.items():
+                    _items[key] = (now, entry)
+                    _failed.pop(key, None)
+        except ZohoError as exc:
+            logger.warning("[ITEM_DETAIL] batch unavailable=%s", exc)
+            for key in keys:
+                fetch(key)
+    finally:
+        with _lock:
+            for key in keys:
+                _inflight.discard(key)
+
+
 def request_refresh(item_ids: Iterable[str]) -> int:
     """Queue a background fetch for every item that isn't fresh (missing or stale).
     Returns how many requested items have NO usable value yet and aren't in a failure
@@ -109,8 +135,8 @@ def request_refresh(item_ids: Iterable[str]) -> int:
                 continue
             _inflight.add(raw_id)
             to_start.append(raw_id)
-    for key in to_start:
-        _pool.submit(_refresh_worker, key)
+    for index in range(0, len(to_start), 100):
+        _pool.submit(_batch_refresh_worker, to_start[index : index + 100])
     return waiting
 
 

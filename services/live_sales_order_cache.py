@@ -1,13 +1,15 @@
 from __future__ import annotations
 
 import logging
+import os
 import re
 import threading
 import time
 import contextvars
 from copy import deepcopy
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 
 from models.inventory import SalesOrderCache
 from services.zoho_client import ZohoError, fetch_sales_order_detail, fetch_sales_orders, fetch_sales_orders_by_shipment_date
@@ -16,6 +18,10 @@ from services import branches, zoho_acquisition
 logger = logging.getLogger("live_sales_order_cache")
 
 WINDOW_TTL_SECONDS = 300  # 5 min
+PHT = ZoneInfo("Asia/Manila")
+WIDE_WINDOW_PAST_DAYS = int(os.environ.get("ZOHO_WINDOW_PAST_DAYS", "1"))
+WIDE_WINDOW_FUTURE_DAYS = int(os.environ.get("ZOHO_WINDOW_FUTURE_DAYS", "14"))
+FULL_REPULL_SECONDS = int(os.environ.get("ZOHO_FULL_REPULL_SECONDS", "7200"))
 
 # --- Assignment state: the ONLY thing that's actually persisted for "current" SOs. Loaded
 # once from sales_order_history at startup, updated in memory on every assignment mutation,
@@ -39,6 +45,10 @@ _windows_unhydrated: dict[tuple[str, str], tuple[float, dict[str, SalesOrderCach
 _detail_lock = threading.Lock()
 _details: dict[str, tuple[str, dict]] = {}
 DETAIL_CACHE_MAX = 1500
+_wide_window_key: tuple[str, str] | None = None
+_wide_window_last_sync: datetime | None = None
+_wide_window_last_full: float = 0.0
+_outside_window_cache: dict[tuple[str, str], tuple[float, dict[str, SalesOrderCache]]] = {}
 
 
 def _pick(record: dict, *keys: str):
@@ -328,6 +338,15 @@ def get_assigned_snapshot_ex() -> tuple[list[SalesOrderCache], bool]:
     and avoid latching so the next request retries instead of staying stuck."""
     with _state_lock:
         ids = [oid for oid, s in _assignment_state.items() if (s.get("assignment_status") or "unassigned") != "unassigned" and oid not in _excluded_ids]
+    if ids:
+        start, end = _wide_bounds()
+        get_window(start, end)
+        with _window_lock:
+            for _, records in _windows.values():
+                for oid in ids:
+                    row = records.get(oid)
+                    if row is not None and oid not in _assigned_zoho:
+                        _assigned_zoho[oid] = _apply_assignment(row)
     to_fetch = [oid for oid in ids if oid not in _assigned_zoho]
     had_failures = False
     if to_fetch:
@@ -391,7 +410,63 @@ def _pull_window(start: date | None, end: date | None) -> dict[str, dict]:
         has_more = context.get("has_more_page")
         if isinstance(has_more, str):
             has_more = has_more.strip().lower() == "true"
-        if not raw_count or not has_more:
+        if not raw_count or not has_more or raw_count < 200:
+            break
+        page += 1
+    return records
+
+
+def _wide_bounds(today: date | None = None) -> tuple[date, date]:
+    today = today or datetime.now(PHT).date()
+    return today - timedelta(days=WIDE_WINDOW_PAST_DAYS), today + timedelta(days=WIDE_WINDOW_FUTURE_DAYS)
+
+
+def _within_wide_window(start: date, end: date) -> bool:
+    wide_start, wide_end = _wide_bounds()
+    return wide_start <= start and end <= wide_end
+
+
+def _modified_at(record: dict) -> datetime | None:
+    raw = record.get("last_modified_time") or record.get("last_modified_time_formatted")
+    if not raw:
+        return None
+    text = str(raw).replace("Z", "+00:00")
+    try:
+        parsed = datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+
+
+def _pull_delta_since(start: date, end: date, since: datetime) -> dict[str, dict]:
+    """Zoho Inventory code path for delta sync.
+
+    No live probing is done here. The list API already accepts sort_column; public docs for this
+    endpoint document sorting, but not a stable last_modified_time filter. We therefore page
+    salesorders sorted by last_modified_time descending and stop once a page is older than the
+    previous sync watermark.
+    """
+    records: dict[str, dict] = {}
+    page = 1
+    while True:
+        payload = fetch_sales_orders_by_shipment_date(start, end, page=page, per_page=200, sort_column="last_modified_time")
+        rows = payload.get("salesorders") or []
+        raw_count = payload.get("raw_count", len(rows))
+        oldest: datetime | None = None
+        for record in rows:
+            modified = _modified_at(record)
+            if modified is not None:
+                oldest = modified if oldest is None else min(oldest, modified)
+            if modified is None or modified > since:
+                record_id = str(record.get("salesorder_id") or record.get("id") or "")
+                expected_shipment = _as_date(record.get("shipment_date") or record.get("expected_shipment_date"))
+                if record_id and expected_shipment and start <= expected_shipment <= end:
+                    records[record_id] = record
+        context = payload.get("page_context") or {}
+        has_more = context.get("has_more_page")
+        if isinstance(has_more, str):
+            has_more = has_more.strip().lower() == "true"
+        if not has_more or raw_count < 200 or (oldest is not None and oldest <= since):
             break
         page += 1
     return records
@@ -424,7 +499,7 @@ def _pull_window_legacy(start: date | None, end: date | None) -> dict[str, dict]
         has_more = context.get("has_more_page")
         if isinstance(has_more, str):
             has_more = has_more.strip().lower() == "true"
-        if not raw_count or (not has_more and raw_count < 200):
+        if not raw_count or not has_more or raw_count < 200:
             break
         page += 1
     return records
@@ -477,27 +552,82 @@ def _hydrate_details(records: dict[str, dict]) -> None:
                 continue
 
 
-def get_window(start: date, end: date, *, hydrate: bool = True) -> list[SalesOrderCache]:
-    """hydrate=False skips the per-order Zoho detail fetch (line_items etc.) - only use that
-    for callers that just need list-level fields (e.g. the city filter), never for anything
-    that renders per-line weight/pack breakdowns. Cached separately from the hydrated window
-    (same TTL) so it doesn't defeat caching for callers that don't need hydration."""
+def get_window(start: date, end: date, *, hydrate: bool = False) -> list[SalesOrderCache]:
+    """Shared live window. The list pull hydrates SO details only for records whose
+    last_modified_time is new or changed, then serves unchanged records from memory."""
     epoch = zoho_acquisition.generation()
-    key = (start.isoformat(), end.isoformat())
-    cache = _windows if hydrate else _windows_unhydrated
+    wide_start, wide_end = _wide_bounds()
+    key = (wide_start.isoformat(), wide_end.isoformat()) if _within_wide_window(start, end) else (start.isoformat(), end.isoformat())
+    cache = _windows
     with _window_lock:
         entry = cache.get(key)
-        if entry is not None and time.monotonic() - entry[0] <= WINDOW_TTL_SECONDS:
-            return [_apply_assignment(row) for row in entry[1].values()]
-    raw = _pull_window(start, end)
-    if hydrate:
-        _hydrate_details(raw)
+        if entry is not None:
+            rows = [row for row in entry[1].values() if row.expected_shipment_date is not None and start <= row.expected_shipment_date <= end]
+            return [_apply_assignment(row) for row in rows]
+    raw = _pull_window(wide_start, wide_end) if key == (wide_start.isoformat(), wide_end.isoformat()) else _pull_window(start, end)
+    _hydrate_details(raw)
     rows = {rid: _build_transient(record) for rid, record in raw.items()}
     with zoho_acquisition.publication(epoch) as current:
         if current:
             with _window_lock:
                 cache[key] = (time.monotonic(), rows)
-    return [_apply_assignment(row) for row in rows.values()]
+    return [_apply_assignment(row) for row in rows.values() if row.expected_shipment_date is not None and start <= row.expected_shipment_date <= end]
+
+
+def refresh_shared_window(*, force_full: bool = False) -> int:
+    """Refresh button and schedulers use this instead of clearing caches.
+
+    Full re-pulls are capped to once every two hours and only during working hours. Otherwise,
+    a delta page walk updates the shared wide window and stops when records are older than the
+    last sync watermark.
+    """
+    global _wide_window_last_sync, _wide_window_last_full
+    start, end = _wide_bounds()
+    key = (start.isoformat(), end.isoformat())
+    now = datetime.now(timezone.utc)
+    mono = time.monotonic()
+    working = 6 <= datetime.now(PHT).hour < 20
+    with _window_lock:
+        existing = _windows.get(key)
+    do_full = force_full or existing is None or (_wide_window_last_sync is None) or (working and mono - _wide_window_last_full >= FULL_REPULL_SECONDS)
+    if not working and existing is not None:
+        return len(existing[1])
+    raw = _pull_window(start, end) if do_full else _pull_delta_since(start, end, _wide_window_last_sync)
+    _hydrate_details(raw)
+    with _window_lock:
+        current = dict((existing[1] if existing else {}).items())
+        for rid, record in raw.items():
+            current[rid] = _build_transient(record)
+        _windows[key] = (time.monotonic(), current)
+    _wide_window_last_sync = now
+    if do_full:
+        _wide_window_last_full = mono
+    return len(raw)
+
+
+def get_detail(order_id: str, loader=None) -> dict:
+    row = find_cached(order_id)
+    raw = getattr(row, "raw_json", None) if row is not None else None
+    modified = str(((raw if isinstance(raw, dict) else {}) or {}).get("last_modified_time") or "")
+    if modified:
+        with _detail_lock:
+            hit = _details.get(str(order_id))
+        if hit is not None and hit[0] == modified:
+            return {"salesorder": {**(row.raw_json or {}), **hit[1]}}
+    detail = (loader or fetch_sales_order_detail)(order_id)
+    record = detail.get("salesorder") or detail
+    fields = {k: v for k, v in record.items() if v not in (None, "", [], {})}
+    if modified:
+        _remember_detail(str(order_id), modified, fields)
+    return detail
+
+
+def cached_detail(order_id: str) -> dict | None:
+    with _detail_lock:
+        hit = _details.get(str(order_id))
+    if not hit:
+        return None
+    return dict(hit[1])
 
 
 def invalidate_assigned_zoho() -> None:
@@ -540,6 +670,29 @@ def mark_acknowledged(order_id: str, acknowledged: bool) -> None:
             _details[str(order_id)] = (modified, {"current_sub_status": sub_status, "order_sub_status": sub_status})
         else:
             _details.pop(order_id, None)
+
+
+def apply_salesorder_webhook(record: dict) -> bool:
+    """Patch in-memory rows from a Zoho Sales Order workflow webhook. No DB writes."""
+    record_id = str(record.get("salesorder_id") or record.get("sales_order_id") or record.get("id") or "")
+    if not record_id:
+        return False
+    with _window_lock:
+        for _, rows in _windows.values():
+            row = rows.get(record_id)
+            if row is not None:
+                merge_zoho_payload(row, record)
+        for _, rows in _windows_unhydrated.values():
+            row = rows.get(record_id)
+            if row is not None:
+                merge_zoho_payload(row, record)
+    assigned = _assigned_zoho.get(record_id)
+    if assigned is not None:
+        merge_zoho_payload(assigned, record)
+    modified = str(record.get("last_modified_time") or "")
+    if modified:
+        _remember_detail(record_id, modified, {k: v for k, v in record.items() if v not in (None, "", [], {})})
+    return True
 
 
 def prewarm_default_windows() -> None:

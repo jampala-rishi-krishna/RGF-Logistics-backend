@@ -30,9 +30,9 @@ logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.getLogger("httpcore").setLevel(logging.WARNING)
 logger = logging.getLogger("main")
 
-from routers import admin, agent, alerts, assignment, auth, comms, communications, dispatch, fleet, fleet_health, gmail, load_planning, optimization, orders, reports, routes, voice, warehouse, pipeline
+from routers import admin, agent, alerts, assignment, auth, comms, communications, dispatch, fleet, fleet_health, gmail, load_planning, optimization, orders, reports, routes, voice, warehouse, pipeline, zoho_webhooks
 from services.fleet_health import sampler as fleet_health_sampler
-from services import fleet_static_cache, gmail_sender, staff_directory_cache, live_sales_order_cache, voice_control, whatsapp_control, zoho_so_lock
+from services import fleet_static_cache, gmail_sender, staff_directory_cache, live_sales_order_cache, voice_control, whatsapp_control, zoho_so_lock, zoho_usage
 from services.cartrack_poller import poll_cartrack_and_update, report_unmatched_roster_on_startup
 from services.ws_manager import manager
 from auth.security import hash_password, verify_password
@@ -140,7 +140,6 @@ async def lifespan(app: FastAPI):
         coalesce=True,
     )
     scheduler.start()
-    threading.Thread(target=live_sales_order_cache.prewarm_default_windows, daemon=True, name="prewarm-windows").start()
     gmail_sender.log_identity_config_at_startup()
     zoho_so_lock.log_configuration_warning()
     # Inbound Logistics email agent (replaces the n8n agent). OFF unless LOGISTICS_AGENT_ENABLED=true,
@@ -238,6 +237,7 @@ app.include_router(gmail.router)
 app.include_router(voice.router)
 app.include_router(voice.webhook_router)
 app.include_router(voice.admin_router)
+app.include_router(zoho_webhooks.router)
 
 
 @app.get("/health")
@@ -258,6 +258,8 @@ def health():
         "voice_calls": voice_control.mode(),
         "fleet_health_sampler": fleet_health_sampler.health(),
         "whatsapp_messages": whatsapp_control.mode(),
+        "zoho_calls_today": zoho_usage.snapshot()["zoho_calls_today"],
+        "zoho_usage": zoho_usage.snapshot(),
     }
 
 @app.exception_handler(SQLAlchemyError)
