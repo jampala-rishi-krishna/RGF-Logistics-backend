@@ -20,7 +20,7 @@ from database import get_db
 from models.inventory import SalesOrderCache
 from models.sales_order_history import SalesOrderHistory
 from models.sales_order_lines import SalesOrderLine
-from services import staff_directory_cache, live_sales_order_cache
+from services import branches as branch_service, staff_directory_cache, live_sales_order_cache
 from services import zoho_acquisition
 from services.serialize import row_to_dict
 from services.zoho_client import (
@@ -221,6 +221,11 @@ def _summary(row, db: Session | None = None, *, allow_fetch: bool = True) -> dic
     result["shipping_address"] = address
     raw_notes = {} if is_persisted else (row.raw_json or {})
     result["zoho_lock"] = lock_status_from_record(raw_notes)
+    branch = branch_service.branch_of(row)  # from Zoho's own branch_id/branch_name; None for Neon rows (no raw_json)
+    branch_id = branch["id"] if branch else None
+    result["branch_id"] = branch_id
+    result["branch_name"] = branch["name"] if branch else None
+    result["branch_code"] = branch["code"] if branch else None
     notes = raw_notes.get("notes") or raw_notes.get("note") or raw_notes.get("customer_notes")
     result["notes"] = str(notes).strip() if notes is not None and str(notes).strip() else None
     if is_persisted:
@@ -229,6 +234,8 @@ def _summary(row, db: Session | None = None, *, allow_fetch: bool = True) -> dic
     else:
         result["mets_qty_available_for_sale"] = getattr(row, "_mets_qty_available_for_sale", None)
         result["glacier_qty_available_for_sale"] = getattr(row, "_glacier_qty_available_for_sale", None)
+        result["other_qty_available_for_sale"] = getattr(row, "_other_qty_available_for_sale", None)
+        result["other_warehouse_name"] = getattr(row, "_other_warehouse_name", None)
 
     def number(item, *keys):
         for key in keys:
@@ -278,8 +285,8 @@ def _summary(row, db: Session | None = None, *, allow_fetch: bool = True) -> dic
             else: total_units += quantity
             line_total_weight_kg = item_weight_kg(item, row.salesorder_number or row.id)
             stock_item_id = item.get("item_id") or item.get("itemid")
-            item_stock = ((fetch_item_stock(str(stock_item_id)) if allow_fetch else cached_item_stock(str(stock_item_id))) if stock_item_id else None) or {}
-            products.append({"mets_qty_available_for_sale": item_stock.get("mets"), "glacier_qty_available_for_sale": item_stock.get("glacier"), "line_item_id": item.get("line_item_id"), "item_id": item.get("item_id") or item.get("itemid"), "name": item.get("name") or item.get("item_description") or item.get("description"), "sku": item.get("sku") or item.get("item_order") or item.get("item_id"), "quantity": quantity, "unit": unit or None, "total_weight_kg": line_total_weight_kg, "packaging_type": "pack" if "pack" in normalized else "case" if "case" in normalized or "carton" in normalized else None, "pack_quantity": quantity if "pack" in normalized else 0, "case_quantity": quantity if "case" in normalized or "carton" in normalized else 0, "quantity_packed": number(item, "quantity_packed"), "quantity_shipped": number(item, "quantity_shipped")})
+            item_stock = ((fetch_item_stock(str(stock_item_id), branch_id) if allow_fetch else cached_item_stock(str(stock_item_id), branch_id)) if stock_item_id else None) or {}
+            products.append({"mets_qty_available_for_sale": item_stock.get("mets"), "glacier_qty_available_for_sale": item_stock.get("glacier"), "other_qty_available_for_sale": item_stock.get("other"), "other_warehouse_name": item_stock.get("other_name"), "line_item_id": item.get("line_item_id"), "item_id": item.get("item_id") or item.get("itemid"), "name": item.get("name") or item.get("item_description") or item.get("description"), "sku": item.get("sku") or item.get("item_order") or item.get("item_id"), "quantity": quantity, "unit": unit or None, "total_weight_kg": line_total_weight_kg, "packaging_type": "pack" if "pack" in normalized else "case" if "case" in normalized or "carton" in normalized else None, "pack_quantity": quantity if "pack" in normalized else 0, "case_quantity": quantity if "case" in normalized or "carton" in normalized else 0, "quantity_packed": number(item, "quantity_packed"), "quantity_shipped": number(item, "quantity_shipped")})
         total_item_quantity = sum(number(item, "quantity") for item in items)
 
     result["product_count"] = len([p for p in products if p["name"]])
@@ -330,11 +337,23 @@ def list_sales_orders(
     vehicle: str | None = Query(None),
     customer: str | None = Query(None),
     delivery_status: str | None = Query(None),
+    branches: str | None = Query(None, description="Comma-separated Zoho branch ids; empty = all branches"),
     page: int = Query(1, ge=1),
     per_page: int = Query(25, ge=1, le=100),
     db: Session = Depends(get_db),
 ):
-    rows = _filtered_rows(db, date_from, date_to, status, search, assignment, cities, vehicle, customer, delivery_status)
+    all_branch_rows = _rows_any_branch(db, date_from, date_to, status, search, assignment, cities, vehicle, customer, delivery_status)
+    wanted_branches = branch_service.parse_ids(branches)
+    # Per-branch counts of everything the other filters leave, so the Branch filter can show how many
+    # orders each option would give. Rows with no branch info (Neon history) are not counted.
+    branch_counts: dict[str, int] = {}
+    seen_branches: dict[str, dict] = {}
+    for row in all_branch_rows:
+        found = branch_service.branch_of(row)
+        if found:
+            branch_counts[found["id"]] = branch_counts.get(found["id"], 0) + 1
+            seen_branches.setdefault(found["id"], found)
+    rows = [row for row in all_branch_rows if _row_in_branches(row, wanted_branches)] if wanted_branches else all_branch_rows
     # Never block the list on per-item Zoho calls: serve cached stock/weights (stale is fine),
     # fill the gaps in the background, and tell the UI to poll while anything is still missing.
     live_rows = [row for row in rows if not isinstance(row, SalesOrderHistory)]
@@ -342,6 +361,8 @@ def list_sales_orders(
     for row in rows:
         setattr(row, "_mets_qty_available_for_sale", stock.get(f"{row.id}:mets"))
         setattr(row, "_glacier_qty_available_for_sale", stock.get(f"{row.id}:glacier"))
+        setattr(row, "_other_qty_available_for_sale", stock.get(f"{row.id}:other"))
+        setattr(row, "_other_warehouse_name", stock.get(f"{row.id}:other_name"))
     start_index = (page - 1) * per_page
     page_rows = rows[start_index : start_index + per_page]
     saved_page = [row.id for row in page_rows if isinstance(row, SalesOrderHistory)]
@@ -356,6 +377,8 @@ def list_sales_orders(
         "total": len(rows),
         "has_more": start_index + per_page < len(rows),
         "stock_pending": waiting > 0,
+        "branch_counts": branch_counts,
+        "branches": branch_service.all_options(list(seen_branches.values())),
         "total_weight_kg": total_weight,
         "weight_complete": weight_complete and waiting == 0,
     }
@@ -368,6 +391,13 @@ _find_city = find_city
 
 
 _shipping_city = shipping_city
+
+
+@router.get("/inventory/branches")
+def list_branches():
+    """Configured Zoho branches (config only - no Zoho call, no DB). The list response also carries
+    `branches` (config plus any unknown branch seen in data) and per-branch `branch_counts`."""
+    return {"branches": branch_service.all_options()}
 
 
 @router.get("/inventory/sales-orders/cities")
@@ -384,7 +414,19 @@ def list_sales_order_cities(date_from: str | None = Query(None), date_to: str | 
     return {"cities": sorted({_shipping_city(row) for row in rows if _shipping_city(row)}, key=str.casefold)}
 
 
-def _filtered_rows(db: Session, date_from: str | None, date_to: str | None, status: str | None, search: str | None, assignment: str | None = None, cities: str | None = None, vehicle: str | None = None, customer: str | None = None, delivery_status: str | None = None):
+def _row_in_branches(row, wanted: set[str]) -> bool:
+    """Branch filter. Rows with no branch info (past-dated Neon rows keep no raw_json) are kept only
+    when no branch filter is active - they cannot be attributed to a branch."""
+    return not wanted or (branch_service.branch_id_of(row) in wanted)
+
+
+def _filtered_rows(db: Session, date_from: str | None, date_to: str | None, status: str | None, search: str | None, assignment: str | None = None, cities: str | None = None, vehicle: str | None = None, customer: str | None = None, delivery_status: str | None = None, branches: str | None = None):
+    wanted = branch_service.parse_ids(branches)
+    rows = _rows_any_branch(db, date_from, date_to, status, search, assignment, cities, vehicle, customer, delivery_status)
+    return [row for row in rows if _row_in_branches(row, wanted)] if wanted else rows
+
+
+def _rows_any_branch(db: Session, date_from: str | None, date_to: str | None, status: str | None, search: str | None, assignment: str | None = None, cities: str | None = None, vehicle: str | None = None, customer: str | None = None, delivery_status: str | None = None):
     start = _date(date_from) or datetime.now(PHT).date(); end = _date(date_to) or start
     if end < start: raise HTTPException(400, "date_to must be on or after date_from.")
     today = datetime.now(PHT).date()
@@ -402,6 +444,13 @@ def _filtered_rows(db: Session, date_from: str | None, date_to: str | None, stat
         # No sales_orders_cache read/write at all any more.
         rows = live_sales_order_cache.get_window(start, end)
     needle = (search or "").lower(); wanted = (status or "").lower()
+    needle_squashed = branch_service.squash_number(search)
+    def search_match(row) -> bool:
+        # Plain substring over number/customer/reference/vehicle/city, plus a punctuation- and
+        # space-insensitive match on the number so "SS SO26-16612", "ss-so26-16612" and
+        # "SSSO2616612" all find the same order (every prefix format: SO-, MS-SO-, SS SO26-, WM-SO26-).
+        text = " ".join(str(x or "") for x in (row.salesorder_number, row.customer_name, row.reference_number, row.vehicle_id, _shipping_city(row) or "")).lower()
+        return needle in text or (len(needle_squashed) >= 3 and needle_squashed in branch_service.squash_number(row.salesorder_number))
     wanted_label = wanted.replace("_", " ")
     acknowledged_ids, ack_overrides = _ack_snapshot() if assignment is None or wanted_label in {"acknowledged", "all except acknowledged"} else (None, {})
     inventory_scope = assignment is None
@@ -433,7 +482,7 @@ def _filtered_rows(db: Session, date_from: str | None, date_to: str | None, stat
         if is_delivered(raw):
             return "Delivered"
         return str(raw.get("shipment_status") or raw.get("shipping_status") or "Pending")
-    return [row for row in rows if assignment_match(row) and not (assignment == "unassigned" and live_sales_order_cache.is_on_hold(row)) and not (assignment == "assigned" and is_delivered(getattr(row, "raw_json", None) or {}) and row.assignment_status != "completed") and matches_status(row) and (not wanted_cities or (_shipping_city(row) or "").casefold() in wanted_cities) and (not vehicle_needle or vehicle_needle in str(row.vehicle_id or "").casefold()) and (not customer_needle or customer_needle in str(row.customer_name or "").casefold()) and (not delivery_needle or delivery_needle in row_delivery_status(row).casefold()) and (not needle or needle in " ".join(str(x or "") for x in (row.salesorder_number, row.customer_name, row.reference_number, row.vehicle_id, _shipping_city(row) or "")).lower())]
+    return [row for row in rows if assignment_match(row) and not (assignment == "unassigned" and live_sales_order_cache.is_on_hold(row)) and not (assignment == "assigned" and is_delivered(getattr(row, "raw_json", None) or {}) and row.assignment_status != "completed") and matches_status(row) and (not wanted_cities or (_shipping_city(row) or "").casefold() in wanted_cities) and (not vehicle_needle or vehicle_needle in str(row.vehicle_id or "").casefold()) and (not customer_needle or customer_needle in str(row.customer_name or "").casefold()) and (not delivery_needle or delivery_needle in row_delivery_status(row).casefold()) and (not needle or search_match(row))]
 
 
 def _hydrate_export_rows(db: Session, rows: list[SalesOrderCache]) -> list[SalesOrderCache]:
@@ -465,6 +514,7 @@ class EmailFilterContext(BaseModel):
     search: str | None = None
     order_ids: list[str] = Field(default_factory=list)
     assignment: str | None = None
+    branches: str | None = None
 
 
 class EmailDraftRequest(EmailFilterContext):
@@ -478,7 +528,7 @@ class EmailSendRequest(EmailFilterContext):
 
 
 def _email_rows(db: Session, context: EmailFilterContext) -> list[SalesOrderCache]:
-    rows = _filtered_rows(db, context.date_from, context.date_to, context.status, context.search, context.assignment)
+    rows = _filtered_rows(db, context.date_from, context.date_to, context.status, context.search, context.assignment, branches=context.branches)
     if context.order_ids:
         wanted = {str(value) for value in context.order_ids}
         rows = [row for row in rows if str(row.id) in wanted]
@@ -549,14 +599,15 @@ def email_send(body: EmailSendRequest, db: Session = Depends(get_db)):
 def _confirmed_export_rows(rows: list) -> list[list]:
     """Confirmed SO export: one row per line item with the same columns the screen shows -
     including per-item Mets/Glacier stock, warehouse, notes, truck and driver/helper."""
-    item_ids = confirmed_item_ids(rows)
-    stock: dict[str, dict] = {}
-    if item_ids:
+    # Stock is parsed per (item, branch): each order reads its own branch's warehouses.
+    pairs = list(dict.fromkeys((item_id, branch_service.branch_id_of(order)) for order in rows for item_id in confirmed_item_ids([order])))
+    stock: dict[tuple, dict] = {}
+    if pairs:
         # Items already seen in the list are cached, so this is normally instant; anything
         # missing is fetched here with a bounded fan-out (the Zoho limiter paces it).
         with ThreadPoolExecutor(max_workers=5) as pool:
-            futures = {item_id: pool.submit(contextvars.copy_context().run, fetch_item_stock, item_id) for item_id in item_ids}
-            stock = {item_id: future.result() for item_id, future in futures.items()}
+            futures = {pair: pool.submit(contextvars.copy_context().run, fetch_item_stock, pair[0], pair[1]) for pair in pairs}
+            stock = {pair: future.result() for pair, future in futures.items()}
 
     def staff_name(staff_id) -> str | None:
         member = staff_directory_cache.get_by_id(staff_id, retry_on_miss=False) if staff_id else None
@@ -566,7 +617,7 @@ def _confirmed_export_rows(rows: list) -> list[list]:
         names = [staff_name(getattr(order, "driver_id", None))] + [staff_name(helper) for helper in (getattr(order, "helper_ids", None) or [])]
         return order.vehicle_id or "", " / ".join(dict.fromkeys(name for name in names if name))
 
-    return [line for order in rows for line in flatten_confirmed_order(order, stock.get, truck_driver)]
+    return [line for order in rows for line in flatten_confirmed_order(order, lambda item_id, _b=branch_service.branch_id_of(order): stock.get((item_id, _b)), truck_driver)]
 
 
 def _export_payload(db: Session, rows: list, assignment: str | None) -> tuple[list[list], str]:
@@ -577,14 +628,14 @@ def _export_payload(db: Session, rows: list, assignment: str | None) -> tuple[li
 
 
 @router.get("/inventory/export/excel")
-def export_excel(date_from: str | None = Query(None), date_to: str | None = Query(None), status: str | None = Query(None), search: str | None = Query(None), assignment: str | None = Query(None), db: Session = Depends(get_db)):
-    export_rows, layout = _export_payload(db, _filtered_rows(db, date_from, date_to, status, search, assignment), assignment); start = date_from or datetime.now(PHT).date().isoformat(); end = date_to or start; downloaded = _download_stamp(); caption = f"{start} to {end} - {status or 'All'} statuses - Downloaded {downloaded.replace('_', ' ')} PHT"
+def export_excel(date_from: str | None = Query(None), date_to: str | None = Query(None), status: str | None = Query(None), search: str | None = Query(None), assignment: str | None = Query(None), branches: str | None = Query(None), db: Session = Depends(get_db)):
+    export_rows, layout = _export_payload(db, _filtered_rows(db, date_from, date_to, status, search, assignment, branches=branches), assignment); start = date_from or datetime.now(PHT).date().isoformat(); end = date_to or start; downloaded = _download_stamp(); caption = f"{start} to {end} - {status or 'All'} statuses - Downloaded {downloaded.replace('_', ' ')} PHT"
     return StreamingResponse(make_excel(export_rows, caption, layout), media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", headers={"Content-Disposition": f'attachment; filename="RGF_SalesOrders_{start}_to_{end}_downloaded_{downloaded}.xlsx"'})
 
 
 @router.get("/inventory/export/pdf")
-def export_pdf(date_from: str | None = Query(None), date_to: str | None = Query(None), status: str | None = Query(None), search: str | None = Query(None), assignment: str | None = Query(None), db: Session = Depends(get_db)):
-    export_rows, layout = _export_payload(db, _filtered_rows(db, date_from, date_to, status, search, assignment), assignment); start = date_from or datetime.now(PHT).date().isoformat(); end = date_to or start; downloaded = _download_stamp(); caption = f"{start} to {end} - {status or 'All'} statuses - Downloaded {downloaded.replace('_', ' ')} PHT"
+def export_pdf(date_from: str | None = Query(None), date_to: str | None = Query(None), status: str | None = Query(None), search: str | None = Query(None), assignment: str | None = Query(None), branches: str | None = Query(None), db: Session = Depends(get_db)):
+    export_rows, layout = _export_payload(db, _filtered_rows(db, date_from, date_to, status, search, assignment, branches=branches), assignment); start = date_from or datetime.now(PHT).date().isoformat(); end = date_to or start; downloaded = _download_stamp(); caption = f"{start} to {end} - {status or 'All'} statuses - Downloaded {downloaded.replace('_', ' ')} PHT"
     return StreamingResponse(make_pdf(export_rows, caption, layout), media_type="application/pdf", headers={"Content-Disposition": f'attachment; filename="RGF_SalesOrders_{start}_to_{end}_downloaded_{downloaded}.pdf"'})
 
 
@@ -721,10 +772,11 @@ def acknowledge_filtered_sales_orders(
     date_to: str | None = Query(None),
     status: str | None = Query(None),
     search: str | None = Query(None),
+    branches: str | None = Query(None),
     db: Session = Depends(get_db),
     current_user: CurrentUser = Depends(require_role("admin", "dispatcher", "warehouse")),
 ):
-    rows = _filtered_rows(db, date_from, date_to, status, search)
+    rows = _filtered_rows(db, date_from, date_to, status, search, branches=branches)
     eligible = [row for row in rows if _can_apply_acknowledged_sub_status(row) and not _is_acknowledged(row)]
     acknowledged = 0
     failed = 0
