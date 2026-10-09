@@ -11,6 +11,8 @@ from services import branches, item_detail_cache
 logger = logging.getLogger("warehouse_stock")
 METS_NAME = "mets cold storage"
 GLACIER_NAME = "glacier south rgf"
+RGF_BRANCH_ID = "4489499000001322444"
+MSSI_BRANCH_ID = "4489499000017295785"
 
 
 def _stock_value(value):
@@ -18,6 +20,23 @@ def _stock_value(value):
         return float(value) if value is not None and str(value).strip() != "" else None
     except (TypeError, ValueError):
         return None
+
+
+def _is_main_mets(name: str) -> bool:
+    return (
+        (METS_NAME in name or ("mets" in name and "cold" in name and "storage" in name))
+        and "near-expiry" not in name
+        and "for supermarket" not in name
+        and not name.startswith("chilled")
+    )
+
+
+def _is_rgf_glacier(name: str) -> bool:
+    return (GLACIER_NAME in name or ("glacier" in name and ("rgf" in name or "v2" in name or "south" in name))) and "mssi" not in name
+
+
+def _is_mssi_glacier(name: str) -> bool:
+    return "glacier" in name and "mssi" in name
 
 
 def _parse_stock(entry: dict | None, item_id: str = "", branch_id: str | None = None) -> dict[str, float | None]:
@@ -42,10 +61,19 @@ def _parse_stock(entry: dict | None, item_id: str = "", branch_id: str | None = 
         )
         if re.search(r"\(deactivated\)$", name, re.I) or name.startswith("(do not use)"):
             continue
+        branch = str(branch_id or "")
         if rule:
             if all(part in name for part in rule["mets"]) and not any(part in name for part in rule.get("mets_exclude", ())) and not name.startswith("chilled"):
                 site = "mets"
             elif all(part in name for part in rule["glacier"]):
+                site = "glacier"
+            elif branch == RGF_BRANCH_ID and _is_main_mets(name) and "mssi" not in name:
+                site = "mets"
+            elif branch == RGF_BRANCH_ID and _is_rgf_glacier(name):
+                site = "glacier"
+            elif branch == MSSI_BRANCH_ID and _is_main_mets(name) and "mssi" in name:
+                site = "mets"
+            elif branch == MSSI_BRANCH_ID and _is_mssi_glacier(name):
                 site = "glacier"
             else:
                 site = None
@@ -54,9 +82,9 @@ def _parse_stock(entry: dict | None, item_id: str = "", branch_id: str | None = 
             if value is not None:
                 result[site] = value
             continue
-        if METS_NAME in name and "near-expiry" not in name and "for supermarket" not in name and not name.startswith("chilled"):
+        if _is_main_mets(name):
             site = "mets"
-        elif GLACIER_NAME in name:
+        elif _is_rgf_glacier(name):
             site = "glacier"
         else:
             if name:

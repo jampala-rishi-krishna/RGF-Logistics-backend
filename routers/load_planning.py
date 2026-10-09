@@ -62,6 +62,12 @@ def _pick(record: dict, *keys: str):
     return None
 
 
+def _line_item_id(item: dict) -> str | None:
+    nested = item.get("item") if isinstance(item.get("item"), dict) else {}
+    value = item.get("item_id") or item.get("itemid") or nested.get("item_id") or nested.get("id")
+    return str(value) if value else None
+
+
 def _fetch_acknowledged_ids_from_zoho() -> set[str]:
     ids: set[str] = set()
     page = 1
@@ -270,8 +276,7 @@ def _summary(row, db: Session | None = None, *, allow_fetch: bool = True) -> dic
         def item_weight_kg(item: dict, order_number: str) -> float | None:
             quantity = item.get("quantity")
             unit = item.get("unit") or item.get("unit_name") or item.get("usage_unit")
-            nested_item = item.get("item") if isinstance(item.get("item"), dict) else {}
-            item_id = item.get("item_id") or item.get("itemid") or nested_item.get("item_id") or nested_item.get("id")
+            item_id = _line_item_id(item)
             return calculate_line_weight_kg(quantity, unit, item_id, item=item, context=f"SO={order_number} SKU={item.get('sku')}", allow_fetch=allow_fetch)
 
         for item in items:
@@ -282,9 +287,9 @@ def _summary(row, db: Session | None = None, *, allow_fetch: bool = True) -> dic
             elif "case" in normalized or "carton" in normalized: total_cases += quantity
             else: total_units += quantity
             line_total_weight_kg = item_weight_kg(item, row.salesorder_number or row.id)
-            stock_item_id = item.get("item_id") or item.get("itemid")
-            item_stock = ((fetch_item_stock(str(stock_item_id), branch_id) if allow_fetch else cached_item_stock(str(stock_item_id), branch_id)) if stock_item_id else None) or {}
-            products.append({"mets_qty_available_for_sale": item_stock.get("mets"), "glacier_qty_available_for_sale": item_stock.get("glacier"), "line_item_id": item.get("line_item_id"), "item_id": item.get("item_id") or item.get("itemid"), "name": item.get("name") or item.get("item_description") or item.get("description"), "sku": item.get("sku") or item.get("item_order") or item.get("item_id"), "quantity": quantity, "unit": unit or None, "total_weight_kg": line_total_weight_kg, "packaging_type": "pack" if "pack" in normalized else "case" if "case" in normalized or "carton" in normalized else None, "pack_quantity": quantity if "pack" in normalized else 0, "case_quantity": quantity if "case" in normalized or "carton" in normalized else 0, "quantity_packed": number(item, "quantity_packed"), "quantity_shipped": number(item, "quantity_shipped")})
+            stock_item_id = _line_item_id(item)
+            item_stock = ((fetch_item_stock(stock_item_id, branch_id) if allow_fetch else cached_item_stock(stock_item_id, branch_id)) if stock_item_id else None) or {}
+            products.append({"mets_qty_available_for_sale": item_stock.get("mets"), "glacier_qty_available_for_sale": item_stock.get("glacier"), "line_item_id": item.get("line_item_id"), "item_id": stock_item_id, "name": item.get("name") or item.get("item_description") or item.get("description"), "sku": item.get("sku") or item.get("item_order") or stock_item_id, "quantity": quantity, "unit": unit or None, "total_weight_kg": line_total_weight_kg, "packaging_type": "pack" if "pack" in normalized else "case" if "case" in normalized or "carton" in normalized else None, "pack_quantity": quantity if "pack" in normalized else 0, "case_quantity": quantity if "case" in normalized or "carton" in normalized else 0, "quantity_packed": number(item, "quantity_packed"), "quantity_shipped": number(item, "quantity_shipped")})
         total_item_quantity = sum(number(item, "quantity") for item in items)
 
     result["product_count"] = len([p for p in products if p["name"]])
@@ -307,8 +312,7 @@ def _total_weight_kg(rows, db: Session) -> tuple[float, bool]:
         for item in (row.raw_json or {}).get("line_items") or []:
             if not isinstance(item, dict) or item.get("quantity") in (None, ""):
                 continue
-            nested = item.get("item") if isinstance(item.get("item"), dict) else {}
-            item_id = item.get("item_id") or item.get("itemid") or nested.get("item_id") or nested.get("id")
+            item_id = _line_item_id(item)
             weight = calculate_line_weight_kg(item.get("quantity"), item.get("unit") or item.get("unit_name") or item.get("usage_unit"), item_id, item=item, context="total", allow_fetch=False)
             if weight is None:
                 complete = False

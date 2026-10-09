@@ -298,6 +298,11 @@ WAREHOUSES = {"warehouses": [
     {"warehouse_name": "Glacier South MSSI(DEACTIVATED)", "warehouse_available_for_sale_stock": 77},
 ]}
 
+WAREHOUSES_V2 = {"warehouses": [
+    {"warehouse_name": "Mets Cold Storage Services Inc. RGF", "warehouse_available_for_sale_stock": -5},
+    {"warehouse_name": "Glacier V2. Daily Pick RGF", "warehouse_available_for_sale_stock": -12},
+]}
+
 
 class StockMappingTests(unittest.TestCase):
     def parse(self, branch_id, enabled):
@@ -311,6 +316,10 @@ class StockMappingTests(unittest.TestCase):
     def test_rgf_and_mssi_mapping_when_on_and_negative_is_kept(self):
         self.assertEqual(self.parse(RGF, True), {"mets": 10, "glacier": 20})
         self.assertEqual(self.parse(MSSI, True), {"mets": 30, "glacier": -2000})
+
+    def test_rgf_glacier_v2_and_negative_values_are_kept(self):
+        with patch.dict(os.environ, {"BRANCH_STOCK_MAPPING": "1"}):
+            self.assertEqual(ws._parse_stock(WAREHOUSES_V2, "i1", RGF), {"mets": -5, "glacier": -12})
 
     def test_only_rgf_and_mssi_have_rules(self):
         self.assertEqual(set(bs.STOCK_RULES), {RGF, MSSI})
