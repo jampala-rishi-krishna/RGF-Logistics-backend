@@ -260,6 +260,15 @@ async def gmail_status():
         return {"connected": False}
 
 
+@router.get("/auth-status")
+async def auth_status():
+    """Is the Gmail refresh token still accepted? Re-checked at most every 5 minutes (one Google token
+    refresh, no Gmail call). The dashboard shows a "Gmail disconnected - re-authorise" banner when not."""
+    from services import gmail_sender
+
+    return await run_in_threadpool(gmail_sender.auth_status)
+
+
 @router.get("/send-log")
 async def send_log(limit: int = 100):
     """Recent outgoing emails sent directly through Gmail (newest first), with the failure
@@ -267,7 +276,26 @@ async def send_log(limit: int = 100):
     from services import gmail_sender
 
     entries = gmail_sender.recent(max(1, min(limit, 200)))
-    return {"configured": gmail_sender.configured(), "mailbox": gmail_sender.mailbox_address() if gmail_sender.configured() else None, "sent": sum(1 for e in entries if e.get("ok")), "failed": sum(1 for e in entries if not e.get("ok")), "entries": entries}
+    return {"configured": gmail_sender.configured(), "mailbox": gmail_sender.mailbox_address() if gmail_sender.configured() else None, "sent": sum(1 for e in entries if e.get("ok")), "failed": sum(1 for e in entries if not e.get("ok")), "entries": entries,
+            "assignments": await run_in_threadpool(_persisted_assignment_emails, max(1, min(limit, 200)))}
+
+
+def _persisted_assignment_emails(limit: int) -> list[dict]:
+    """Assignment email outcomes from sales_orders.email_* - they survive restarts (the in-memory log above does not)."""
+    from sqlalchemy import select
+
+    from database import SessionLocal
+    from models.sales_order_history import SalesOrderHistory as H
+
+    with SessionLocal() as db:
+        rows = db.execute(select(H).where(H.email_status.is_not(None)).order_by(H.assigned_at.desc().nullslast()).limit(limit * 3)).scalars().all()
+    batches: dict[tuple, dict] = {}
+    for row in rows:  # one entry per assignment batch (same vehicle + assignment time + outcome)
+        key = (row.vehicle_id, row.assigned_at, row.email_status, row.email_message_id, row.email_error)
+        entry = batches.setdefault(key, {"vehicle": row.vehicle_id, "assignedAt": row.assigned_at.isoformat() if row.assigned_at else None, "status": row.email_status,
+                                         "error": row.email_error, "sentAt": row.email_sent_at.isoformat() if row.email_sent_at else None, "messageId": row.email_message_id, "salesOrders": []})
+        entry["salesOrders"].append(row.salesorder_number or row.id)
+    return list(batches.values())[:limit]
 
 
 @router.get("/agent/status", dependencies=[Depends(require_role("admin"))])

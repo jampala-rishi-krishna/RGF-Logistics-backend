@@ -23,7 +23,7 @@ import time
 from collections import deque
 from datetime import datetime, timezone
 from email.message import EmailMessage
-from email.utils import formataddr
+from email.utils import formataddr, parseaddr
 from html import unescape
 from typing import Iterable, Sequence
 
@@ -54,6 +54,7 @@ _mailbox: dict = {"address": None}
 _sent_keys: dict[str, float] = {}
 _sendas: dict = {"addresses": None, "fetched_at": 0.0}
 _labels: dict = {"ids": None, "fetched_at": 0.0}
+_auth: dict = {"ok": None, "error": None, "checked_at": 0.0}  # result of the last token refresh (memory only)
 DEDUPE_WINDOW_SECONDS = 120
 
 
@@ -86,6 +87,7 @@ def _access_token(force: bool = False) -> str:
         if not force and _token["value"] and time.time() < _token["expires_at"] - 60:
             return _token["value"]
     if not configured():
+        _auth.update(ok=False, error="Gmail is not configured on the server.", checked_at=time.time())
         raise GmailSendError("Gmail is not configured on the server (GMAIL_COMMS_CLIENT_ID / GMAIL_COMMS_CLIENT_SECRET / GMAIL_COMMS_REFRESH_TOKEN).", 503)
     try:
         response = httpx.post(
@@ -99,15 +101,42 @@ def _access_token(force: bool = False) -> str:
             timeout=20,
         )
     except httpx.HTTPError as exc:
+        # A network problem says nothing about the token itself, so the connected/disconnected state is left alone.
         raise GmailSendError(f"Could not reach Google to authorize Gmail: {exc}", 502) from exc
     if response.status_code != 200:
         detail = _google_error(response)
         logger.error("[GMAIL_SEND] token refresh failed status=%s detail=%s", response.status_code, detail)
+        _auth.update(ok=False, error=detail, checked_at=time.time())
         raise GmailSendError(f"Gmail authorization failed ({detail}). The mailbox may need to be reconnected.", 502)
     payload = response.json()
+    _auth.update(ok=True, error=None, checked_at=time.time())
     with _token_lock:
         _token.update(value=payload["access_token"], expires_at=time.time() + int(payload.get("expires_in", 3600)))
         return _token["value"]
+
+
+def auth_status(max_age: float = 300.0) -> dict:
+    """Is the Gmail refresh token still accepted by Google? Re-checks (one token refresh, no Gmail call)
+    at most once per `max_age` seconds. Drives the dashboard's "Gmail disconnected" banner."""
+    if not configured():
+        return {"connected": False, "reason": "not_configured", "error": "Gmail is not configured on the server.", "checkedAt": None}
+    if _auth["ok"] is None or time.time() - _auth["checked_at"] > max_age:
+        try:
+            _access_token(force=True)
+        except GmailSendError:
+            pass  # recorded in _auth
+    connected = _auth["ok"] is not False  # unknown (e.g. a network blip) is not shown as disconnected
+    return {"connected": connected, "reason": None if connected else "token_rejected", "error": None if connected else _auth["error"], "checkedAt": _auth["checked_at"] or None}
+
+
+def _identity(name: str | None, address: str | None) -> tuple[str, str]:
+    """(display name, bare address). Guards against 'Name <addr>' pasted into either variable, which
+    formataddr() would otherwise wrap a second time ('Name <Name <addr>>')."""
+    bare = parseaddr(str(address or ""))[1] or str(address or "").strip()
+    display = str(name or "").strip()
+    if "<" in display or "@" in display:
+        display = parseaddr(display)[0] or display.split("<")[0].strip().strip('"')
+    return display, bare
 
 
 def mailbox_address() -> str | None:
@@ -360,6 +389,7 @@ def build_raw_message(*, to: list[str], subject: str, html: str, text: str | Non
     message = EmailMessage()
     from_name = (from_name if from_name is not None else os.environ.get("GMAIL_FROM_NAME", "RareChain Logistics")).strip()
     if sender:
+        from_name, sender = _identity(from_name, sender)
         message["From"] = formataddr((from_name, sender)) if from_name else sender
     message["To"] = ", ".join(to)
     if cc:
@@ -420,7 +450,7 @@ def send_email(*, to: str | Iterable[str], subject: str, html: str, text: str | 
             entry.update(ok=True, duplicate=True, ms=0)
             logger.warning("[GMAIL_SEND] skipped duplicate purpose=%s to=%s subject=%r", purpose, ",".join(recipients), subject)
             return {"id": None, "threadId": None, "to": recipients, "duplicate": True}
-        sender = (from_address or os.environ.get("GMAIL_FROM_ADDRESS", "")).strip() or mailbox_address()
+        sender = _identity(None, (from_address or os.environ.get("GMAIL_FROM_ADDRESS", "")).strip())[1] or mailbox_address()
         own = (mailbox_address() or "").lower()
         if sender and own and sender.lower() != own:
             aliases = send_as_addresses()

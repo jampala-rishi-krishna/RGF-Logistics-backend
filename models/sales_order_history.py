@@ -55,3 +55,10 @@ class SalesOrderHistory(TimestampedBase):
     assignment_status: Mapped[str] = mapped_column(String(24), nullable=False, default="assigned", index=True)
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
     helper_ids: Mapped[list | None] = mapped_column(JSONB)
+    # Assignment email status (migration l2d3e4f5a6b7): written only when the status changes.
+    email_status: Mapped[str | None] = mapped_column(Text)
+    email_error: Mapped[str | None] = mapped_column(Text)
+    email_sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    email_message_id: Mapped[str | None] = mapped_column(Text)
+    # Identifies one assignment (migration m3e4f5a6b7c8); set in the same UPDATE as the first email status.
+    assignment_batch_id: Mapped[str | None] = mapped_column(Text)

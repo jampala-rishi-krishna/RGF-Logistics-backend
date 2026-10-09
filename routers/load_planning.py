@@ -223,6 +223,12 @@ def _summary(row, db: Session | None = None, *, allow_fetch: bool = True) -> dic
         result["driver_name"] = driver["name"] if driver else None
     is_persisted = isinstance(row, SalesOrderHistory)  # slim sales_orders row - no raw_json (Step 6)
     address = _address_object(row.shipping_address or (None if is_persisted else (row.raw_json or {}).get("shipping_address")))
+    result["driver_ids"] = list(getattr(row, "helper_ids", None) or ([row.driver_id] if row.driver_id else []))
+    result["assignment_batch_id"] = getattr(row, "assignment_batch_id", None)
+    result["email_status"] = getattr(row, "email_status", None)
+    result["email_error"] = getattr(row, "email_error", None)
+    sent_at = getattr(row, "email_sent_at", None)
+    result["email_sent_at"] = sent_at.isoformat() if hasattr(sent_at, "isoformat") else sent_at
     result["shipping_city"] = _shipping_city(row)
     result["shipping_address"] = address
     raw_notes = {} if is_persisted else (row.raw_json or {})

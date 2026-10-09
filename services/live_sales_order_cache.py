@@ -245,6 +245,11 @@ def load_assignment_state_from_history(db) -> None:
                 "route_id": r.route_id,
                 "manifest_id": r.manifest_id,
                 "helper_ids": r.helper_ids or [],
+                "email_status": r.email_status,
+                "email_error": r.email_error,
+                "email_sent_at": r.email_sent_at,
+                "email_message_id": r.email_message_id,
+                "assignment_batch_id": r.assignment_batch_id,
             }
     logger.info("[LiveSalesOrderCache] Loaded assignment state for %d SOs from sales_order_history", len(_assignment_state))
 
@@ -256,6 +261,19 @@ def set_assignment(order_id: str, **fields) -> None:
     if record is not None:
         for key, value in fields.items():
             setattr(record, key, value)
+
+
+def ids_for_batch(batch_id: str) -> list[str]:
+    """Sales orders of ONE assignment (same assignment_batch_id), still assigned. Memory only."""
+    with _state_lock:
+        return [oid for oid, state in _assignment_state.items()
+                if state.get("assignment_batch_id") == batch_id and (state.get("assignment_status") or "unassigned") != "unassigned"]
+
+
+def cached_assigned_records() -> list:
+    """Assigned SOs whose Zoho data is ALREADY in memory. Never calls Zoho (unlike get_assigned_snapshot)."""
+    with _state_lock:
+        return list(_assigned_zoho.values())
 
 
 def get_assignment(order_id: str) -> dict | None:

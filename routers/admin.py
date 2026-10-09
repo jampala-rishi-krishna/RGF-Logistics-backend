@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import os
+from email.utils import formataddr
+
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from sqlalchemy import select
@@ -28,6 +31,30 @@ def get_zoho_usage():
         "usage_restored_from_db": snap["usage_restored_from_db"],
         "zoho_usage": snap,
     }
+
+
+class TestAssignmentEmailBody(BaseModel):
+    driver_email: str
+    so_numbers: list[str] = []
+
+
+@usage_router.post("/test-assignment-email")
+def test_assignment_email(body: TestAssignmentEmailBody):
+    """Send ONE assignment email, rendered by the real template and sent through the real Gmail path
+    (same From, subject format, HTML + plain-text parts), to `driver_email` only. Nothing is assigned and
+    Zoho is never called. The subject is marked [TEST]; the message is not labelled Logistics."""
+    from routers import assignment
+    from services import gmail_sender
+
+    email = body.driver_email.strip()
+    subject, html, text, source = assignment.render_test_assignment_email(email, body.so_numbers)
+    try:
+        result = gmail_sender.send_email(to=email, subject=subject, html=html, text=text, purpose="assignment-test", label_logistics=False)
+    except gmail_sender.GmailSendError as exc:
+        raise HTTPException(exc.status_code, str(exc)) from exc
+    entry = (gmail_sender.recent(1) or [{}])[0]
+    name, address = gmail_sender._identity(os.environ.get("GMAIL_FROM_NAME", "RareChain Logistics"), entry.get("sender"))
+    return {"sent": True, "messageId": result.get("id"), "to": email, "subject": subject, "from": formataddr((name, address)) if name else address, "source": source}
 
 
 VALID_INTEGRATION_STATES = {"not_connected", "sandbox", "live"}

@@ -261,6 +261,7 @@ def health():
         "db_egress": database.db_egress_stats,
         "gmail_identity": gmail_sender.identity_health(),
         "so_lock": zoho_so_lock.health_status(),
+        "gmail_auth": {"connected": gmail_sender._auth["ok"], "error": gmail_sender._auth["error"]},  # last token refresh result, memory only
         "voice_calls": voice_control.mode(),
         "fleet_health_sampler": fleet_health_sampler.health(),
         "whatsapp_messages": whatsapp_control.mode(),

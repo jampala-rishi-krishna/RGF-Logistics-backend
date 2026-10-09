@@ -25,9 +25,9 @@ from models.vehicle import Vehicle
 from models.inventory import SalesOrderCache
 from services import optimizer
 from services.rarechain_email_template import render_rarechain_email
-from services import gmail_sender
+from services import gmail_sender, assignment_email_status
 from services.sales_order_location import address_lines
-from services.item_weight import calculate_order_weight_kg
+from services.item_weight import calculate_line_weight_kg, calculate_order_weight_kg
 from services.delivery_status import is_delivered
 from services import staff_directory_cache, live_sales_order_cache, memory_tables, vapi_client, vehicle_flags, voice_calls, voice_control, whatsapp_control
 from services.sales_order_history_sync import sync_history_row
@@ -65,25 +65,58 @@ _VOICE_WEBHOOK = _NOTIFICATION_WEBHOOKS[-1]
 _WHATSAPP_WEBHOOK = _NOTIFICATION_WEBHOOKS[0]
 
 
-def _send_assignment_emails_direct(driver, driver_subject: str, driver_html: str, team_subject: str | None, team_html: str | None, assignment_key: str = "") -> None:
+def _send_assignment_emails_direct(driver, driver_subject: str, driver_html: str, team_subject: str | None, team_html: str | None, assignment_key: str = "", *, driver_text: str | None = None, resend: bool = False) -> dict:
     """Driver assignment email (and, once per assignment, the team confirmation) straight
-    through Gmail. Runs in the notification pool; every outcome is logged by gmail_sender."""
+    through Gmail. Every outcome is logged by gmail_sender and returned so the caller can record
+    it. `resend=True` (the preview window's explicit Resend) bypasses the 120s dedupe and does not
+    repeat the team email."""
+    outcome: dict = {"sent": [], "failed": [], "notes": []}
     if driver.email:
         try:
-            gmail_sender.send_email(to=driver.email, subject=driver_subject, html=driver_html, purpose="assignment-driver", dedupe_key=f"driver|{driver.email.lower()}|{assignment_key}")
-        except gmail_sender.GmailSendError:
-            pass  # already logged with the reason
+            result = gmail_sender.send_email(to=driver.email, subject=driver_subject, html=driver_html, text=driver_text, purpose="assignment-driver", dedupe_key=None if resend else f"driver|{driver.email.lower()}|{assignment_key}")
+            if result.get("duplicate"):
+                outcome["notes"].append(f"driver {driver.name}: identical email already sent in the last 2 minutes")
+            outcome["sent"].append(result.get("id"))
+        except gmail_sender.GmailSendError as exc:
+            outcome["failed"].append(f"driver {driver.name}: {exc}")  # already logged with the reason
     else:
         logger.warning("[GMAIL_SEND] assignment email skipped: driver %s has no email on file", driver.name)
-    if team_subject and team_html:
+        outcome["notes"].append(f"driver {driver.name}: skipped: no email on file")
+    if team_subject and team_html and not resend:
         team = [member.get("email") for member in staff_directory_cache.notify_list() if member.get("email")]
         if not team:
             logger.warning("[GMAIL_SEND] team confirmation skipped: the team notify list has no email addresses")
-            return
-        try:
-            gmail_sender.send_email(to=team, subject=team_subject, html=team_html, purpose="assignment-team", dedupe_key=f"team|{assignment_key}")
-        except gmail_sender.GmailSendError:
-            pass
+            outcome["notes"].append("team: skipped: the notify list has no email addresses")
+        else:
+            try:
+                result = gmail_sender.send_email(to=team, subject=team_subject, html=team_html, purpose="assignment-team", dedupe_key=f"team|{assignment_key}")
+                outcome["sent"].append(result.get("id"))
+            except gmail_sender.GmailSendError as exc:
+                outcome["failed"].append(f"team: {exc}")
+    return outcome
+
+
+def _send_batch_emails(jobs: list, batch_ids: list, assignment_key: str = "", resend: bool = False) -> None:
+    """Background job: ONE email per driver (all of that driver's SOs) plus one team email. The result is
+    recorded for every SO of the batch together - failed beats sent, so a failure is never hidden."""
+    sent: list = []
+    failed: list = []
+    notes: list = []
+    try:
+        for driver, subject, html, team_subject, team_html, text in jobs:
+            outcome = _send_assignment_emails_direct(driver, subject, html, team_subject, team_html, assignment_key, driver_text=text, resend=resend)
+            sent += outcome["sent"]
+            failed += outcome["failed"]
+            notes += outcome["notes"]
+    except Exception as exc:  # noqa: BLE001 - the status must always be recorded
+        logger.exception("[GMAIL_SEND] assignment email batch crashed")
+        failed.append(f"unexpected error: {exc}")
+    if failed:
+        assignment_email_status.record(batch_ids, "failed", error="; ".join(failed + notes))
+    elif sent:
+        assignment_email_status.record(batch_ids, "sent", error="; ".join(notes) or None, message_id=next((m for m in sent if m), None))
+    else:
+        assignment_email_status.record(batch_ids, "skipped", error="; ".join(notes) or "no recipient")
 
 
 def _send_notification(url: str, secret: str, payload: dict) -> None:
@@ -150,24 +183,55 @@ class AssignmentBody(BaseModel):
 class AssignmentEmailBody(AssignmentBody):
     assigned_by: str | None = None
     preview: bool = False
+    # Explicit "Resend / edit" from the preview window: emails only (no WhatsApp/SMS/voice again), no dedupe, no team repeat.
+    resend: bool = False
+    # Retry of a failed send: email only (no WhatsApp/SMS/voice again) but WITH the dedupe, so a driver who already got it is not emailed twice.
+    email_only: bool = False
+    # Auto-send: the NEW id of this assignment (stored with the first status write). Retry / Resend: the id of the
+    # existing assignment - the SOs to email are resolved from it, never guessed from vehicle + time.
+    assignment_batch_id: str | None = None
     html_body: str | None = None
     subject: str | None = None
 
 
-def _assignment_email_html(drivers: list, profile, orders, assigned_by: str, assigned_at: str) -> tuple[str, str, str]:
+ASSIGNMENT_TABLE_COLUMNS = ("SO number", "Client", "Total kg", "Total Packs", "Shipping Address")
+
+
+def _assignment_email_text(profile, orders, weight_fn=None) -> str:
+    """Plain-text alternative of the driver email (same facts as the HTML table)."""
+    weight_fn = weight_fn or _weight
+    lines = ["Route details for the assigned driver.", "Please review the assigned sales orders below before dispatch and reply to confirm receipt.", "", f"Truck: {profile.plate_no or '-'}", ""]
+    for order in orders:
+        raw = order.raw_json or {}
+        address_text = ", ".join(address_lines(raw.get("shipping_address") or order.shipping_address))
+        packs = sum(float(item.get("quantity") or 0) for item in raw.get("line_items", []))
+        lines += [f"SO number: {order.salesorder_number or order.id}", f"Client: {order.customer_name or '-'}", f"Total kg: {weight_fn(order):,.1f}", f"Total Packs: {packs:,.0f}", f"Shipping Address: {address_text or '-'}", ""]
+    return "\n".join(lines).strip()
+
+
+def _assignment_email_html(drivers: list, profile, orders, assigned_by: str, assigned_at: str, weight_fn=None) -> tuple[str, str, str]:
+    weight_fn = weight_fn or _weight
     primary = drivers[0]
     driver_names = ", ".join(d.name for d in drivers if d.name) or "Driver"
     warehouse = {"METS": "Mets Cold Storage", "GLACIER": "Glacier Cold Storage"}.get(str(primary.warehouse or "").upper(), primary.warehouse or profile.capacity_note or "-")
     profile.capacity_note = warehouse
     subject = f"Driver assignment — {profile.plate_no or 'truck'} — {len(orders)} sales order(s)"
+    # Inline CSS only (Gmail strips <style>); the table scrolls sideways inside its wrapper on a narrow phone.
+    cell = "border:1px solid #cfd4da;padding:8px 10px;text-align:left;vertical-align:top;font-size:13px;line-height:1.4;color:#1f2933;"
+    head = "border:1px solid #cfd4da;padding:8px 10px;text-align:left;background:#eef1f4;font-size:12px;font-weight:700;color:#1f2933;white-space:nowrap;"
     rows = []
     for order in orders:
         raw = order.raw_json or {}
         address_text = ", ".join(address_lines(raw.get("shipping_address") or order.shipping_address))
         packs = sum(float(item.get("quantity") or 0) for item in raw.get("line_items", []))
-        rows.append(f"<tr><td>{escape(str(order.salesorder_number or order.id))}</td><td>{escape(str(order.customer_name or '-'))}</td><td>{_weight(order):,.1f}</td><td>{packs:,.0f}</td><td>{escape(address_text or '-')}</td></tr>")
-    headers = "".join(f"<th style='border:1px solid #ccc;padding:6px;text-align:left'>{heading}</th>" for heading in ("SO number", "Client", "Total kg", "Total Packs", "Shipping Address"))
-    body_html = f"<p style='margin:0 0 16px;'>Please review the assigned sales orders below before dispatch and reply to confirm receipt.</p><table style='border-collapse:collapse;width:100%;font-size:12px;'><thead><tr>{headers}</tr></thead><tbody>{''.join(rows)}</tbody></table>"
+        rows.append(f"<tr><td style='{cell}'>{escape(str(order.salesorder_number or order.id))}</td><td style='{cell}'>{escape(str(order.customer_name or '-'))}</td><td style='{cell}'>{weight_fn(order):,.1f}</td><td style='{cell}'>{packs:,.0f}</td><td style='{cell}'>{escape(address_text or '-')}</td></tr>")
+    headers = "".join(f"<th style='{head}'>{heading}</th>" for heading in ASSIGNMENT_TABLE_COLUMNS)
+    body_html = (
+        "<p style='margin:0 0 16px;font-size:14px;line-height:1.5;'>Please review the assigned sales orders below before dispatch and reply to confirm receipt.</p>"
+        "<div style='overflow-x:auto;-webkit-overflow-scrolling:touch;'>"
+        f"<table cellspacing='0' cellpadding='0' border='0' style='border-collapse:collapse;width:100%;min-width:520px;'><thead><tr>{headers}</tr></thead><tbody>{''.join(rows)}</tbody></table>"
+        "</div>"
+    )
     html_body = render_rarechain_email("COLD-CHAIN OPERATIONS / PHILIPPINES", "New dispatch assignment.", f"{driver_names} {'have' if len(drivers) > 1 else 'has'} been assigned to truck {profile.plate_no or '-'}.", "https://images.pexels.com/photos/7464230/pexels-photo-7464230.jpeg?auto=compress&amp;cs=tinysrgb&amp;w=1200", [{"label": "TRUCK PLATE", "value": profile.plate_no or "-"}, {"label": "WAREHOUSE PICKUP", "value": profile.capacity_note or "-"}, {"label": "TOTAL SOs", "value": str(len(orders))}], "https://images.pexels.com/photos/6169056/pexels-photo-6169056.jpeg?auto=compress&amp;cs=tinysrgb&amp;w=1800", "Route details for the assigned driver.", body_html)
     return subject, html_body, body_html
 
@@ -178,6 +242,17 @@ def _weight(order: SalesOrderCache) -> float:
     # unknown contribution as zero here; the authoritative displayed weight can
     # still be refreshed when Zoho metadata becomes available.
     return weight if weight is not None else 0.0
+
+
+def _weight_cached(order) -> float:
+    """Weight from already-cached item data only - never calls Zoho (used by the test-email endpoint)."""
+    total = 0.0
+    for item in (order.raw_json or {}).get("line_items", []):
+        nested = item.get("item") if isinstance(item.get("item"), dict) else {}
+        item_id = item.get("item_id") or item.get("itemid") or nested.get("item_id") or nested.get("id")
+        weight = calculate_line_weight_kg(item.get("quantity"), item.get("unit") or item.get("unit_name"), item_id, item=item, context="test-email", allow_fetch=False)
+        total += weight or 0.0
+    return total
 
 
 def _weight_if_known(order: SalesOrderCache) -> float | None:
@@ -245,6 +320,12 @@ def create_new_driver(body: NewDriverBody, current_user: CurrentUser = Depends(r
     _invalidate_assignment_options_cache()
     logger.info("New driver created by %s: id=%s name=%s", current_user.email, staff.get("id"), staff.get("name"))
     return {"id": staff.get("id"), "name": staff.get("name"), "title": staff.get("title"), "email": staff.get("email"), "phone": staff.get("phone"), "warehouse": staff.get("warehouse")}
+
+
+@router.get("/email-status")
+def assignment_email_status_route(ids: str = Query(..., description="Comma-separated sales order ids of one assignment")):
+    """In-memory status of the assignment email (queued/sent/failed/skipped). No database access."""
+    return assignment_email_status.summarize([value.strip() for value in ids.split(",") if value.strip()])
 
 
 @router.get("/{salesorder_id}")
@@ -349,7 +430,26 @@ def assign_order(salesorder_id: str, body: AssignmentBody, current_user: Current
             logger.warning("[FLEET_HEALTH] overload issue not recorded for %s: %s", body.vehicle_id, exc)
     invalidate_fleet_cache()
     _invalidate_assignment_options_cache()
-    return {"success": True, "salesorder_ids": [item.id for item in orders], "vehicle_id": body.vehicle_id, "driver_id": primary_driver_id, "driver_ids": driver_ids, "assignment_status": "assigned", "over_capacity": bool(over_capacity), "over_capacity_kg": max((o["over_kg"] for o in over_capacity), default=0.0), "over_capacity_percent": max((o["over_percent"] or 0.0 for o in over_capacity), default=0.0), "capacity_verified": all(value is not None for value in known_weights + existing_weights), "capacity_warning": None if all(value is not None for value in known_weights + existing_weights) else "Assignment completed, but one or more Zoho package weights were unavailable; capacity must be verified before dispatch."}
+    response = {"success": True, "salesorder_ids": [item.id for item in orders], "vehicle_id": body.vehicle_id, "driver_id": primary_driver_id, "driver_ids": driver_ids, "assignment_status": "assigned", "over_capacity": bool(over_capacity), "over_capacity_kg": max((o["over_kg"] for o in over_capacity), default=0.0), "over_capacity_percent": max((o["over_percent"] or 0.0 for o in over_capacity), default=0.0), "capacity_verified": all(value is not None for value in known_weights + existing_weights), "capacity_warning": None if all(value is not None for value in known_weights + existing_weights) else "Assignment completed, but one or more Zoho package weights were unavailable; capacity must be verified before dispatch."}
+    # Automatic notification, as before the Send button existed: one email per driver (all their SOs) + one team
+    # email, then WhatsApp/SMS/voice subject to their own pause switches. A failure here never undoes the assignment.
+    order_ids_assigned = [item.id for item in orders]
+    batch_id = uuid.uuid4().hex  # one id per assignment click: Retry/Resend can never merge two assignments to the same truck
+    response["assignment_batch_id"] = batch_id
+    if not driver_ids:
+        assignment_email_status.record(order_ids_assigned, "skipped", error="skipped: no driver selected", batch_id=batch_id)
+        response["notifications"] = {"skipped": True, "reason": "No driver selected."}
+    else:
+        try:
+            response["notifications"] = send_assignment_email(
+                AssignmentEmailBody(salesorder_ids=order_ids_assigned, vehicle_id=body.vehicle_id, driver_ids=driver_ids, manual_vehicle=body.manual_vehicle,
+                                    assigned_by=current_user.full_name or current_user.email, assignment_batch_id=batch_id),
+                current_user, db)
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("[GMAIL_SEND] automatic assignment notification failed for %s", order_ids_assigned)
+            assignment_email_status.record(order_ids_assigned, "failed", error=f"Could not queue the assignment email: {getattr(exc, 'detail', None) or exc}", batch_id=batch_id)
+            response["notifications"] = {"success": False, "error": str(getattr(exc, "detail", None) or exc)}
+    return response
 
 
 @router.post("/{salesorder_id}/unassign")
@@ -416,6 +516,14 @@ def send_assignment_email(body: AssignmentEmailBody, current_user: CurrentUser =
     if not secret and not body.preview:
         logger.warning("INTELLIFLEET_ASSIGNMENT_WEBHOOK_SECRET is not set: WhatsApp/SMS n8n notifications are skipped; email is unaffected")
     ids = body.salesorder_ids
+    if body.assignment_batch_id and (body.resend or body.email_only):
+        batch = live_sales_order_cache.ids_for_batch(body.assignment_batch_id)
+        if not batch:
+            raise HTTPException(404, "That assignment was not found (or is no longer assigned).")
+        if set(ids) - set(batch):
+            raise HTTPException(409, "These sales orders belong to different assignments; resend each assignment separately.")
+        ids = batch  # the whole assignment, however many of its orders the caller happened to list
+    new_batch_id = None if (body.resend or body.email_only) else body.assignment_batch_id  # only a fresh assignment writes the id
     if not ids:
         raise HTTPException(400, "At least one sales order is required.")
     orders = [o for o in (live_sales_order_cache.find_cached(oid) or live_sales_order_cache.ensure_zoho_data(oid) for oid in ids) if o is not None]
@@ -425,6 +533,8 @@ def send_assignment_email(body: AssignmentEmailBody, current_user: CurrentUser =
     manual_profile = _manual_vehicle_profile(body.manual_vehicle, body.vehicle_id)
     profile = profile or manual_profile
     if not driver_ids and profile and profile.is_third_party:
+        if not body.preview:
+            assignment_email_status.record([o.id for o in orders], "skipped", error="skipped: third-party truck has no staff recipient", batch_id=new_batch_id)
         return {"skipped": True, "reason": "Third-party vehicle has no staff recipient."}
     if not driver_ids or any(row is None for row in driver_rows):
         raise HTTPException(404, "Driver was not found.")
@@ -445,6 +555,9 @@ def send_assignment_email(body: AssignmentEmailBody, current_user: CurrentUser =
     if body.preview:
         return {"driverHtmlBody": generated_driver_html, "driverSubject": driver_subject, "teamHtmlBody": team_html, "teamSubject": team_subject}
     driver_html = body.html_body or generated_driver_html
+    driver_text = None if body.html_body else _assignment_email_text(profile, orders)  # edited HTML: the text part is derived from it
+    email_only = body.resend or body.email_only  # Resend / Retry: email only, never re-notify by WhatsApp/SMS/voice
+    email_jobs: list = []
     sales_orders_payload = [{"soNumber": order.salesorder_number, "clientName": order.customer_name, "totalKgs": _weight(order), "totalPacks": packs(order), "shippingAddress": address(order)} for order in orders]
     # Every selected driver gets their own notification pass across all four
     # channels (email/whatsapp/sms/voice), each addressed to that driver's own
@@ -472,15 +585,12 @@ def send_assignment_email(body: AssignmentEmailBody, current_user: CurrentUser =
             "teamSubject": team_subject if index == 0 else None,
             "teamHtmlBody": team_html if index == 0 else None,
         }
-        if not gmail_sender.configured():
-            logger.error("[GMAIL_SEND] assignment emails NOT sent for driver %s: Gmail is not configured (GMAIL_COMMS_*)", driver.name)
-        else:
-            _notification_pool.submit(_send_assignment_emails_direct, driver, payload["driverSubject"], driver_html, payload["teamSubject"], payload["teamHtmlBody"], assignment_key)
-        if voice_paused:
+        email_jobs.append((driver, payload["driverSubject"], driver_html, payload["teamSubject"], payload["teamHtmlBody"], driver_text))
+        if not email_only and voice_paused:
             voice_control.log_skipped(so_numbers=so_numbers, driver=driver.name)
-        if whatsapp_paused:
+        if not email_only and whatsapp_paused:
             whatsapp_control.log_skipped(so_numbers=so_numbers, recipient=driver.name)
-        for webhook in _NOTIFICATION_WEBHOOKS:
+        for webhook in ([] if email_only else _NOTIFICATION_WEBHOOKS):
             if webhook == _VOICE_WEBHOOK and (voice_direct or voice_paused):
                 continue
             if webhook == _WHATSAPP_WEBHOOK and whatsapp_paused:
@@ -488,7 +598,15 @@ def send_assignment_email(body: AssignmentEmailBody, current_user: CurrentUser =
             if not secret:
                 continue  # WhatsApp/SMS n8n webhooks cannot be called without their secret
             _notification_pool.submit(_send_notification, webhook, secret, payload)
-    if voice_direct and not voice_paused:
+    # Email is independent of the WhatsApp / AI-call pause switches: it is always queued here.
+    batch_ids = [order.id for order in orders]
+    if not gmail_sender.configured():
+        logger.error("[GMAIL_SEND] assignment emails NOT sent: Gmail is not configured (GMAIL_COMMS_*)")
+        assignment_email_status.record(batch_ids, "failed", error="Gmail is not configured on the server (GMAIL_COMMS_*)", batch_id=new_batch_id)
+    else:
+        assignment_email_status.record(batch_ids, "queued", batch_id=new_batch_id)
+        _notification_pool.submit(_send_batch_emails, email_jobs, batch_ids, assignment_key, email_only)
+    if voice_direct and not voice_paused and not email_only:
         # VOICE_PROVIDER=direct: one Vapi call per driver straight from here, replacing the
         # n8n voice-call webhook. The other three channels above are unchanged.
         _notification_pool.submit(
@@ -507,3 +625,25 @@ def send_assignment_email(body: AssignmentEmailBody, current_user: CurrentUser =
     n8n_status = "queued" if secret else "skipped_missing_secret"
     channels = {"email": email_status, "whatsapp": "paused" if whatsapp_paused else n8n_status, "sms": n8n_status, "voice": "paused" if voice_paused else ("queued_direct" if voice_direct else n8n_status)}
     return {"success": True, "dispatched": [name for name, state in channels.items() if state.startswith("queued")], "channels": channels, "emailStatus": email_status, "voice": channels["voice"], "voiceByDriver": {d.name: channels["voice"] for d in drivers}, "drivers": [d.name for d in drivers], "message": "Notifications dispatched asynchronously."}
+
+
+def render_test_assignment_email(driver_email: str, so_numbers: list[str] | None = None) -> tuple[str, str, str, str]:
+    """(subject, html, text, source) for the admin test endpoint. Same renderer and data shape as a real
+    assignment, but nothing is assigned and Zoho is never called: orders come from the in-memory cache
+    when they are there, otherwise sample rows."""
+    wanted = {str(n).strip().upper() for n in (so_numbers or []) if str(n).strip()}
+    cached = [o for o in live_sales_order_cache.cached_assigned_records() if str(o.salesorder_number or "").upper() in wanted] if wanted else []
+    if cached:
+        orders, source = cached, "cached sales orders"
+    else:
+        orders = [
+            SimpleNamespace(id="sample-1", salesorder_number="SO-TEST-0001", customer_name="Sample Customer A", shipping_address=None,
+                            raw_json={"shipping_address": {"address": "123 Sample St", "city": "Quezon City", "country": "Philippines"}, "line_items": [{"quantity": 12, "unit": "kg"}, {"quantity": 6, "unit": "kg"}]}),
+            SimpleNamespace(id="sample-2", salesorder_number="SO-TEST-0002", customer_name="Sample Customer B", shipping_address=None,
+                            raw_json={"shipping_address": {"address": "45 Example Ave", "city": "Makati", "country": "Philippines"}, "line_items": [{"quantity": 30, "unit": "kg"}]}),
+        ]
+        source = "sample rows"
+    drivers = [SimpleNamespace(name="Test Driver", email=driver_email, warehouse="METS")]
+    profile = SimpleNamespace(plate_no="TEST-TRUCK", capacity_note=None)
+    subject, html, _ = _assignment_email_html(drivers, profile, orders, "IntelliFleet test", datetime.now(timezone.utc).isoformat(), weight_fn=_weight_cached)
+    return f"[TEST] {subject}", html, _assignment_email_text(profile, orders, weight_fn=_weight_cached), source
