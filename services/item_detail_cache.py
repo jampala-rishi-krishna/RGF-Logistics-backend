@@ -110,14 +110,6 @@ def _batch_refresh_worker(keys: list[str]) -> None:
                     )
                     if item_id:
                         by_id[item_id] = _trim(item)
-            # Some Zoho tenants silently omit unsupported IDs from the batch result.
-            # Complete those gaps individually so one partial batch cannot leave every
-            # affected row displaying an unknown stock value.
-            missing = [key for key in keys if key not in by_id]
-            for key in missing:
-                entry = fetch(key)
-                if entry is not None:
-                    by_id[key] = entry
             now = time.monotonic()
             with _lock:
                 for key, entry in by_id.items():
