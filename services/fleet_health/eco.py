@@ -78,15 +78,17 @@ def co2_kg(litres: float | None) -> float | None:
 # ---------------------------------------------------------------------------------------------------------
 def rollup(rows: list[dict]) -> dict:
     """Totals for a set of daily rows (any truck/driver/period)."""
-    total_km = sum(_f(r.get("km_driven")) for r in rows)
+    known_km_rows = [r for r in rows if r.get("km_driven") is not None]
+    total_km = sum(_f(r.get("km_driven")) for r in known_km_rows)
     assigned = [r for r in rows if r.get("assigned")]
+    assigned_known_km = [r for r in assigned if r.get("km_driven") is not None]
     classified_idle = [r for r in assigned if r.get("idle_seconds_elsewhere") is not None]
     engine = sum(_f(r.get("engine_seconds")) for r in rows)
     idle_total = sum(_f(r.get("idle_seconds_total")) for r in rows)
     return {
         "km": round(total_km, 1),
-        "assigned_km": round(sum(_f(r.get("km_driven")) for r in assigned), 1),
-        "unassigned_km": round(sum(_f(r.get("km_driven")) for r in rows if not r.get("assigned")), 1),
+        "assigned_km": round(sum(_f(r.get("km_driven")) for r in assigned_known_km), 1),
+        "unassigned_km": round(sum(_f(r.get("km_driven")) for r in known_km_rows if not r.get("assigned")), 1),
         "engine_hours": round(engine / 3600, 2),
         "driving_hours": round(max(0.0, engine - idle_total) / 3600, 2),
         "speeding_events": int(sum(_f(r.get("speeding_events")) for r in rows)),
@@ -98,6 +100,7 @@ def rollup(rows: list[dict]) -> dict:
         "unclassified_idle_min": round(sum(_f(r.get("idle_seconds_total")) for r in rows if r.get("idle_seconds_elsewhere") is None) / 60, 1),
         "max_speed_kmh": max((int(_f(r.get("max_speed_kmh"))) for r in rows), default=0),
         "days": len(rows),
+        "days_missing_km": len(rows) - len(known_km_rows),
     }
 
 

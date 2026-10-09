@@ -97,7 +97,7 @@ def eco_drivers(week: str | None = Query(None, description="Any date inside the 
     return {"week_start": start.isoformat(), "week_end": end.isoformat(), "min_km": config.ECO_MIN_KM_PER_WEEK, "weights": config.ECO_WEIGHTS,
             "fleet_kmpl_30d": eco_views.aggregate_kmpl(eco_views.intervals_ending_between(intervals, end - timedelta(days=29), end)), "drivers": drivers,
             "summary": {"avg_score": round(sum(scored) / len(scored)) if scored else None, "scored": len(scored), "not_enough_data": len(drivers) - len(scored)},
-            "unassigned": {"km": unassigned["km"], "days": unassigned["days"], "note": "Days with no assignment data are excluded from every driver score; idle on those days is not classified."}}
+            "unassigned": {"km": unassigned["km"], "days": unassigned["days"], "note": "Days with no assignment data, ambiguous multi-driver assignment, or unknown distance are excluded from individual driver scores; idle on unassigned days is not classified."}}
 
 
 @router.get("/eco/trucks", dependencies=[Depends(VIEW)])

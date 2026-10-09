@@ -5,8 +5,8 @@ Formulas (shown in the UI tooltip next to each number):
                   fallback 1: sum(trip_distance) / 1000
                   fallback 2: sum(end_odometer - start_odometer per trip) / 1000
   engine_seconds= sum(trip_duration_seconds)            (engine hours = seconds / 3600)
-  idle at stop  = idle seconds of trips whose start OR end is within 200 m of Mets, Glacier, or an SO delivery
-                  point assigned to that truck that day; every other trip's idle is "elsewhere"
+  idle at stop  = estimate: idle seconds of trips whose start OR end is within 200 m of Mets, Glacier, or an SO
+                  delivery point assigned to that truck that day; every other trip's idle is "elsewhere"
   electrical    = 24 V when the running average voltage > 20 V, else 12 V
   refuel        = fuel % rises > 10 points between two samples while stationary -> litres = rise% x capacity
   parked drop   = fuel % falls > 5 points within 2 h with the ignition OFF -> litres = drop% x capacity ("check")
@@ -237,7 +237,7 @@ def compute_daily_row(*, vehicle: dict, day: date, trips: list[dict], samples: l
         "harsh_acceleration": sum(_int(t.get("harsh_acceleration_events")) for t in day_trips),
         "harsh_cornering": sum(_int(t.get("harsh_cornering_events")) for t in day_trips),
     }
-    quality: dict = {"km_source": km_source, "trips_missing_distance": missing_distance, "idle_method": "trip start/end within 200 m of Mets, Glacier or an assigned SO delivery point"}
+    quality: dict = {"km_source": km_source, "trips_missing_distance": missing_distance, "idle_method": "estimate from trip start/end within 200 m of Mets, Glacier or an assigned SO delivery point"}
     if classified:
         quality.update(idle_split="classified", idle_trips_at_stop=near_trips)
     else:
@@ -272,7 +272,16 @@ def compute_daily_row(*, vehicle: dict, day: date, trips: list[dict], samples: l
         quality["capacity_unconfirmed"] = True
     assignments = assignments or []
     drivers = [a.get("driver_id") for a in assignments if a.get("driver_id") is not None]
-    row["primary_staff_id"] = Counter(drivers).most_common(1)[0][0] if drivers else None
+    driver_counts = Counter(drivers)
+    if len(driver_counts) == 1:
+        row["primary_staff_id"] = next(iter(driver_counts))
+    elif len(driver_counts) > 1:
+        row["primary_staff_id"] = None
+        quality["ambiguous_driver_attribution"] = True
+        quality["driver_candidates"] = sorted(driver_counts)
+        quality["driver_attribution_note"] = "multiple assigned drivers on this vehicle-day; excluded from individual eco scores"
+    else:
+        row["primary_staff_id"] = None
     row["assigned"] = bool(assignments)
     row["data_quality"] = quality
     return row

@@ -321,8 +321,11 @@ def test_partial_day_when_the_sampler_has_a_long_gap_or_no_samples():
 
 # ---- driver attribution --------------------------------------------------------------------------------
 
-def test_primary_driver_is_the_most_frequent_one_and_unassigned_is_explicit():
+def test_primary_driver_is_only_set_when_attribution_is_unambiguous():
     r = row_for([trip()], assignments=[{"driver_id": 13}, {"driver_id": 13}, {"driver_id": 7}])
+    assert (r["primary_staff_id"], r["assigned"]) == (None, True)
+    assert r["data_quality"]["ambiguous_driver_attribution"] is True
+    r = row_for([trip()], assignments=[{"driver_id": 13}, {"driver_id": 13}])
     assert (r["primary_staff_id"], r["assigned"]) == (13, True)
     r = row_for([trip()], assignments=[])
     assert (r["primary_staff_id"], r["assigned"]) == (None, False)

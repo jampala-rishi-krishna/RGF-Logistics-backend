@@ -49,7 +49,14 @@ def driver_scores(daily_rows: list[dict], fuel_rows: list[dict], week_start: dat
         end = start + timedelta(days=6)
         by_driver: dict[int, list[dict]] = defaultdict(list)
         for row in daily_rows:
-            if start <= row["stat_date"] <= end and row.get("assigned") and row.get("primary_staff_id") is not None:
+            quality = row.get("data_quality") or {}
+            if (
+                start <= row["stat_date"] <= end
+                and row.get("assigned")
+                and row.get("primary_staff_id") is not None
+                and row.get("km_driven") is not None
+                and not quality.get("ambiguous_driver_attribution")
+            ):
                 by_driver[row["primary_staff_id"]].append(row)
         result = {}
         for staff_id, rows in by_driver.items():

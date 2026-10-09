@@ -286,7 +286,7 @@ def test_open_flags_and_failed_checklists_feed_the_risk_score(engine, db):
     api.post("/api/fleet-health/pretrip-checklists", json={"vehicle_id": 4, "items": {**ALL_OK, "tires": "issue"}})
     t = truck(api, 4)
     parts = {p["key"]: p["points"] for p in t["risk"]["breakdown"]}
-    assert parts["flags"] == 15 + 5 + 5 and parts["checklists"] == 5          # the failed checklist also opened a warning flag
+    assert parts["flags"] == 15 + 5 and parts["checklists"] == 5              # checklist flags are visible but not double-counted
     assert t["open_flags_count"] == 3 and t["critical_flags_count"] == 1 and t["last_checklist"]["passed"] is False
 
 
@@ -434,10 +434,12 @@ def test_eco_drivers_endpoint_scores_ranks_and_explains(engine, db):
 def test_eco_trucks_endpoint_separates_unassigned_km_and_never_shows_zeros_for_missing_data(engine, db):
     seed_week(db, staff=13, vehicle=4, km=200)
     db.add(VehicleDailyStat(vehicle_id=4, stat_date=today() - timedelta(days=1), km_driven=50.0, engine_seconds=3600, idle_seconds_total=600, assigned=False, data_quality={}))
+    db.add(VehicleDailyStat(vehicle_id=4, stat_date=today() - timedelta(days=2), km_driven=None, engine_seconds=3600, idle_seconds_total=300, assigned=True, primary_staff_id=13, data_quality={"km_source": "none"}))
     db.commit()
     data = client(engine).get("/api/fleet-health/eco/trucks").json()
     by_plate = {t["plate"]: t for t in data["trucks"]}
     assert by_plate["NFX5791"]["totals"]["unassigned_km"] == 50.0 and by_plate["NFX5791"]["totals"]["assigned_km"] == 200.0
+    assert by_plate["NFX5791"]["totals"]["days_missing_km"] == 1
     assert by_plate["NFX5791"]["totals"]["unclassified_idle_min"] == 10.0 and by_plate["NFX5791"]["kmpl"] is None and by_plate["NFX5791"]["litres"] is None and by_plate["NFX5791"]["co2_kg"] is None
     assert by_plate["DCD8955"]["totals"] is None and by_plate["DCD8955"]["days_with_data"] == 0          # tracked but no data yet: null, not zero
     assert "Motorcycle 1" not in by_plate and "ASIAN CONNECT" not in by_plate

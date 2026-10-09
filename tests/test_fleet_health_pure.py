@@ -38,10 +38,11 @@ def test_usage_is_the_worst_of_km_hours_and_days():
 
 
 def test_no_record_never_guesses_and_missing_data_is_explicit():
-    assert status(last_record=None) == {"status": "no_record", "usage_pct": None, "components": {}, "interval": {"km": 10000, "engine_hours": 250, "days": 180, "confirmed": False, "scope": "fleet"}}
+    never = status(last_record=None)
+    assert never == {"status": "no_record", "usage_pct": None, "components": {}, "interval": {"km": 10000, "engine_hours": 250, "days": 180, "confirmed": False, "scope": "fleet"}, "note": "never serviced in Fleet Health"}
     assert status(interval=None)["status"] == "not_tracked"
     no_data = status(interval={**INTERVAL, "interval_days": None, "interval_engine_hours": None}, odometer_km=None)
-    assert no_data["status"] == "no_record" and "missing odometer" in no_data["note"]
+    assert no_data["status"] == "no_record" and "usage data is missing" in no_data["note"]
 
 
 def test_truck_override_beats_fleet_default_and_inactive_is_ignored():
@@ -89,8 +90,8 @@ def test_battery_flag_after_two_consecutive_warning_days_or_one_critical():
 
 
 # ---- risk score ------------------------------------------------------------------------------------------------
-def flag(sev):
-    return {"severity": sev}
+def flag(sev, source="manual"):
+    return {"severity": sev, "source": source}
 
 
 def test_risk_score_weights_caps_bands_and_breakdown():
@@ -105,6 +106,8 @@ def test_risk_score_weights_caps_bands_and_breakdown():
     flags = risk.risk_score(service_statuses=ok, open_flags=[flag("critical")] * 3 + [flag("warning")] * 4, failed_checklists_7d=0, overloads_30d=0, repairs_90d=0)
     assert flags["score"] == 25                              # 3x15 + 4x5 = 65, capped at 25
     assert risk.risk_score(service_statuses=ok, open_flags=[flag("info")], failed_checklists_7d=0, overloads_30d=0, repairs_90d=0)["score"] == 0
+    checklist = risk.risk_score(service_statuses=ok, open_flags=[flag("critical", "checklist")], failed_checklists_7d=1, overloads_30d=0, repairs_90d=0)
+    assert checklist["score"] == 5 and checklist["breakdown"][1]["points"] == 0 and checklist["breakdown"][2]["points"] == 5
     caps = risk.risk_score(service_statuses=ok, open_flags=[], failed_checklists_7d=9, overloads_30d=40, repairs_90d=9)
     assert [p["points"] for p in caps["breakdown"]] == [0, 0, 15, 10, 10] and caps["score"] == 35 and caps["band"] == "medium"
 
@@ -205,6 +208,11 @@ def test_unassigned_km_stays_in_truck_totals_but_idle_is_unclassified():
     assert totals["idle_elsewhere_min"] == 60.0 and totals["unclassified_idle_min"] == 30.0
 
 
+def test_missing_distance_is_not_counted_as_zero_km():
+    totals = eco.rollup([drow(km=100), drow(km=None, offset=1)])
+    assert (totals["km"], totals["assigned_km"], totals["days_missing_km"]) == (100.0, 100.0, 1)
+
+
 def test_driver_scores_only_count_assigned_days_and_rank_with_trend(monkeypatch):
     monkeypatch.setattr(eco_views, "staff_name", lambda sid: {13: "Juan", 7: "Pedro"}.get(sid, f"Driver #{sid}"))
     monday = date(2026, 9, 28)
@@ -218,6 +226,19 @@ def test_driver_scores_only_count_assigned_days_and_rank_with_trend(monkeypatch)
     assert juan["totals"]["assigned_km"] == 100.0 and juan["trucks"] == ["NFX5791"]
     assert juan["previous_score"] is not None and juan["trend"] == juan["score"] - juan["previous_score"]
     assert board[1]["score"] < juan["score"]
+
+
+def test_driver_scores_exclude_unknown_distance_and_ambiguous_driver_days(monkeypatch):
+    monkeypatch.setattr(eco_views, "staff_name", lambda sid: f"Driver #{sid}")
+    monday = date(2026, 9, 28)
+    rows = [
+        drow(km=60, staff=13, offset=0),
+        drow(km=None, staff=13, offset=1),
+        {**drow(km=200, staff=13, offset=2), "data_quality": {"ambiguous_driver_attribution": True}},
+    ]
+    [driver] = eco_views.driver_scores(rows, [], monday, plate_of={4: "NFX5791"})
+    assert driver["totals"]["assigned_km"] == 60.0
+    assert driver["score"] == 100
 
 
 def test_scorecard_message_picks_the_biggest_penalty_and_skips_unscored():

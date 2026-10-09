@@ -5,7 +5,7 @@ Service usage  = max(km since last service / interval_km, engine hours since / i
 Battery day    = critical if parked minimum is below the critical limit; warning if below the warning limit or if the
                  running (charging) average is outside the normal range ("check alternator/charging"). 12 V vs 24 V is
                  inferred from the running average (> 20 V = 24 V system). A flag needs 2 consecutive warning days, or 1 critical day.
-Risk score     = service (0-40) + open flags (cap 25) + failed checklists 7 d (cap 15) + overloads 30 d (cap 10) + repairs 90 d (cap 10)
+Risk score     = service (0-40) + non-checklist open flags (cap 25) + failed checklists 7 d (cap 15) + overloads 30 d (cap 10) + repairs 90 d (cap 10)
                  Low 0-29 | Medium 30-59 | High 60+ ; "Needs attention this week" = High, or any service Overdue.
 """
 from __future__ import annotations
@@ -33,7 +33,7 @@ def service_status(*, interval: dict | None, last_record: dict | None, odometer_
     if interval is None:
         return {"status": "not_tracked", "usage_pct": None, "components": {}}
     if last_record is None:
-        return {"status": "no_record", "usage_pct": None, "components": {}, "interval": _interval_view(interval)}
+        return {"status": "no_record", "usage_pct": None, "components": {}, "interval": _interval_view(interval), "note": "never serviced in Fleet Health"}
     components: dict[str, dict] = {}
     raw: dict[str, float] = {}   # unrounded usage, so a band is never decided on a rounded number (79.99% stays "OK")
     if interval.get("interval_km") and odometer_km is not None and last_record.get("odometer_km") is not None:
@@ -48,7 +48,7 @@ def service_status(*, interval: dict | None, last_record: dict | None, odometer_
         raw["days"] = days_since / interval["interval_days"] * 100
         components["days"] = {"since": days_since, "interval": interval["interval_days"], "pct": round(raw["days"], 1)}
     if not components:
-        return {"status": "no_record", "usage_pct": None, "components": {}, "interval": _interval_view(interval), "note": "missing odometer/engine data to measure usage"}
+        return {"status": "no_record", "usage_pct": None, "components": {}, "interval": _interval_view(interval), "note": "service exists, but usage data is missing"}
     driver = max(raw, key=raw.get)
     usage = raw[driver]
     if usage > config.SERVICE_OVERDUE_ABOVE * 100:
@@ -134,18 +134,19 @@ def risk_score(*, service_statuses: dict[str, dict], open_flags: list[dict], fai
         service_pts = W["service_due_soon_points"]
     else:
         service_pts = 0
-    flag_raw = sum(W["flag_points"].get(f["severity"], 0) for f in open_flags)
+    scorable_flags = [f for f in open_flags if f.get("source") != "checklist"]
+    flag_raw = sum(W["flag_points"].get(f["severity"], 0) for f in scorable_flags)
     flag_pts = min(flag_raw, W["flag_cap"])
     checklist_pts = min(failed_checklists_7d * W["failed_checklist_points"], W["failed_checklist_cap"])
     overload_pts = min(overloads_30d * W["overload_points"], W["overload_cap"])
     repair_pts = min(repairs_90d * W["repair_points"], W["repair_cap"])
     total = min(100, service_pts + flag_pts + checklist_pts + overload_pts + repair_pts)
     band = next(name for name, floor in config.RISK_BANDS if total >= floor)
-    crit = sum(1 for f in open_flags if f["severity"] == "critical")
-    warn = sum(1 for f in open_flags if f["severity"] == "warning")
+    crit = sum(1 for f in scorable_flags if f["severity"] == "critical")
+    warn = sum(1 for f in scorable_flags if f["severity"] == "warning")
     breakdown = [
         {"key": "service", "label": "Service", "points": service_pts, "max": W["service_overdue_points"], "detail": f"worst usage {worst:.0f}% ({len(overdue)} overdue)" if worst else "no service usage measured", "formula": "100%+ of any interval = 40, 80-100% = 20"},
-        {"key": "flags", "label": "Open issues", "points": flag_pts, "max": W["flag_cap"], "detail": f"{crit} critical x {W['flag_points']['critical']} + {warn} warning x {W['flag_points']['warning']}", "formula": "critical 15 each, warning 5 each, capped at 25"},
+        {"key": "flags", "label": "Open issues", "points": flag_pts, "max": W["flag_cap"], "detail": f"{crit} critical x {W['flag_points']['critical']} + {warn} warning x {W['flag_points']['warning']} (checklist-sourced issues are counted under failed checks)", "formula": "critical 15 each, warning 5 each, capped at 25; checklist flags are not double-counted"},
         {"key": "checklists", "label": "Failed pre-trip checks (7 d)", "points": checklist_pts, "max": W["failed_checklist_cap"], "detail": f"{failed_checklists_7d} failed", "formula": "5 each, capped at 15"},
         {"key": "overloads", "label": "Overloaded trips (30 d)", "points": overload_pts, "max": W["overload_cap"], "detail": f"{overloads_30d} flagged", "formula": "2 each, capped at 10"},
         {"key": "repairs", "label": "Repairs / downtime (90 d)", "points": repair_pts, "max": W["repair_cap"], "detail": f"{repairs_90d} repair record(s)", "formula": "5 each, capped at 10"},
