@@ -244,6 +244,7 @@ app.include_router(zoho_webhooks.router)
 def health():
     if not schema_state["ok"]:
         return JSONResponse(status_code=503, content={"status": "schema_mismatch", **schema_state, "workers": configured_worker_count(), "instance_id": INSTANCE_ID})
+    zoho_snapshot = zoho_usage.snapshot()
     return {
         "status": "ok",
         "schema_revision": schema_state["current"],
@@ -258,8 +259,8 @@ def health():
         "voice_calls": voice_control.mode(),
         "fleet_health_sampler": fleet_health_sampler.health(),
         "whatsapp_messages": whatsapp_control.mode(),
-        "zoho_calls_today": zoho_usage.snapshot()["zoho_calls_today"],
-        "zoho_usage": zoho_usage.snapshot(),
+        "zoho_calls_today": zoho_snapshot["zoho_calls_today"],
+        "zoho_usage": zoho_snapshot,
     }
 
 @app.exception_handler(SQLAlchemyError)

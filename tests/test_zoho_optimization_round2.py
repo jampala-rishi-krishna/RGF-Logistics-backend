@@ -1,4 +1,5 @@
 import os
+import tempfile
 import unittest
 from datetime import date, datetime
 from types import SimpleNamespace
@@ -192,6 +193,25 @@ class Round2OptimizationTests(unittest.TestCase):
         self.assertEqual(snap["by_feature"]["so_detail"], 1)
         self.assertEqual(snap["by_feature"]["inventory_list"], 1)
         self.assertEqual(snap["guard"], "warn")
+
+    def test_zoho_usage_persists_for_the_manila_day(self):
+        with tempfile.TemporaryDirectory() as tmp, patch.dict(os.environ, {"ZOHO_USAGE_STATE_DIR": tmp}):
+            zoho_usage.reset()
+            zoho_usage.record_call("so_detail")
+            first = zoho_usage.snapshot()
+            self.assertEqual(first["zoho_calls_today"], 1)
+
+            # Simulate a fresh backend process by clearing only module memory, not the state file.
+            zoho_usage._loaded = False
+            zoho_usage._day = ""
+            zoho_usage._total = 0
+            zoho_usage._by_feature.clear()
+            zoho_usage._by_hour.clear()
+
+            second = zoho_usage.snapshot()
+            self.assertEqual(second["zoho_calls_today"], 1)
+            self.assertEqual(second["by_feature"]["so_detail"], 1)
+            self.assertEqual(second["scope"], "persisted_local_day")
 
 
 if __name__ == "__main__":
