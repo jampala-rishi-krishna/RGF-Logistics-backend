@@ -356,15 +356,15 @@ def list_sales_orders(
             branch_counts[found["id"]] = branch_counts.get(found["id"], 0) + 1
             seen_branches.setdefault(found["id"], found)
     rows = [row for row in all_branch_rows if _row_in_branches(row, wanted_branches)] if wanted_branches else all_branch_rows
-    # Never block the list on per-item Zoho calls: serve cached stock/weights (stale is fine),
-    # fill the gaps in the background, and tell the UI to poll while anything is still missing.
-    live_rows = [row for row in rows if not isinstance(row, SalesOrderHistory)]
-    stock, waiting = stock_for_orders_cached(live_rows) if live_rows else ({}, 0)
-    for row in rows:
-        setattr(row, "_mets_qty_available_for_sale", stock.get(f"{row.id}:mets"))
-        setattr(row, "_glacier_qty_available_for_sale", stock.get(f"{row.id}:glacier"))
     start_index = (page - 1) * per_page
     page_rows = rows[start_index : start_index + per_page]
+    # Never block the list on per-item Zoho calls: serve cached stock/weights (stale is fine),
+    # fill only the visible page in the background, and tell the UI to poll while it settles.
+    live_rows = [row for row in page_rows if not isinstance(row, SalesOrderHistory)]
+    stock, waiting = stock_for_orders_cached(live_rows) if live_rows else ({}, 0)
+    for row in page_rows:
+        setattr(row, "_mets_qty_available_for_sale", stock.get(f"{row.id}:mets"))
+        setattr(row, "_glacier_qty_available_for_sale", stock.get(f"{row.id}:glacier"))
     saved_page = [row.id for row in page_rows if isinstance(row, SalesOrderHistory)]
     if saved_page:
         # Past-dated orders: queue a background fetch of each line's item so its stock fills in.
