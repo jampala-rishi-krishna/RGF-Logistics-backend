@@ -8,10 +8,27 @@ from sqlalchemy.orm import Session
 from auth.dependencies import require_role
 from database import get_db
 from models.user import User
-from services import memory_tables
+from services import memory_tables, zoho_usage
 from services.audit import list_audit_log as _list_audit_log
 
 router = APIRouter(tags=["admin"], dependencies=[Depends(require_role("admin"))])
+
+# Same admin auth as the Users page. Lives under /api/admin like the other admin switches.
+usage_router = APIRouter(prefix="/api/admin", tags=["admin"], dependencies=[Depends(require_role("admin"))])
+
+
+@usage_router.get("/zoho-usage")
+def get_zoho_usage():
+    """Usage tile data. Does at most one Neon read per 5 minutes (refresh_if_stale), only while this is polled."""
+    zoho_usage.refresh_if_stale()
+    snap = zoho_usage.snapshot()
+    return {
+        "zoho_calls_today": snap["zoho_calls_today"],
+        "process_started_at": snap["process_started_at"],
+        "usage_restored_from_db": snap["usage_restored_from_db"],
+        "zoho_usage": snap,
+    }
+
 
 VALID_INTEGRATION_STATES = {"not_connected", "sandbox", "live"}
 

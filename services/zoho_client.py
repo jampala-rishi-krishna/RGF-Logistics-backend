@@ -49,6 +49,14 @@ def api_call_count() -> int:
     return int((_request_metrics.get() or {}).get("api_calls", 0))
 
 
+def _is_background() -> bool:
+    return zoho_acquisition.route_context().get("route") == "background"
+
+
+def api_domain() -> str:
+    return os.environ.get("ZOHO_API_DOMAIN", "https://www.zohoapis.com")
+
+
 def _required(name: str) -> str:
     value = os.environ.get(name, "").strip()
     if not value:
@@ -70,6 +78,7 @@ def _refresh_access_token() -> str:
     if _access_token and time.time() < _access_token_expires_at - 60:
         return _access_token
     try:
+        zoho_usage.record_call("token_refresh", background=_is_background())  # tracked, excluded from total/budget
         response = httpx.post(
             f"{os.environ.get('ZOHO_ACCOUNTS_URL', 'https://accounts.zoho.com')}/oauth/v2/token",
             data={
@@ -96,7 +105,7 @@ def _refresh_access_token() -> str:
 
 def _request(method: str, path: str, params: dict, *, feature: str = "other") -> dict:
     feature = feature if feature != "other" else zoho_usage.current_feature()
-    url = f"{os.environ.get('ZOHO_API_DOMAIN', 'https://www.zohoapis.com')}/inventory/v1/{path}"
+    url = f"{api_domain()}/inventory/v1/{path}"
     query = {"organization_id": _required("ZOHO_ORG_ID"), **params}
     if method == "GET":
         key = (method, url, os.environ.get("ZOHO_CLIENT_ID", ""), json.dumps(query, sort_keys=True))
@@ -179,7 +188,7 @@ def _request_http(method: str, path: str, url: str, query: dict, logical_id: str
             token = get_access_token()  # Accounts endpoint: deliberately not gated as Inventory
             with limiter.admit() as ticket:
                 started = time.monotonic()
-                zoho_usage.record_call(feature)
+                zoho_usage.record_call(feature, background=route.get("route") == "background")
                 metrics = _request_metrics.get()
                 if metrics is not None:
                     metrics["api_calls"] = int(metrics.get("api_calls", 0)) + 1
@@ -297,7 +306,7 @@ def fetch_sales_order_detail(salesorder_id: str) -> dict:
 
 def fetch_item_detail(item_id: str) -> dict:
     """Fetch structured Zoho item/package data for weight calculations."""
-    return _request_with_feature("GET", f"items/{item_id}", {}, "stock")
+    return _request_with_feature("GET", f"items/{item_id}", {}, "item_detail")
 
 
 def fetch_item_details_batch(item_ids: list[str]) -> dict:
@@ -310,7 +319,7 @@ def fetch_item_details_batch(item_ids: list[str]) -> dict:
     ids = ",".join(dict.fromkeys(str(item_id) for item_id in item_ids if item_id))
     if not ids:
         return {"items": []}
-    return _request_with_feature("GET", "items", {"item_ids": ids, "per_page": min(200, len(ids.split(',')))}, "stock")
+    return _request_with_feature("GET", "items", {"item_ids": ids, "per_page": min(200, len(ids.split(',')))}, "items_batch")
 
 
 def fetch_sales_orders_by_customview(customview_id: str, page: int = 1, per_page: int = 200) -> dict:

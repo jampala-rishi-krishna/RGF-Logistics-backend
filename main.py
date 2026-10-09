@@ -114,6 +114,9 @@ async def lifespan(app: FastAPI):
     if workers > 1:
         logger.error("[CONFIG] multiple workers detected, acknowledge state is per-process")
     agent_tools.log_internal_api_config()
+    # Restore today's Zoho call total from Neon BEFORE anything may call Zoho, so the counter and the
+    # budget guard survive restarts (fails safe if Neon is unreachable). Flushes every 60s and at lifespan shutdown (uvicorn's own SIGTERM handling is untouched).
+    zoho_usage.start(INSTANCE_ID)
     if not schema_state["ok"]:
         logger.error("[SCHEMA] Startup stopped before cache queries; run 'python -m alembic upgrade head'.")
         raise SystemExit(2)
@@ -184,6 +187,7 @@ async def lifespan(app: FastAPI):
     yield
 
     scheduler.shutdown(wait=False)
+    zoho_usage.stop()
 
 
 app = FastAPI(title="IntelliFleet API", lifespan=lifespan)
@@ -222,6 +226,7 @@ app.include_router(routes.router)
 app.include_router(comms.router)
 app.include_router(warehouse.router)
 app.include_router(admin.router)
+app.include_router(admin.usage_router)
 app.include_router(agent.router)
 app.include_router(optimization.router)
 app.include_router(load_planning.router)
@@ -259,6 +264,8 @@ def health():
         "voice_calls": voice_control.mode(),
         "fleet_health_sampler": fleet_health_sampler.health(),
         "whatsapp_messages": whatsapp_control.mode(),
+        "process_started_at": zoho_snapshot["process_started_at"],
+        "usage_restored_from_db": zoho_snapshot["usage_restored_from_db"],
         "zoho_calls_today": zoho_snapshot["zoho_calls_today"],
         "zoho_usage": zoho_snapshot,
     }

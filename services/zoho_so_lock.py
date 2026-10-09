@@ -9,7 +9,7 @@ import time
 
 import httpx
 
-from services import zoho_rate_limiter, zoho_usage
+from services import zoho_acquisition, zoho_rate_limiter, zoho_usage
 from services.zoho_client import REQUEST_TIMEOUT, ZohoError
 
 logger = logging.getLogger("zoho")
@@ -71,6 +71,7 @@ def _refresh_access_token() -> str:
     if _access_token and time.time() < _access_token_expires_at - 60:
         return _access_token
     try:
+        zoho_usage.record_call("token_refresh", background=zoho_acquisition.route_context().get("route") == "background")
         response = httpx.post(
             f"{os.environ.get('ZOHO_ACCOUNTS_URL', 'https://accounts.zoho.com')}/oauth/v2/token",
             data={
@@ -126,7 +127,7 @@ def _request(method: str, url: str, *, params: dict | None = None, data: dict | 
     limiter = zoho_rate_limiter.limiter_for(org_id)
     token = get_access_token()  # Accounts endpoint: not gated as Inventory (same as the main client)
     with limiter.admit():
-        zoho_usage.record_call("lock_status")
+        zoho_usage.record_call("lock_status", background=zoho_acquisition.route_context().get("route") == "background")
         return httpx.request(
             method,
             url,
@@ -244,7 +245,7 @@ def _lock_via_webhook(so_id: str, status: dict) -> dict:
         url = _required("ZOHO_SO_LOCK_WEBHOOK_URL")
         limiter = zoho_rate_limiter.limiter_for(_required("ZOHO_ORG_ID"))
         with limiter.admit():
-            zoho_usage.record_call("lock_status")
+            zoho_usage.record_call("lock_status", background=zoho_acquisition.route_context().get("route") == "background")
             response = httpx.request("POST", url, json={"salesorder_id": so_id}, timeout=REQUEST_TIMEOUT)
     except ZohoError as exc:
         return {"locked": False, "already_locked": False, "lock_status": status, "lock_error": _connection_error(exc)}

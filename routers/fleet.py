@@ -28,7 +28,7 @@ from services.sales_order_location import shipping_city
 from services.item_weight import calculate_line_weight_kg
 from services.delivery_status import is_delivered, sales_order_delivery_status
 from services.zoho_client import ZohoError
-from services import zoho_acquisition
+from services import zoho_acquisition, zoho_usage
 
 router = APIRouter(tags=["fleet"])
 logger = logging.getLogger("fleet_refresh")
@@ -356,7 +356,7 @@ def refresh_vehicles(force: bool = False, db: Session = Depends(get_db)):
 def scheduled_fleet_sync() -> None:
     """Run the same authoritative Zoho reconciliation without a browser open."""
     try:
-        with SessionLocal() as db:
+        with zoho_usage.labelled("fleet_sync"), SessionLocal() as db:
             refresh_vehicles(force=True, db=db)
         logger.info("[FLEET_REFRESH] Scheduled Zoho fleet sync completed")
     except Exception:

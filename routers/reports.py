@@ -13,7 +13,7 @@ from zoneinfo import ZoneInfo
 from fastapi import APIRouter, Depends, HTTPException
 
 from auth.dependencies import get_current_user
-from services import zoho_acquisition
+from services import zoho_acquisition, zoho_client
 from services.zoho_client import (
     ZohoError,
     fetch_inventory_adjustments,
@@ -501,7 +501,7 @@ def _build_report(section: str | None = None) -> dict:
 @router.get("/rgf-logistics")
 def get_rgf_logistics_report(force: bool = False, section: str | None = None):
     epoch = zoho_acquisition.generation()
-    identity = (os.environ.get("ZOHO_API_DOMAIN", "https://www.zohoapis.com"), os.environ.get("ZOHO_ORG_ID", ""), _today().isoformat())
+    identity = (zoho_client.api_domain(), os.environ.get("ZOHO_ORG_ID", ""), _today().isoformat())
     key = (identity, section, epoch)
     with _cache_lock:
         future = _report_inflight.get(key)
