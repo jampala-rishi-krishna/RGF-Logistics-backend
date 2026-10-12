@@ -2,96 +2,46 @@ from __future__ import annotations
 
 import logging
 import re
-from concurrent.futures import ThreadPoolExecutor
-import contextvars
 from typing import Iterable
 
 from services import branches, item_detail_cache
 
 logger = logging.getLogger("warehouse_stock")
-METS_NAME = "mets cold storage"
-GLACIER_NAME = "glacier south rgf"
 RGF_BRANCH_ID = "4489499000001322444"
 MSSI_BRANCH_ID = "4489499000017295785"
 
 
-def _stock_value(value):
-    try:
-        return float(value) if value is not None and str(value).strip() != "" else None
-    except (TypeError, ValueError):
-        return None
-
-
-def _is_main_mets(name: str) -> bool:
-    return (
-        (METS_NAME in name or ("mets" in name and "cold" in name and "storage" in name))
-        and "near-expiry" not in name
-        and "for supermarket" not in name
-        and not name.startswith("chilled")
-    )
-
-
-def _is_rgf_glacier(name: str) -> bool:
-    return (GLACIER_NAME in name or ("glacier" in name and ("rgf" in name or "v2" in name or "south" in name))) and "mssi" not in name
-
-
-def _is_mssi_glacier(name: str) -> bool:
-    return "glacier" in name and "mssi" in name
+def stock_branch_id(order) -> str | None:
+    branch_id = branches.branch_id_of(order)
+    if branch_id:
+        return branch_id
+    number = str(getattr(order, "salesorder_number", "") or "")
+    if re.match(r"^\s*MS-SO(?![A-Za-z])", number, re.I):
+        return MSSI_BRANCH_ID
+    if re.match(r"^\s*(?:SO|WM-SO)(?![A-Za-z])", number, re.I):
+        return RGF_BRANCH_ID
+    return None
 
 
 def _parse_stock(entry: dict | None, item_id: str = "", branch_id: str | None = None) -> dict[str, float | None]:
-    """Zoho's own "Available for Sale" figure for the item's main Mets warehouse and its Glacier
-    South RGF warehouse, passed through exactly as Zoho reports it (negative, zero or
-    positive) - no arithmetic. The separate "Chilled - Mets ..." warehouse is a different
-    location and must not replace the main Mets figure.
+    """Return Zoho's physical Available for Sale field for configured warehouse IDs only.
 
-    When the order has a known branch, its warehouse mapping is authoritative (RGF and MSSI -
-    the only handled branches). Falling back to broad names can let another branch overwrite it."""
-    branch = str(branch_id or "")
-    rule = branches.STOCK_RULES.get(branch)
+    Never derive availability, coerce/round the source number, or substitute another warehouse.
+    """
+    rule = branches.STOCK_RULES.get(str(branch_id or ""))
     result: dict[str, float | None] = {"mets": None, "glacier": None}
+    if rule is None:
+        if item_id:
+            logger.debug("[WAREHOUSE_STOCK] item=%s unmatched_branch=%s", item_id, branch_id)
+        return result
     for warehouse in (entry or {}).get("warehouses") or []:
         if not isinstance(warehouse, dict):
             continue
-        name = str(warehouse.get("warehouse_name") or warehouse.get("name") or "").strip().casefold()
-        value = _stock_value(
-            warehouse.get(
-                "warehouse_available_for_sale_stock",
-                warehouse.get("available_for_sale_stock", warehouse.get("available_for_sale")),
-            )
-        )
-        if re.search(r"\(deactivated\)$", name, re.I) or name.startswith("(do not use)"):
+        warehouse_id = str(warehouse.get("warehouse_id") or warehouse.get("id") or "")
+        site = next((key for key in ("mets", "glacier") if warehouse_id == rule[key]), None)
+        if site is None:
             continue
-        if rule:
-            if all(part in name for part in rule["mets"]) and not any(part in name for part in rule.get("mets_exclude", ())) and not name.startswith("chilled"):
-                site = "mets"
-            elif all(part in name for part in rule["glacier"]):
-                site = "glacier"
-            elif branch == RGF_BRANCH_ID and _is_main_mets(name) and "mssi" not in name:
-                site = "mets"
-            elif branch == RGF_BRANCH_ID and _is_rgf_glacier(name):
-                site = "glacier"
-            elif branch == MSSI_BRANCH_ID and _is_main_mets(name) and "mssi" in name:
-                site = "mets"
-            elif branch == MSSI_BRANCH_ID and _is_mssi_glacier(name):
-                site = "glacier"
-            else:
-                site = None
-            if site is None:
-                continue
-            if value is not None:
-                result[site] = value
-            continue
-        if _is_main_mets(name):
-            site = "mets"
-        elif _is_rgf_glacier(name):
-            site = "glacier"
-        else:
-            if name:
-                logger.debug("[WAREHOUSE_STOCK] item=%s unmatched_warehouse=%s", item_id, name)
-            continue
-        if value is not None:
-            result[site] = value
+        result[site] = warehouse.get("warehouse_actual_available_for_sale_stock")
     return result
 
 
@@ -119,45 +69,27 @@ def order_item_ids(orders) -> dict[str, list[str]]:
     }
 
 
-def _combine(order_items: dict[str, list[str]], stock_of, order_branch=None) -> dict[str, float | None]:
-    """stock_of(item_id, branch_id) -> {"mets", "glacier"}."""
-    result: dict[str, float | None] = {}
-    for order_id, ids in order_items.items():
-        branch_id = (order_branch or {}).get(order_id)
-        per_item = [stock_of(item_id, branch_id) or {} for item_id in ids]
-        for key in ("mets", "glacier"):
-            values = [v for v in (stock.get(key) for stock in per_item) if v is not None]
-            result[f"{order_id}:{key}"] = min(values) if values and len(values) == len(ids) else None
-    return result
-
-
-def _order_branches(orders) -> dict[str, str | None]:
-    return {str(order.id): branches.branch_id_of(order) for order in orders}
-
-
 def stock_for_orders(orders) -> dict[str, float | None]:
-    """Blocking variant (assignment write path, exports): fetches every item it needs."""
+    """Return blank order-level stock: stock is only meaningful for an individual SKU."""
     orders = list(orders)
-    order_items = order_item_ids(orders)
-    order_branch = _order_branches(orders)
-    pairs = {(i, order_branch.get(order_id)) for order_id, ids in order_items.items() for i in ids}
-    fetched: dict[tuple, dict] = {}
-    with ThreadPoolExecutor(max_workers=5) as pool:
-        futures = {pool.submit(contextvars.copy_context().run, fetch_item_stock, item_id, branch_id): (item_id, branch_id) for item_id, branch_id in pairs}
-        for future, key in futures.items():
-            fetched[key] = future.result()
-    return _combine(order_items, lambda item_id, branch_id: fetched.get((item_id, branch_id)), order_branch)
+    return {
+        f"{order.id}:{site}": None
+        for order in orders
+        for site in ("mets", "glacier")
+    }
 
 
 def stock_for_orders_cached(orders, extra_item_ids: Iterable[str] = ()) -> tuple[dict[str, float | None], int]:
-    """Non-blocking variant for list endpoints: serves whatever is cached (stale is fine),
-    queues a background refresh for the rest, and reports how many items are still
-    unknown so the UI can poll until they arrive."""
+    """Queue line-item stock refreshes; never aggregate SKU stock into an order-level value."""
     orders = list(orders)
     order_items = order_item_ids(orders)
     item_ids = [i for ids in order_items.values() for i in ids]
     waiting = item_detail_cache.request_refresh([*item_ids, *extra_item_ids])
-    return _combine(order_items, cached_item_stock, _order_branches(orders)), waiting
+    return ({
+        f"{order.id}:{site}": None
+        for order in orders
+        for site in ("mets", "glacier")
+    }, waiting)
 
 
 def invalidate() -> None:

@@ -288,42 +288,44 @@ class BranchConfigTests(unittest.TestCase):
 
 
 WAREHOUSES = {"warehouses": [
-    {"warehouse_name": "Mets Cold Storage Services Inc. RGF", "warehouse_available_for_sale_stock": 10},
-    {"warehouse_name": "Glacier South RGF", "warehouse_available_for_sale_stock": 20},
-    {"warehouse_name": "Chilled - Mets Cold Storage Services Inc. RGF", "warehouse_available_for_sale_stock": 99},
-    {"warehouse_name": "METS RGF (Near-Expiry Items / Production Reserves)", "warehouse_available_for_sale_stock": 98},
-    {"warehouse_name": "Mets Cold Storage Services Inc. MSSI / SUPERMARKET", "warehouse_available_for_sale_stock": 30},
-    {"warehouse_name": "Glacier South MSSI", "warehouse_available_for_sale_stock": -2000},
-    {"warehouse_name": "SariSuki Store Inc. Warehouse", "warehouse_available_for_sale_stock": 50},
-    {"warehouse_name": "Glacier South MSSI(DEACTIVATED)", "warehouse_available_for_sale_stock": 77},
+    {"warehouse_id": "4489499000064563124", "warehouse_name": "Mets Cold Storage Services Inc. RGF", "warehouse_actual_available_for_sale_stock": 10},
+    {"warehouse_id": "4489499000064711027", "warehouse_name": "Glacier South RGF", "warehouse_actual_available_for_sale_stock": 20},
+    {"warehouse_id": "4489499000066535802", "warehouse_name": "Chilled - Mets Cold Storage Services Inc. RGF", "warehouse_actual_available_for_sale_stock": 99},
+    {"warehouse_id": "4489499000114603183", "warehouse_name": "METS RGF (Near-Expiry Items / Production Reserves)", "warehouse_actual_available_for_sale_stock": 98},
+    {"warehouse_id": "4489499000066605796", "warehouse_name": "Mets Cold Storage Services Inc. MSSI / SUPERMARKET", "warehouse_actual_available_for_sale_stock": 30},
+    {"warehouse_id": "4489499000130193435", "warehouse_name": "Glacier South MSSI", "warehouse_actual_available_for_sale_stock": -2000},
+    {"warehouse_id": "4489499000044787515", "warehouse_name": "SariSuki Store Inc. Warehouse", "warehouse_actual_available_for_sale_stock": 50},
+    {"warehouse_id": "4489499000199999999", "warehouse_name": "Glacier South MSSI(DEACTIVATED)", "warehouse_actual_available_for_sale_stock": 77},
 ]}
-
 WAREHOUSES_V2 = {"warehouses": [
-    {"warehouse_name": "Mets Cold Storage Services Inc. RGF", "warehouse_available_for_sale_stock": -5},
-    {"warehouse_name": "Glacier V2. Daily Pick RGF", "warehouse_available_for_sale_stock": -12},
+    {"warehouse_id": "4489499000064563124", "warehouse_name": "Mets Cold Storage Services Inc. RGF", "warehouse_actual_available_for_sale_stock": -5},
+    {"warehouse_id": "4489499000199999998", "warehouse_name": "Glacier V2. Daily Pick RGF", "warehouse_actual_available_for_sale_stock": -12},
 ]}
 
 ZOHO_STOCK_FIELDS = {"warehouses": [
     {
+        "warehouse_id": "4489499000064563124",
         "warehouse_name": "Mets Cold Storage Services Inc. RGF",
         "warehouse_stock_on_hand": 199,
         "warehouse_available_stock": 198,
         "warehouse_committed_stock": 21,
-        "warehouse_available_for_sale_stock": 177,
+        "warehouse_actual_available_for_sale_stock": 177,
     },
     {
+        "warehouse_id": "4489499000064711027",
         "warehouse_name": "Glacier South RGF",
         "warehouse_stock_on_hand": 231,
         "warehouse_available_stock": 231,
         "warehouse_committed_stock": 5,
-        "warehouse_available_for_sale_stock": 226,
+        "warehouse_actual_available_for_sale_stock": 226,
     },
     {
+        "warehouse_id": "4489499000066605796",
         "warehouse_name": "Mets Cold Storage Services Inc. MSSI / SUPERMARKET",
         "warehouse_stock_on_hand": 0,
         "warehouse_available_stock": 0,
         "warehouse_committed_stock": 0,
-        "warehouse_available_for_sale_stock": 0,
+        "warehouse_actual_available_for_sale_stock": 0,
     },
 ]}
 
@@ -336,52 +338,106 @@ class StockMappingTests(unittest.TestCase):
         with patch.dict(os.environ, {"BRANCH_STOCK_MAPPING": ""}):
             self.assertEqual(self.parse(RGF), {"mets": 10, "glacier": 20})
             self.assertEqual(self.parse(MSSI), {"mets": 30, "glacier": -2000})
-        self.assertEqual(self.parse(None), {"mets": 30, "glacier": 20})
+        self.assertEqual(self.parse(None), {"mets": None, "glacier": None})
 
     def test_rgf_uses_zoho_available_for_sale_and_ignores_mssi_supermarket(self):
         with patch.dict(os.environ, {"BRANCH_STOCK_MAPPING": ""}):
             stock = ws._parse_stock(ZOHO_STOCK_FIELDS, "item-1", RGF)
 
         self.assertEqual(stock, {"mets": 177, "glacier": 226})
-        self.assertEqual(ZOHO_STOCK_FIELDS["warehouses"][0]["warehouse_stock_on_hand"] - ZOHO_STOCK_FIELDS["warehouses"][0]["warehouse_committed_stock"], 178)
-        self.assertEqual(ZOHO_STOCK_FIELDS["warehouses"][0]["warehouse_available_stock"] - ZOHO_STOCK_FIELDS["warehouses"][0]["warehouse_committed_stock"], 177)
 
     def test_rgf_mets_value_is_not_overwritten_by_mssi_supermarket_76(self):
         item = {"warehouses": [
             {
+                "warehouse_id": "4489499000064563124",
                 "warehouse_name": "Mets Cold Storage Services Inc. RGF",
                 "warehouse_available_stock": 16012,
                 "warehouse_committed_stock": 16564,
-                "warehouse_available_for_sale_stock": -552,
+                "warehouse_actual_available_for_sale_stock": -552,
             },
-            {"warehouse_name": "Glacier South RGF", "warehouse_available_for_sale_stock": 34},
-            {"warehouse_name": "Mets Cold Storage Services Inc. MSSI / SUPERMARKET", "warehouse_available_for_sale_stock": 76},
+            {"warehouse_id": "4489499000064711027", "warehouse_name": "Glacier South RGF", "warehouse_actual_available_for_sale_stock": 34},
+            {"warehouse_id": "4489499000066605796", "warehouse_name": "Mets Cold Storage Services Inc. MSSI / SUPERMARKET", "warehouse_actual_available_for_sale_stock": 76},
         ]}
         self.assertEqual(ws._parse_stock(item, "item-3", RGF), {"mets": -552, "glacier": 34})
 
-    def test_zoho_negative_available_for_sale_includes_committed_stock(self):
+    def test_raw_available_for_sale_is_not_recalculated_from_committed_stock(self):
         item = {"warehouses": [
             {
+                "warehouse_id": "4489499000064563124",
                 "warehouse_name": "Mets Cold Storage Services Inc. RGF",
                 "warehouse_available_stock": 108.265,
                 "warehouse_committed_stock": 100,
-                "warehouse_available_for_sale_stock": 8.265,
+                "warehouse_actual_available_for_sale_stock": 8.265,
             },
             {
+                "warehouse_id": "4489499000064711027",
                 "warehouse_name": "Glacier South RGF",
                 "warehouse_available_stock": 1770.298,
                 "warehouse_committed_stock": 1813.715,
-                "warehouse_available_for_sale_stock": -43.417,
+                "warehouse_actual_available_for_sale_stock": -43.417,
             },
         ]}
         self.assertEqual(ws._parse_stock(item, "item-2", RGF), {"mets": 8.265, "glacier": -43.417})
 
     def test_rgf_glacier_v2_and_negative_values_are_kept(self):
-        self.assertEqual(ws._parse_stock(WAREHOUSES_V2, "i1", RGF), {"mets": -5, "glacier": -12})
+        self.assertEqual(ws._parse_stock(WAREHOUSES_V2, "i1", RGF), {"mets": -5, "glacier": None})
+
+    def test_exact_warehouse_ids_are_authoritative_over_names(self):
+        item = {"warehouses": [
+            {"warehouse_id": "wrong-id", "warehouse_name": "Mets Cold Storage Services Inc. RGF", "warehouse_actual_available_for_sale_stock": 999},
+            {"warehouse_id": "4489499000064563124", "warehouse_name": "renamed warehouse", "warehouse_actual_available_for_sale_stock": 5.380},
+            {"warehouse_id": "4489499000066605796", "warehouse_name": "Mets Cold Storage Services Inc. MSSI / SUPERMARKET", "warehouse_actual_available_for_sale_stock": 76},
+            {"warehouse_id": "4489499000064711027", "warehouse_name": "Glacier South RGF", "warehouse_actual_available_for_sale_stock": 0},
+        ]}
+        self.assertEqual(ws._parse_stock(item, "i1", RGF), {"mets": 5.38, "glacier": 0})
+
+    def test_missing_source_field_does_not_fall_back_to_other_stock_fields(self):
+        item = {"warehouses": [
+            {
+                "warehouse_id": "4489499000064563124",
+                "warehouse_name": "Mets Cold Storage Services Inc. RGF",
+                "warehouse_available_stock": 123,
+                "available_for_sale_stock": 456,
+                "available_for_sale": 789,
+                "warehouse_available_for_sale_stock": 321,
+            },
+            {
+                "warehouse_id": "4489499000064711027",
+                "warehouse_name": "Glacier South RGF",
+                "warehouse_available_for_sale_stock": -13.14,
+                "warehouse_actual_available_for_sale_stock": -13.14,
+            },
+        ]}
+        self.assertEqual(ws._parse_stock(item, "i1", RGF), {"mets": None, "glacier": -13.14})
+
+    def test_physical_available_for_sale_wins_over_nonphysical_zoho_value(self):
+        item = {"warehouses": [
+            {
+                "warehouse_id": "4489499000064563124",
+                "warehouse_stock_on_hand": 488.38,
+                "warehouse_committed_stock": 483,
+                "warehouse_available_for_sale_stock": -13.14,
+                "warehouse_actual_available_for_sale_stock": 5.380,
+            },
+        ]}
+        self.assertEqual(ws._parse_stock(item, "4489499000239895407", RGF), {"mets": 5.38, "glacier": None})
+
+    def test_order_level_stock_does_not_aggregate_skus(self):
+        sales_order = SimpleNamespace(
+            id="so-multi",
+            raw_json={"line_items": [{"item_id": "item-1"}, {"item_id": "item-2"}]},
+        )
+        expected = {"so-multi:mets": None, "so-multi:glacier": None}
+        self.assertEqual(ws.stock_for_orders([sales_order]), expected)
+        with patch.object(ws.item_detail_cache, "request_refresh", return_value=2) as request_refresh:
+            stock, waiting = ws.stock_for_orders_cached([sales_order])
+        self.assertEqual(stock, expected)
+        self.assertEqual(waiting, 2)
+        request_refresh.assert_called_once_with(["item-1", "item-2"])
 
     def test_only_rgf_and_mssi_have_rules(self):
         self.assertEqual(set(bs.STOCK_RULES), {RGF, MSSI})
-        self.assertEqual(self.parse(SSI), self.parse(None))  # no SSI row: legacy default, no "other" column
+        self.assertEqual(self.parse(SSI), {"mets": None, "glacier": None})
 
 
 class ExportColumnsTests(unittest.TestCase):

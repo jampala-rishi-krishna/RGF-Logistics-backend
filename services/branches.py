@@ -32,11 +32,17 @@ BRANCHES: list[dict] = [
 ]
 _BY_ID = {b["id"]: b for b in BRANCHES}
 
-# Per-branch warehouse -> column mapping (only for handled branches). Matching is on the
-# casefolded warehouse name and is authoritative whenever the order has a known branch ID.
+# Per-branch Zoho warehouse IDs -> stock columns. These IDs are authoritative; names are
+# descriptive only and must never be used to substitute a different warehouse's stock.
 STOCK_RULES: dict[str, dict] = {
-    "4489499000001322444": {"mets": ("mets cold storage",), "mets_exclude": ("near-expiry", "for supermarket", "mssi"), "glacier": ("glacier south rgf",)},
-    "4489499000017295785": {"mets": ("mets cold storage", "mssi"), "glacier": ("glacier south mssi",)},
+    "4489499000001322444": {
+        "mets": "4489499000064563124",
+        "glacier": "4489499000064711027",
+    },
+    "4489499000017295785": {
+        "mets": "4489499000066605796",
+        "glacier": "4489499000130193435",
+    },
 }
 
 _RGF_ID, _MSSI_ID = BRANCHES[0]["id"], BRANCHES[1]["id"]

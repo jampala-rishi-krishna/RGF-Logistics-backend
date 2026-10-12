@@ -158,15 +158,31 @@ class Round2OptimizationTests(unittest.TestCase):
             "4489499000074842271": {"mets": 177.0, "glacier": 226.0},
             "4489499000071561700": {"mets": 680.23, "glacier": 6.0},
             "4489499000071039493": {"mets": -552.0, "glacier": 34.0},
+            "4489499000071564775": {"mets": 196.48, "glacier": 0},
+            "4489499000239895407": {"mets": 5.38, "glacier": 0},
+        }
+        row_18441 = SimpleNamespace(**vars(row))
+        row_18441.id = "so-18441"
+        row_18441.salesorder_number = "SO26-18441"
+        row_18441.raw_json = {
+            "branch_id": "4489499000001322444",
+            "line_items": [
+                {"line_item_id": "li-p059", "item_id": "4489499000071564775", "name": "PORK ITEM A", "sku": "RGF-P059-2", "quantity": 1, "unit": "kg"},
+                {"line_item_id": "li-p320", "item_id": "4489499000239895407", "name": "PORK ITEM B", "sku": "RGF-P320", "quantity": 1, "unit": "kg"},
+            ],
         }
         with patch.object(load_planning, "row_to_dict", side_effect=lambda obj: vars(obj).copy()), \
                 patch.object(load_planning, "cached_item_stock", side_effect=lambda item_id, branch_id=None: stocks[item_id]), \
                 patch.object(load_planning, "calculate_line_weight_kg", return_value=None):
             summary = load_planning._summary(row, db=None, allow_fetch=False)
+            summary_18441 = load_planning._summary(row_18441, db=None, allow_fetch=False)
 
         self.assertEqual([p["name"] for p in summary["products"]], ["Non-Food Styro Fishpac Body w/ Cover", "BEEF CHUCK ROLL MONDELLI SLICED 2.5MM 1KG", "CHICKEN LEG FILLET SKIN ON SEARA"])
         self.assertEqual([p["sku"] for p in summary["products"]], ["RGF-NF-0238", "RGF-B401-1", "RGF-C024"])
         self.assertEqual([(p["mets_qty_available_for_sale"], p["glacier_qty_available_for_sale"]) for p in summary["products"]], [(177.0, 226.0), (680.23, 6.0), (-552.0, 34.0)])
+        self.assertEqual([(p["sku"], p["mets_qty_available_for_sale"], p["glacier_qty_available_for_sale"]) for p in summary_18441["products"]], [("RGF-P059-2", 196.48, 0), ("RGF-P320", 5.38, 0)])
+        self.assertIsNone(summary_18441["mets_qty_available_for_sale"])
+        self.assertIsNone(summary_18441["glacier_qty_available_for_sale"])
 
     def test_delta_sync_stops_when_page_is_older_than_last_sync(self):
         calls = []

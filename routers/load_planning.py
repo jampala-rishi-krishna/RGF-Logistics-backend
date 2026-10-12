@@ -36,7 +36,7 @@ from services.openai_client import generate_sales_order_email_draft
 from services.item_weight import calculate_line_weight_kg
 from services.delivery_status import is_delivered, sales_order_delivery_status
 from services import item_detail_cache
-from services.warehouse_stock import cached_item_stock, fetch_item_stock, stock_for_orders_cached
+from services.warehouse_stock import cached_item_stock, fetch_item_stock, stock_branch_id, stock_for_orders_cached
 from services.sales_order_location import address_object, find_city, shipping_city
 from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import StreamingResponse
@@ -235,17 +235,15 @@ def _summary(row, db: Session | None = None, *, allow_fetch: bool = True) -> dic
     result["zoho_lock"] = lock_status_from_record(raw_notes)
     branch = branch_service.branch_of(row)  # from Zoho's own branch_id/branch_name; None for Neon rows (no raw_json)
     branch_id = branch["id"] if branch else None
+    stock_branch = stock_branch_id(row)
     result["branch_id"] = branch_id
     result["branch_name"] = branch["name"] if branch else None
     result["branch_code"] = branch["code"] if branch else None
     notes = raw_notes.get("notes") or raw_notes.get("note") or raw_notes.get("customer_notes")
     result["notes"] = str(notes).strip() if notes is not None and str(notes).strip() else None
-    if is_persisted:
-        result["mets_qty_available_for_sale"] = float(row.mets_qty_available_for_sale) if row.mets_qty_available_for_sale is not None else None
-        result["glacier_qty_available_for_sale"] = float(row.glacier_qty_available_for_sale) if row.glacier_qty_available_for_sale is not None else None
-    else:
-        result["mets_qty_available_for_sale"] = getattr(row, "_mets_qty_available_for_sale", None)
-        result["glacier_qty_available_for_sale"] = getattr(row, "_glacier_qty_available_for_sale", None)
+    # Stock belongs to a specific SKU and warehouse; do not expose old SO-level snapshots.
+    result["mets_qty_available_for_sale"] = None
+    result["glacier_qty_available_for_sale"] = None
 
     def number(item, *keys):
         for key in keys:
@@ -270,7 +268,7 @@ def _summary(row, db: Session | None = None, *, allow_fetch: bool = True) -> dic
             normalized = unit.casefold()
             # The order-level stock saved at assignment time is a point-in-time snapshot that may
             # be wrong; show Zoho's own per-item "Available for Sale" instead.
-            saved_item_stock = ((fetch_item_stock(str(line.item_id)) if allow_fetch else cached_item_stock(str(line.item_id))) if line.item_id else None) or {}
+            saved_item_stock = ((fetch_item_stock(str(line.item_id), stock_branch) if allow_fetch else cached_item_stock(str(line.item_id), stock_branch)) if line.item_id else None) or {}
             if "pack" in normalized: total_packs += quantity
             elif "case" in normalized or "carton" in normalized: total_cases += quantity
             else: total_units += quantity
@@ -294,7 +292,7 @@ def _summary(row, db: Session | None = None, *, allow_fetch: bool = True) -> dic
             else: total_units += quantity
             line_total_weight_kg = item_weight_kg(item, row.salesorder_number or row.id)
             stock_item_id = _line_item_id(item)
-            item_stock = ((fetch_item_stock(stock_item_id, branch_id) if allow_fetch else cached_item_stock(stock_item_id, branch_id)) if stock_item_id else None) or {}
+            item_stock = ((fetch_item_stock(stock_item_id, stock_branch) if allow_fetch else cached_item_stock(stock_item_id, stock_branch)) if stock_item_id else None) or {}
             products.append({"mets_qty_available_for_sale": item_stock.get("mets"), "glacier_qty_available_for_sale": item_stock.get("glacier"), "line_item_id": item.get("line_item_id"), "item_id": stock_item_id, "name": item.get("name") or item.get("item_description") or item.get("description"), "sku": item.get("sku") or item.get("item_order") or stock_item_id, "quantity": quantity, "unit": unit or None, "total_weight_kg": line_total_weight_kg, "packaging_type": "pack" if "pack" in normalized else "case" if "case" in normalized or "carton" in normalized else None, "pack_quantity": quantity if "pack" in normalized else 0, "case_quantity": quantity if "case" in normalized or "carton" in normalized else 0, "quantity_packed": number(item, "quantity_packed"), "quantity_shipped": number(item, "quantity_shipped")})
         total_item_quantity = sum(number(item, "quantity") for item in items)
 
