@@ -190,12 +190,13 @@ class AssignmentBody(BaseModel):
 class AssignmentEmailBody(AssignmentBody):
     assigned_by: str | None = None
     preview: bool = False
-    # Explicit "Resend / edit" from the preview window: emails only (no WhatsApp/SMS/voice again), no dedupe, no team repeat.
+    # Explicit "Resend / edit" from the preview window AFTER a first send: emails only (no WhatsApp/SMS/voice again), no dedupe, no team repeat.
     resend: bool = False
     # Retry of a failed send: email only (no WhatsApp/SMS/voice again) but WITH the dedupe, so a driver who already got it is not emailed twice.
     email_only: bool = False
-    # Auto-send: the NEW id of this assignment (stored with the first status write). Retry / Resend: the id of the
-    # existing assignment - the SOs to email are resolved from it, never guessed from vehicle + time.
+    # First Send / Retry / Resend: the id of the assignment (assign_order returns it) - the SOs to email and the people
+    # to notify are resolved from it server side, never guessed from vehicle + time. First Send = this id with neither
+    # resend nor email_only: email + WhatsApp/SMS/voice, once, while the status is "not_sent".
     assignment_batch_id: str | None = None
     html_body: str | None = None
     subject: str | None = None
@@ -434,7 +435,9 @@ def assign_order(salesorder_id: str, body: AssignmentBody, current_user: Current
         item.assigned_at = assigned_at
         item.assigned_by = current_user.id
         item.assignment_status = "assigned"
-        live_sales_order_cache.set_assignment(item.id, vehicle_id=body.vehicle_id, driver_id=primary_driver_id, assigned_at=assigned_at, assigned_by=current_user.id, assignment_status="assigned")
+        # helper_ids is kept in the live state too (as it is when loaded back from history): Send / Resend / Retry resolve the people to
+        # notify from the stored assignment, so without it a fresh assignment would only ever notify the driver.
+        live_sales_order_cache.set_assignment(item.id, vehicle_id=body.vehicle_id, driver_id=primary_driver_id, helper_ids=driver_ids, assigned_at=assigned_at, assigned_by=current_user.id, assignment_status="assigned")
         sync_history_row(db, item)
     db.commit()
     live_sales_order_cache.bump_assignment_generation()
@@ -451,8 +454,9 @@ def assign_order(salesorder_id: str, body: AssignmentBody, current_user: Current
     invalidate_fleet_cache()
     _invalidate_assignment_options_cache()
     response = {"success": True, "salesorder_ids": [item.id for item in orders], "vehicle_id": body.vehicle_id, "driver_id": primary_driver_id, "driver_ids": driver_ids, "helper_ids": helper_ids_of(primary_driver_id, driver_ids), "assignment_status": "assigned", "over_capacity": bool(over_capacity), "over_capacity_kg": max((o["over_kg"] for o in over_capacity), default=0.0), "over_capacity_percent": max((o["over_percent"] or 0.0 for o in over_capacity), default=0.0), "capacity_verified": all(value is not None for value in known_weights + existing_weights), "capacity_warning": None if all(value is not None for value in known_weights + existing_weights) else "Assignment completed, but one or more Zoho package weights were unavailable; capacity must be verified before dispatch."}
-    # Automatic notification, as before the Send button existed: one email per driver (all their SOs) + one team
-    # email, then WhatsApp/SMS/voice subject to their own pause switches. A failure here never undoes the assignment.
+    # Assigning NEVER notifies anyone. The assignment is saved and its email status is "not_sent"; the dispatcher reviews
+    # the preview and presses Send, which is the only thing that emails the driver/team and fires WhatsApp/SMS/voice
+    # (send_assignment_email below, with this batch id).
     order_ids_assigned = [item.id for item in orders]
     batch_id = uuid.uuid4().hex  # one id per assignment click: Retry/Resend can never merge two assignments to the same truck
     response["assignment_batch_id"] = batch_id
@@ -460,15 +464,8 @@ def assign_order(salesorder_id: str, body: AssignmentBody, current_user: Current
         assignment_email_status.record(order_ids_assigned, "skipped", error="skipped: no driver selected", batch_id=batch_id)
         response["notifications"] = {"skipped": True, "reason": "No driver selected."}
     else:
-        try:
-            response["notifications"] = send_assignment_email(
-                AssignmentEmailBody(salesorder_ids=order_ids_assigned, vehicle_id=body.vehicle_id, driver_id=primary_driver_id, helper_ids=helper_ids_of(primary_driver_id, driver_ids), manual_vehicle=body.manual_vehicle,
-                                    assigned_by=current_user.full_name or current_user.email, assignment_batch_id=batch_id),
-                current_user, db)
-        except Exception as exc:  # noqa: BLE001
-            logger.exception("[GMAIL_SEND] automatic assignment notification failed for %s", order_ids_assigned)
-            assignment_email_status.record(order_ids_assigned, "failed", error=f"Could not queue the assignment email: {getattr(exc, 'detail', None) or exc}", batch_id=batch_id)
-            response["notifications"] = {"success": False, "error": str(getattr(exc, "detail", None) or exc)}
+        assignment_email_status.record(order_ids_assigned, "not_sent", batch_id=batch_id)
+        response["notifications"] = {"success": True, "sent": False, "status": "not_sent", "message": "Assignment saved. Nothing has been sent yet: review the email and press Send."}
     return response
 
 
@@ -537,22 +534,29 @@ def send_assignment_email(body: AssignmentEmailBody, current_user: CurrentUser =
     if not secret and not body.preview:
         logger.warning("INTELLIFLEET_ASSIGNMENT_WEBHOOK_SECRET is not set: WhatsApp/SMS n8n notifications are skipped; email is unaffected")
     ids = body.salesorder_ids
-    if body.assignment_batch_id and (body.resend or body.email_only):
+    # The FIRST Send of a fresh assignment (its batch id, neither Resend nor Retry): the real notification - email plus
+    # WhatsApp/SMS/voice. It is allowed exactly once, while the assignment is still "not_sent".
+    first_send = bool(body.assignment_batch_id) and not (body.resend or body.email_only) and not body.preview
+    if body.assignment_batch_id and not body.preview:
         batch = live_sales_order_cache.ids_for_batch(body.assignment_batch_id)
         if not batch:
             raise HTTPException(404, "That assignment was not found (or is no longer assigned).")
         if set(ids) - set(batch):
             raise HTTPException(409, "These sales orders belong to different assignments; resend each assignment separately.")
         ids = batch  # the whole assignment, however many of its orders the caller happened to list
+    if first_send:
+        current = assignment_email_status.summarize(ids)["status"]
+        if current not in (None, "not_sent"):
+            raise HTTPException(409, {"queued": "This assignment is already being sent.", "sent": "This assignment was already sent. Use Resend / edit to send it again.", "failed": "The email failed. Use Retry to send it again."}.get(current, f"This assignment cannot be sent now (status: {current})."))
     new_batch_id = None if (body.resend or body.email_only) else body.assignment_batch_id  # only a fresh assignment writes the id
     if not ids:
         raise HTTPException(400, "At least one sales order is required.")
     orders = [o for o in (live_sales_order_cache.find_cached(oid) or live_sales_order_cache.ensure_zoho_data(oid) for oid in ids) if o is not None]
     driver_ids = body.all_driver_ids()
     primary_id = body.primary_driver_id()
-    if (body.resend or body.email_only) and ids:
-        # Resend / Retry: who is the driver and who are the helpers comes from the stored assignment, never from the order
-        # of the ids the caller listed.
+    if (body.resend or body.email_only or first_send) and ids:
+        # Send / Resend / Retry: who is the driver and who are the helpers comes from the stored assignment, never from the
+        # order of the ids the caller listed.
         stored = live_sales_order_cache.get_assignment(ids[0]) or {}
         if stored.get("driver_id") is not None:
             primary_id = stored["driver_id"]

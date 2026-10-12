@@ -1,4 +1,4 @@
-"""Per-assignment email status (queued / sent / failed / skipped).
+"""Per-assignment email status (not_sent / queued / sent / failed / skipped).
 
 One email covers several SOs, so a status is recorded for every sales order of the batch together.
 It lives in the live assignment state (memory, shown in the UI immediately) and is persisted to
@@ -15,8 +15,9 @@ from sqlalchemy import update
 from services import live_sales_order_cache
 
 logger = logging.getLogger("assignment_email_status")
-STATUSES = ("queued", "sent", "failed", "skipped")
-_PRIORITY = ("failed", "queued", "sent", "skipped")
+# not_sent = assigned, but the dispatcher has not pressed Send yet (assigning never notifies anyone).
+STATUSES = ("not_sent", "queued", "sent", "failed", "skipped")
+_PRIORITY = ("failed", "queued", "not_sent", "sent", "skipped")
 
 
 def _open_session():

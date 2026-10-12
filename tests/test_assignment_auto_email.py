@@ -1,4 +1,4 @@
-"""Assignment emails: automatic on assign, one per driver, real status, no false success.
+"""Assignment emails: assigning sends NOTHING (status "not_sent"); the dispatcher's Send does the notifying, one email per driver, real status, no false success.
 
 Mocked only: no Gmail, no Zoho, no database.
 """
@@ -81,7 +81,17 @@ class Harness:
         self.orders = {o.id: o for o in orders}
         self.ids = [o.id for o in orders]
         body = assignment.AssignmentBody(salesorder_ids=self.ids, vehicle_id="TRK1", driver_ids=driver_ids)
-        return assignment.assign_order(self.ids[0], body, self.user, self.db)
+        self.assigned = assignment.assign_order(self.ids[0], body, self.user, self.db)
+        return self.assigned
+
+    def send(self, driver_ids):
+        """The dispatcher pressing Send: the first send of this assignment (its batch id, neither Resend nor Retry)."""
+        body = assignment.AssignmentEmailBody(salesorder_ids=self.ids, vehicle_id="TRK1", driver_ids=driver_ids, assignment_batch_id=self.assigned["assignment_batch_id"])
+        return assignment.send_assignment_email(body, self.user, self.db)
+
+    def assign_and_send(self, numbers, driver_ids):
+        self.assign(numbers, driver_ids)
+        return self.send(driver_ids)
 
     def status(self):
         return assignment_email_status.summarize(self.ids)
@@ -99,19 +109,19 @@ def h(monkeypatch):
             lc._assignment_state.pop(oid, None)
 
 
-def test_assign_sends_driver_and_team_email_automatically(h):
-    result = h.assign(["SO-1"], [1])
+def test_send_emails_driver_and_team(h):
+    result = h.assign_and_send(["SO-1"], [1])
     assert result["success"] is True
     driver, team = h.by_purpose("assignment-driver"), h.by_purpose("assignment-team")
     assert [m["to"] for m in driver] == ["juan@x.com"]
     assert driver[0]["subject"] == "Driver assignment — TRK1 — 1 sales order(s)"
     assert team[0]["to"] == ["ops@x.com", "boss@x.com"]
     assert h.status()["status"] == "sent" and h.status()["messageId"] == "msg-1"
-    assert result["notifications"]["emailStatus"] == "queued"  # the HTTP answer is "queued"; the real outcome is the status above
+    assert result["emailStatus"] == "queued"  # the HTTP answer is "queued"; the real outcome is the status above
 
 
 def test_bulk_assign_sends_one_email_per_driver_with_all_their_sos(h):
-    h.assign(["SO-1", "SO-2", "SO-3"], [1, 3])
+    h.assign_and_send(["SO-1", "SO-2", "SO-3"], [1, 3])
     driver, team = h.by_purpose("assignment-driver"), h.by_purpose("assignment-team")
     assert sorted(m["to"] for m in driver) == ["juan@x.com", "maria@x.com"]  # 2 drivers -> 2 emails, not 6
     for message in driver:
@@ -122,7 +132,7 @@ def test_bulk_assign_sends_one_email_per_driver_with_all_their_sos(h):
 
 def test_token_failure_records_failed_not_sent(h):
     h.fail_with = gmail_sender.GmailSendError("Gmail authorization failed (invalid_grant: Token has been expired or revoked). The mailbox may need to be reconnected.", 502)
-    result = h.assign(["SO-1"], [1])
+    result = h.assign_and_send(["SO-1"], [1])
     assert result["success"] is True  # the assignment itself still stands
     status = h.status()
     assert status["status"] == "failed" and "invalid_grant" in status["error"]
@@ -130,13 +140,13 @@ def test_token_failure_records_failed_not_sent(h):
 
 def test_gmail_not_configured_is_a_visible_failure(h, monkeypatch):
     monkeypatch.setattr(assignment.gmail_sender, "configured", lambda: False)
-    h.assign(["SO-1"], [1])
+    h.assign_and_send(["SO-1"], [1])
     assert h.status()["status"] == "failed" and "not configured" in h.status()["error"]
     assert h.sent == []
 
 
 def test_driver_without_email_is_skipped_visibly_but_team_still_gets_the_email(h):
-    h.assign(["SO-1"], [2])
+    h.assign_and_send(["SO-1"], [2])
     assert h.by_purpose("assignment-driver") == []
     assert len(h.by_purpose("assignment-team")) == 1
     status = h.status()
@@ -145,7 +155,7 @@ def test_driver_without_email_is_skipped_visibly_but_team_still_gets_the_email(h
 
 def test_no_driver_email_and_no_team_recipients_is_skipped(h, monkeypatch):
     monkeypatch.setattr(assignment.staff_directory_cache, "notify_list", lambda: [])
-    h.assign(["SO-1"], [2])
+    h.assign_and_send(["SO-1"], [2])
     status = h.status()
     assert status["status"] == "skipped" and "no email on file" in status["error"]
 
@@ -156,22 +166,22 @@ def test_pause_flags_never_block_email(h, monkeypatch):
         monkeypatch.setattr(control, "is_active", lambda: False)  # WhatsApp and AI voice both paused
     monkeypatch.setattr(assignment.whatsapp_control, "log_skipped", lambda **k: None)
     monkeypatch.setattr(assignment.voice_control, "log_skipped", lambda **k: None)
-    result = h.assign(["SO-1"], [1])
+    result = h.assign_and_send(["SO-1"], [1])
     assert len(h.by_purpose("assignment-driver")) == 1 and len(h.by_purpose("assignment-team")) == 1
     assert h.status()["status"] == "sent"
-    assert result["notifications"]["channels"]["whatsapp"] == "paused" and result["notifications"]["channels"]["voice"] == "paused"
+    assert result["channels"]["whatsapp"] == "paused" and result["channels"]["voice"] == "paused"
     assert not any("whatsapp" in url for url in h.notifications)  # WhatsApp really was skipped; email was not
 
 
 def test_resend_is_explicit_email_only_and_bypasses_dedupe(h, monkeypatch):
     monkeypatch.setenv("INTELLIFLEET_ASSIGNMENT_WEBHOOK_SECRET", "s")
-    h.assign(["SO-1"], [1])
-    auto_key = h.by_purpose("assignment-driver")[0]["dedupe_key"]
+    h.assign_and_send(["SO-1"], [1])
+    auto_key = h.by_purpose("assignment-driver")[0]["dedupe_key"]  # the first Send is deduped on driver + vehicle + SO set
     h.sent.clear()
     h.notifications.clear()
     body = assignment.AssignmentEmailBody(salesorder_ids=h.ids, vehicle_id="TRK1", driver_ids=[1], resend=True, html_body="<p>edited</p>", subject="Edited subject")
     assignment.send_assignment_email(body, h.user, h.db)
-    assert auto_key.startswith("driver|juan@x.com|TRK1|")  # the automatic send is deduped on driver + vehicle + SO set
+    assert auto_key.startswith("driver|juan@x.com|TRK1|")
     assert [m["dedupe_key"] for m in h.sent] == [None]  # the explicit Resend is never swallowed by the 120s dedupe
     assert h.by_purpose("assignment-team") == [] and h.notifications == []  # no second team email, no second WhatsApp/SMS/voice
     assert h.sent[0]["subject"] == "Edited subject" and h.sent[0]["html"] == "<p>edited</p>"
@@ -202,7 +212,7 @@ def test_status_is_persisted_only_on_state_change(monkeypatch):
 
 
 def test_status_endpoint_reads_memory_only(h):
-    h.assign(["SO-1", "SO-2"], [1])
+    h.assign_and_send(["SO-1", "SO-2"], [1])
     app = FastAPI()
     app.include_router(assignment.router)
     app.dependency_overrides[get_current_user] = lambda: h.user
@@ -413,6 +423,103 @@ def test_batch_id_is_written_in_the_same_update_as_the_status_with_no_extra_writ
 
     monkeypatch.setattr(assignment_email_status, "_open_session", lambda: Session())
     result = h.assign(["SO-1", "SO-2"], [1])
-    assert len(writes) == 2  # queued, then sent: the batch id rides in the first one
-    assert writes[0]["email_status"] == "queued" and writes[0]["assignment_batch_id"] == result["assignment_batch_id"]
-    assert writes[1]["email_status"] == "sent" and "assignment_batch_id" not in writes[1]
+    assert len(writes) == 1  # assigning writes ONE status update for the whole batch: not_sent, carrying the batch id
+    assert writes[0]["email_status"] == "not_sent" and writes[0]["assignment_batch_id"] == result["assignment_batch_id"]
+    h.send([1])
+    assert len(writes) == 3  # Send: queued, then sent - nothing polls or rewrites in between
+    assert writes[1]["email_status"] == "queued" and writes[2]["email_status"] == "sent" and "assignment_batch_id" not in writes[2]
+
+
+# ---- assigning sends NOTHING; Send is the only thing that notifies -------------------------------------------------
+
+def test_assign_alone_sends_nothing_on_any_channel_and_marks_not_sent(h, monkeypatch):
+    monkeypatch.setenv("INTELLIFLEET_ASSIGNMENT_WEBHOOK_SECRET", "s")  # even with every channel configured and active
+    voice_calls_made = []
+    monkeypatch.setattr(assignment.vapi_client, "voice_provider", lambda: "direct")
+    monkeypatch.setattr(assignment.voice_calls, "place_assignment_calls_sync", lambda **k: voice_calls_made.append(k))
+    result = h.assign(["SO-1", "SO-2"], [1, 3])
+    assert result["success"] is True and result["assignment_status"] == "assigned" and result["assignment_batch_id"]
+    assert h.sent == [] and h.notifications == [] and voice_calls_made == []  # no email, no WhatsApp/SMS/voice webhook, no direct Vapi call
+    assert h.status()["status"] == "not_sent" and h.status()["error"] is None
+    assert result["notifications"]["sent"] is False and result["notifications"]["status"] == "not_sent"
+    for oid in h.ids:  # persisted in the live assignment state the order list and the status panel read
+        assert lc.get_assignment(oid)["email_status"] == "not_sent" and lc.get_assignment(oid)["assignment_batch_id"] == result["assignment_batch_id"]
+
+
+def test_assign_without_a_driver_is_still_skipped_not_not_sent(h):
+    result = h.assign(["SO-1"], [])
+    assert h.status()["status"] == "skipped" and result["notifications"]["skipped"] is True and h.sent == []
+
+
+def test_preview_does_not_change_the_status_or_send(h):
+    h.assign(["SO-1"], [1])
+    body = assignment.AssignmentEmailBody(salesorder_ids=h.ids, vehicle_id="TRK1", driver_ids=[1], preview=True)
+    preview = assignment.send_assignment_email(body, h.user, h.db)
+    assert "SO-1" in preview["driverHtmlBody"] and h.sent == [] and h.status()["status"] == "not_sent"
+
+
+def test_send_fires_email_and_every_other_channel_once(h, monkeypatch):
+    monkeypatch.setenv("INTELLIFLEET_ASSIGNMENT_WEBHOOK_SECRET", "s")
+    h.assign(["SO-1"], [1])
+    assert h.notifications == []
+    result = h.send([1])
+    assert len(h.by_purpose("assignment-driver")) == 1 and len(h.by_purpose("assignment-team")) == 1
+    assert any("whatsapp" in url for url in h.notifications) and any("sms" in url for url in h.notifications) and any("voice" in url for url in h.notifications)
+    assert h.status()["status"] == "sent" and result["channels"]["whatsapp"] == "queued"
+
+
+def test_a_second_send_is_refused_so_whatsapp_and_voice_never_fire_twice(h, monkeypatch):
+    monkeypatch.setenv("INTELLIFLEET_ASSIGNMENT_WEBHOOK_SECRET", "s")
+    h.assign_and_send(["SO-1"], [1])
+    h.sent.clear()
+    h.notifications.clear()
+    with pytest.raises(assignment.HTTPException) as refused:
+        h.send([1])
+    assert refused.value.status_code == 409 and "already sent" in refused.value.detail
+    assert h.sent == [] and h.notifications == []
+
+
+def test_send_while_queued_or_after_failure_is_refused_with_the_right_hint(h):
+    h.assign(["SO-1"], [1])
+    assignment_email_status.record(h.ids, "queued")
+    with pytest.raises(assignment.HTTPException) as queued:
+        h.send([1])
+    assert queued.value.status_code == 409 and "already being sent" in queued.value.detail
+    assignment_email_status.record(h.ids, "failed", error="invalid_grant")
+    with pytest.raises(assignment.HTTPException) as failed:
+        h.send([1])
+    assert failed.value.status_code == 409 and "Retry" in failed.value.detail
+    assert h.sent == []
+
+
+def test_send_notifies_the_whole_assignment_and_the_stored_people_not_what_the_caller_lists(h):
+    result = h.assign(["SO-1", "SO-2", "SO-3"], [1])
+    # A chip Send on one row of the assignment: only one id listed, and a wrong driver in the request.
+    body = assignment.AssignmentEmailBody(salesorder_ids=h.ids[:1], vehicle_id="TRK1", driver_ids=[3], assignment_batch_id=result["assignment_batch_id"])
+    assignment.send_assignment_email(body, h.user, h.db)
+    driver_mail = h.by_purpose("assignment-driver")
+    assert [m["to"] for m in driver_mail] == ["juan@x.com"]  # the stored driver (Juan), not Maria
+    assert all(number in driver_mail[0]["html"] for number in ("SO-1", "SO-2", "SO-3"))
+
+
+def test_resend_after_a_first_send_is_still_email_only(h, monkeypatch):
+    monkeypatch.setenv("INTELLIFLEET_ASSIGNMENT_WEBHOOK_SECRET", "s")
+    h.assign_and_send(["SO-1"], [1])
+    h.sent.clear()
+    h.notifications.clear()
+    body = assignment.AssignmentEmailBody(salesorder_ids=h.ids, vehicle_id="TRK1", driver_ids=[1], resend=True, assignment_batch_id=h.assigned["assignment_batch_id"], html_body="<p>x</p>", subject="S")
+    assignment.send_assignment_email(body, h.user, h.db)
+    assert len(h.sent) == 1 and h.notifications == []
+
+
+def test_not_sent_is_reported_by_the_status_endpoint_and_survives_in_the_summary_priority(h):
+    h.assign(["SO-1", "SO-2"], [1])
+    app = FastAPI()
+    app.include_router(assignment.router)
+    app.dependency_overrides[get_current_user] = lambda: h.user
+    body = TestClient(app).get("/api/load-planning/assignments/email-status", params={"ids": ",".join(h.ids)}).json()
+    assert body["status"] == "not_sent"
+    assignment_email_status.record(h.ids[:1], "sent")  # mixed batch: not_sent outranks sent so the Send button stays visible
+    assert h.status()["status"] == "not_sent"
+    assignment_email_status.record(h.ids[1:], "failed", error="x")
+    assert h.status()["status"] == "failed"  # a real failure outranks everything
