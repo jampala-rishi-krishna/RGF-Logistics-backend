@@ -119,6 +119,55 @@ class Round2OptimizationTests(unittest.TestCase):
         self.assertEqual(summary["products"][0]["sku"], "SKU-1")
         self.assertEqual(summary["products"][0]["total_weight_kg"], 3.0)
 
+    def test_inventory_summary_keeps_multi_sku_stock_separate_and_negative(self):
+        row = SimpleNamespace(
+            id="so-multi",
+            salesorder_number="SO26-18379",
+            reference_number=None,
+            customer_name="Customer",
+            order_status="confirmed",
+            invoice_status=None,
+            payment_status=None,
+            shipment_status=None,
+            order_date=None,
+            expected_shipment_date=date(2026, 10, 13),
+            total=100,
+            delivery_method=None,
+            salesperson_name=None,
+            synced_at=datetime(2026, 10, 12, tzinfo=ZoneInfo("Asia/Manila")),
+            assignment_status="unassigned",
+            vehicle_id=None,
+            driver_id=None,
+            assigned_at=None,
+            assigned_by=None,
+            assignment_batch_id=None,
+            email_status=None,
+            email_error=None,
+            email_sent_at=None,
+            shipping_address=None,
+            raw_json={
+                "branch_id": "4489499000001322444",
+                "line_items": [
+                    {"line_item_id": "li-1", "item_id": "item-1", "name": "Non-Food Styro Fishpac Body w/Cover", "sku": "RGF-NF-0238", "quantity": 9, "unit": "pc"},
+                    {"line_item_id": "li-2", "item_id": "item-2", "name": "BEEF CHUCK ROLL", "sku": "RGF-B401-1", "quantity": 110, "unit": "kg"},
+                    {"line_item_id": "li-3", "item_id": "item-3", "name": "CHICKEN LEG FILLET SKIN ON", "sku": "RGF-C024", "quantity": 60, "unit": "kg"},
+                ],
+            },
+        )
+        stocks = {
+            "item-1": {"mets": 0.0, "glacier": 0.0},
+            "item-2": {"mets": 76.0, "glacier": -43.42},
+            "item-3": {"mets": 34.0, "glacier": 6.0},
+        }
+        with patch.object(load_planning, "row_to_dict", side_effect=lambda obj: vars(obj).copy()), \
+                patch.object(load_planning, "cached_item_stock", side_effect=lambda item_id, branch_id=None: stocks[item_id]), \
+                patch.object(load_planning, "calculate_line_weight_kg", return_value=None):
+            summary = load_planning._summary(row, db=None, allow_fetch=False)
+
+        self.assertEqual([p["name"] for p in summary["products"]], ["Non-Food Styro Fishpac Body w/Cover", "BEEF CHUCK ROLL", "CHICKEN LEG FILLET SKIN ON"])
+        self.assertEqual([p["sku"] for p in summary["products"]], ["RGF-NF-0238", "RGF-B401-1", "RGF-C024"])
+        self.assertEqual([(p["mets_qty_available_for_sale"], p["glacier_qty_available_for_sale"]) for p in summary["products"]], [(0.0, 0.0), (76.0, -43.42), (34.0, 6.0)])
+
     def test_delta_sync_stops_when_page_is_older_than_last_sync(self):
         calls = []
 
