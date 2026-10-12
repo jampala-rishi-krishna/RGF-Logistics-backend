@@ -45,9 +45,10 @@ def _parse_stock(entry: dict | None, item_id: str = "", branch_id: str | None = 
     positive) - no arithmetic. The separate "Chilled - Mets ..." warehouse is a different
     location and must not replace the main Mets figure.
 
-    With BRANCH_STOCK_MAPPING enabled and a branch that has a rule (services/branches.py), that
-    branch's own warehouses are used instead (RGF and MSSI - the only handled branches)."""
-    rule = branches.STOCK_RULES.get(str(branch_id or "")) if branches.stock_mapping_enabled() else None
+    When the order has a known branch, its warehouse mapping is authoritative (RGF and MSSI -
+    the only handled branches). Falling back to broad names can let another branch overwrite it."""
+    branch = str(branch_id or "")
+    rule = branches.STOCK_RULES.get(branch)
     result: dict[str, float | None] = {"mets": None, "glacier": None}
     for warehouse in (entry or {}).get("warehouses") or []:
         if not isinstance(warehouse, dict):
@@ -61,7 +62,6 @@ def _parse_stock(entry: dict | None, item_id: str = "", branch_id: str | None = 
         )
         if re.search(r"\(deactivated\)$", name, re.I) or name.startswith("(do not use)"):
             continue
-        branch = str(branch_id or "")
         if rule:
             if all(part in name for part in rule["mets"]) and not any(part in name for part in rule.get("mets_exclude", ())) and not name.startswith("chilled"):
                 site = "mets"

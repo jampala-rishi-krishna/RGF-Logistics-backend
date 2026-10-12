@@ -303,27 +303,85 @@ WAREHOUSES_V2 = {"warehouses": [
     {"warehouse_name": "Glacier V2. Daily Pick RGF", "warehouse_available_for_sale_stock": -12},
 ]}
 
+ZOHO_STOCK_FIELDS = {"warehouses": [
+    {
+        "warehouse_name": "Mets Cold Storage Services Inc. RGF",
+        "warehouse_stock_on_hand": 199,
+        "warehouse_available_stock": 198,
+        "warehouse_committed_stock": 21,
+        "warehouse_available_for_sale_stock": 177,
+    },
+    {
+        "warehouse_name": "Glacier South RGF",
+        "warehouse_stock_on_hand": 231,
+        "warehouse_available_stock": 231,
+        "warehouse_committed_stock": 5,
+        "warehouse_available_for_sale_stock": 226,
+    },
+    {
+        "warehouse_name": "Mets Cold Storage Services Inc. MSSI / SUPERMARKET",
+        "warehouse_stock_on_hand": 0,
+        "warehouse_available_stock": 0,
+        "warehouse_committed_stock": 0,
+        "warehouse_available_for_sale_stock": 0,
+    },
+]}
+
 
 class StockMappingTests(unittest.TestCase):
-    def parse(self, branch_id, enabled):
-        with patch.dict(os.environ, {"BRANCH_STOCK_MAPPING": "1" if enabled else ""}):
-            return ws._parse_stock(WAREHOUSES, "i1", branch_id)
+    def parse(self, branch_id):
+        return ws._parse_stock(WAREHOUSES, "i1", branch_id)
 
-    def test_flag_off_is_the_unchanged_legacy_logic(self):
-        for branch in (None, RGF, MSSI):
-            self.assertEqual(self.parse(branch, False), {"mets": 30, "glacier": 20})
+    def test_known_branch_uses_its_warehouses_even_when_legacy_flag_is_off(self):
+        with patch.dict(os.environ, {"BRANCH_STOCK_MAPPING": ""}):
+            self.assertEqual(self.parse(RGF), {"mets": 10, "glacier": 20})
+            self.assertEqual(self.parse(MSSI), {"mets": 30, "glacier": -2000})
+        self.assertEqual(self.parse(None), {"mets": 30, "glacier": 20})
 
-    def test_rgf_and_mssi_mapping_when_on_and_negative_is_kept(self):
-        self.assertEqual(self.parse(RGF, True), {"mets": 10, "glacier": 20})
-        self.assertEqual(self.parse(MSSI, True), {"mets": 30, "glacier": -2000})
+    def test_rgf_uses_zoho_available_for_sale_and_ignores_mssi_supermarket(self):
+        with patch.dict(os.environ, {"BRANCH_STOCK_MAPPING": ""}):
+            stock = ws._parse_stock(ZOHO_STOCK_FIELDS, "item-1", RGF)
+
+        self.assertEqual(stock, {"mets": 177, "glacier": 226})
+        self.assertEqual(ZOHO_STOCK_FIELDS["warehouses"][0]["warehouse_stock_on_hand"] - ZOHO_STOCK_FIELDS["warehouses"][0]["warehouse_committed_stock"], 178)
+        self.assertEqual(ZOHO_STOCK_FIELDS["warehouses"][0]["warehouse_available_stock"] - ZOHO_STOCK_FIELDS["warehouses"][0]["warehouse_committed_stock"], 177)
+
+    def test_rgf_mets_value_is_not_overwritten_by_mssi_supermarket_76(self):
+        item = {"warehouses": [
+            {
+                "warehouse_name": "Mets Cold Storage Services Inc. RGF",
+                "warehouse_available_stock": 16012,
+                "warehouse_committed_stock": 16564,
+                "warehouse_available_for_sale_stock": -552,
+            },
+            {"warehouse_name": "Glacier South RGF", "warehouse_available_for_sale_stock": 34},
+            {"warehouse_name": "Mets Cold Storage Services Inc. MSSI / SUPERMARKET", "warehouse_available_for_sale_stock": 76},
+        ]}
+        self.assertEqual(ws._parse_stock(item, "item-3", RGF), {"mets": -552, "glacier": 34})
+
+    def test_zoho_negative_available_for_sale_includes_committed_stock(self):
+        item = {"warehouses": [
+            {
+                "warehouse_name": "Mets Cold Storage Services Inc. RGF",
+                "warehouse_available_stock": 108.265,
+                "warehouse_committed_stock": 100,
+                "warehouse_available_for_sale_stock": 8.265,
+            },
+            {
+                "warehouse_name": "Glacier South RGF",
+                "warehouse_available_stock": 1770.298,
+                "warehouse_committed_stock": 1813.715,
+                "warehouse_available_for_sale_stock": -43.417,
+            },
+        ]}
+        self.assertEqual(ws._parse_stock(item, "item-2", RGF), {"mets": 8.265, "glacier": -43.417})
 
     def test_rgf_glacier_v2_and_negative_values_are_kept(self):
-        with patch.dict(os.environ, {"BRANCH_STOCK_MAPPING": "1"}):
-            self.assertEqual(ws._parse_stock(WAREHOUSES_V2, "i1", RGF), {"mets": -5, "glacier": -12})
+        self.assertEqual(ws._parse_stock(WAREHOUSES_V2, "i1", RGF), {"mets": -5, "glacier": -12})
 
     def test_only_rgf_and_mssi_have_rules(self):
         self.assertEqual(set(bs.STOCK_RULES), {RGF, MSSI})
-        self.assertEqual(self.parse(SSI, True), self.parse(None, False))  # no SSI row: legacy default, no "other" column
+        self.assertEqual(self.parse(SSI), self.parse(None))  # no SSI row: legacy default, no "other" column
 
 
 class ExportColumnsTests(unittest.TestCase):

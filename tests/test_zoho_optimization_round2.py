@@ -119,10 +119,10 @@ class Round2OptimizationTests(unittest.TestCase):
         self.assertEqual(summary["products"][0]["sku"], "SKU-1")
         self.assertEqual(summary["products"][0]["total_weight_kg"], 3.0)
 
-    def test_inventory_summary_keeps_multi_sku_stock_separate_and_negative(self):
+    def test_inventory_summary_uses_zoho_stock_for_each_live_order_sku(self):
         row = SimpleNamespace(
             id="so-multi",
-            salesorder_number="SO26-18379",
+            salesorder_number="SO26-18380",
             reference_number=None,
             customer_name="Customer",
             order_status="confirmed",
@@ -148,25 +148,25 @@ class Round2OptimizationTests(unittest.TestCase):
             raw_json={
                 "branch_id": "4489499000001322444",
                 "line_items": [
-                    {"line_item_id": "li-1", "item_id": "item-1", "name": "Non-Food Styro Fishpac Body w/Cover", "sku": "RGF-NF-0238", "quantity": 9, "unit": "pc"},
-                    {"line_item_id": "li-2", "item_id": "item-2", "name": "BEEF CHUCK ROLL", "sku": "RGF-B401-1", "quantity": 110, "unit": "kg"},
-                    {"line_item_id": "li-3", "item_id": "item-3", "name": "CHICKEN LEG FILLET SKIN ON", "sku": "RGF-C024", "quantity": 60, "unit": "kg"},
+                    {"line_item_id": "4489499000272563433", "item_id": "4489499000074842271", "name": "Non-Food Styro Fishpac Body w/ Cover", "sku": "RGF-NF-0238", "quantity": 9, "unit": "pc"},
+                    {"line_item_id": "4489499000272563434", "item_id": "4489499000071561700", "name": "BEEF CHUCK ROLL MONDELLI SLICED 2.5MM 1KG", "sku": "RGF-B401-1", "quantity": 110, "unit": "kg"},
+                    {"line_item_id": "4489499000272563435", "item_id": "4489499000071039493", "name": "CHICKEN LEG FILLET SKIN ON SEARA", "sku": "RGF-C024", "quantity": 60, "unit": "kg"},
                 ],
             },
         )
         stocks = {
-            "item-1": {"mets": 0.0, "glacier": 0.0},
-            "item-2": {"mets": 76.0, "glacier": -43.42},
-            "item-3": {"mets": 34.0, "glacier": 6.0},
+            "4489499000074842271": {"mets": 177.0, "glacier": 226.0},
+            "4489499000071561700": {"mets": 680.23, "glacier": 6.0},
+            "4489499000071039493": {"mets": -552.0, "glacier": 34.0},
         }
         with patch.object(load_planning, "row_to_dict", side_effect=lambda obj: vars(obj).copy()), \
                 patch.object(load_planning, "cached_item_stock", side_effect=lambda item_id, branch_id=None: stocks[item_id]), \
                 patch.object(load_planning, "calculate_line_weight_kg", return_value=None):
             summary = load_planning._summary(row, db=None, allow_fetch=False)
 
-        self.assertEqual([p["name"] for p in summary["products"]], ["Non-Food Styro Fishpac Body w/Cover", "BEEF CHUCK ROLL", "CHICKEN LEG FILLET SKIN ON"])
+        self.assertEqual([p["name"] for p in summary["products"]], ["Non-Food Styro Fishpac Body w/ Cover", "BEEF CHUCK ROLL MONDELLI SLICED 2.5MM 1KG", "CHICKEN LEG FILLET SKIN ON SEARA"])
         self.assertEqual([p["sku"] for p in summary["products"]], ["RGF-NF-0238", "RGF-B401-1", "RGF-C024"])
-        self.assertEqual([(p["mets_qty_available_for_sale"], p["glacier_qty_available_for_sale"]) for p in summary["products"]], [(0.0, 0.0), (76.0, -43.42), (34.0, 6.0)])
+        self.assertEqual([(p["mets_qty_available_for_sale"], p["glacier_qty_available_for_sale"]) for p in summary["products"]], [(177.0, 226.0), (680.23, 6.0), (-552.0, 34.0)])
 
     def test_delta_sync_stops_when_page_is_older_than_last_sync(self):
         calls = []

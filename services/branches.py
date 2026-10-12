@@ -32,8 +32,8 @@ BRANCHES: list[dict] = [
 ]
 _BY_ID = {b["id"]: b for b in BRANCHES}
 
-# Per-branch warehouse -> column mapping (only for the handled branches). Matching is on the
-# casefolded warehouse name; used only when BRANCH_STOCK_MAPPING is enabled.
+# Per-branch warehouse -> column mapping (only for handled branches). Matching is on the
+# casefolded warehouse name and is authoritative whenever the order has a known branch ID.
 STOCK_RULES: dict[str, dict] = {
     "4489499000001322444": {"mets": ("mets cold storage",), "mets_exclude": ("near-expiry", "for supermarket", "mssi"), "glacier": ("glacier south rgf",)},
     "4489499000017295785": {"mets": ("mets cold storage", "mssi"), "glacier": ("glacier south mssi",)},
@@ -122,10 +122,6 @@ def filter_allowed(records: list) -> list:
         with _excluded_lock:
             _excluded_count += dropped
     return kept
-
-
-def stock_mapping_enabled() -> bool:
-    return os.environ.get("BRANCH_STOCK_MAPPING", "").strip().lower() in {"1", "true", "yes", "on"}
 
 
 def _initials(name: str) -> str:
