@@ -28,6 +28,18 @@ services:
         sync: false
       - key: JWT_DRIVER_EXPIRE_MINUTES
         sync: false
+      # Cloudflare R2 object storage for trip photos / signatures. Secrets: set in Render, never commit values.
+      # Leave unset to run without photo capture (the driver app hides photo and signature fields).
+      - key: R2_ACCOUNT_ID
+        sync: false
+      - key: R2_ACCESS_KEY_ID
+        sync: false
+      - key: R2_SECRET_ACCESS_KEY
+        sync: false
+      - key: R2_BUCKET
+        sync: false
+      - key: R2_ENDPOINT
+        sync: false
       - key: ZOHO_CLIENT_ID
         sync: false
       - key: ZOHO_CLIENT_SECRET
