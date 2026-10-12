@@ -167,6 +167,8 @@ def _order_payload(row, lines: list) -> dict:
         "total_kg": round(sum(line["kg"] or 0.0 for line in out_lines), 2),
         "total_packs": round(sum(line["packs"] for line in out_lines), 2),
         "notes": notes,
+        "order_status": row.order_status,
+        "shipment_status": row.shipment_status,
         "delivery_status": row.delivery_status,
         "details_loading": contact is None,
     }
