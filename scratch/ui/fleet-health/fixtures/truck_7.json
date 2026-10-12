@@ -1,0 +1,297 @@
+{
+ "truck": {
+  "id": 7,
+  "plate": "Motorcycle 1",
+  "vehicle_type": "Motorcycle",
+  "is_reefer": false,
+  "tracker": {
+   "kind": "no_tracker",
+   "status": null,
+   "last_seen": null,
+   "label": "No tracker"
+  },
+  "locked_reason": null,
+  "capacity_unconfirmed": false,
+  "kind": "no_tracker",
+  "odometer_km": null,
+  "services": {
+   "oil_change": {
+    "status": "no_record",
+    "usage_pct": null,
+    "components": {},
+    "interval": {
+     "km": 10000,
+     "engine_hours": 250,
+     "days": 180,
+     "confirmed": false,
+     "scope": "fleet"
+    },
+    "label": "Oil",
+    "engine_hours_partial": false
+   },
+   "tires": {
+    "status": "no_record",
+    "usage_pct": null,
+    "components": {},
+    "interval": {
+     "km": 40000,
+     "engine_hours": null,
+     "days": 730,
+     "confirmed": false,
+     "scope": "fleet"
+    },
+    "label": "Tyres",
+    "engine_hours_partial": false
+   },
+   "brakes": {
+    "status": "no_record",
+    "usage_pct": null,
+    "components": {},
+    "interval": {
+     "km": 30000,
+     "engine_hours": null,
+     "days": 365,
+     "confirmed": false,
+     "scope": "fleet"
+    },
+    "label": "Brakes",
+    "engine_hours_partial": false
+   },
+   "general_pms": {
+    "status": "no_record",
+    "usage_pct": null,
+    "components": {},
+    "interval": {
+     "km": 20000,
+     "engine_hours": 500,
+     "days": 365,
+     "confirmed": false,
+     "scope": "fleet"
+    },
+    "label": "PMS",
+    "engine_hours_partial": false
+   },
+   "battery": {
+    "status": "no_record",
+    "usage_pct": null,
+    "components": {},
+    "interval": {
+     "km": null,
+     "engine_hours": null,
+     "days": 730,
+     "confirmed": false,
+     "scope": "fleet"
+    },
+    "label": "Battery",
+    "engine_hours_partial": false
+   }
+  },
+  "risk": {
+   "score": 0,
+   "band": "low",
+   "breakdown": [
+    {
+     "key": "service",
+     "label": "Service",
+     "points": 0,
+     "max": 40,
+     "detail": "no service usage measured",
+     "formula": "100%+ of any interval = 40, 80-100% = 20"
+    },
+    {
+     "key": "flags",
+     "label": "Open issues",
+     "points": 0,
+     "max": 25,
+     "detail": "0 critical x 15 + 0 warning x 5",
+     "formula": "critical 15 each, warning 5 each, capped at 25"
+    },
+    {
+     "key": "checklists",
+     "label": "Failed pre-trip checks (7 d)",
+     "points": 0,
+     "max": 15,
+     "detail": "0 failed",
+     "formula": "5 each, capped at 15"
+    },
+    {
+     "key": "overloads",
+     "label": "Overloaded trips (30 d)",
+     "points": 0,
+     "max": 10,
+     "detail": "0 flagged",
+     "formula": "2 each, capped at 10"
+    },
+    {
+     "key": "repairs",
+     "label": "Repairs / downtime (90 d)",
+     "points": 0,
+     "max": 10,
+     "detail": "0 repair record(s)",
+     "formula": "5 each, capped at 10"
+    }
+   ],
+   "any_overdue": false,
+   "needs_attention": false
+  },
+  "open_flags": [],
+  "open_flags_count": 0,
+  "critical_flags_count": 0,
+  "last_checklist": null,
+  "failed_checklists_7d": 0,
+  "battery": null,
+  "in_repair_record": false,
+  "offer_repair_record": false
+ },
+ "records": [],
+ "intervals": [
+  {
+   "service_type": "oil_change",
+   "label": "Oil",
+   "default": {
+    "id": 1,
+    "vehicle_id": null,
+    "service_type": "oil_change",
+    "interval_km": 10000,
+    "interval_engine_hours": 250,
+    "interval_days": 180,
+    "active": true,
+    "confirmed": false,
+    "updated_at": "2026-10-08T06:58:52.296138"
+   },
+   "override": null,
+   "effective": {
+    "id": 1,
+    "vehicle_id": null,
+    "service_type": "oil_change",
+    "interval_km": 10000,
+    "interval_engine_hours": 250,
+    "interval_days": 180,
+    "active": true,
+    "confirmed": false,
+    "updated_at": "2026-10-08T06:58:52.296138"
+   },
+   "confirmed": false
+  },
+  {
+   "service_type": "tires",
+   "label": "Tyres",
+   "default": {
+    "id": 2,
+    "vehicle_id": null,
+    "service_type": "tires",
+    "interval_km": 40000,
+    "interval_engine_hours": null,
+    "interval_days": 730,
+    "active": true,
+    "confirmed": false,
+    "updated_at": "2026-10-08T06:58:52.296138"
+   },
+   "override": null,
+   "effective": {
+    "id": 2,
+    "vehicle_id": null,
+    "service_type": "tires",
+    "interval_km": 40000,
+    "interval_engine_hours": null,
+    "interval_days": 730,
+    "active": true,
+    "confirmed": false,
+    "updated_at": "2026-10-08T06:58:52.296138"
+   },
+   "confirmed": false
+  },
+  {
+   "service_type": "brakes",
+   "label": "Brakes",
+   "default": {
+    "id": 3,
+    "vehicle_id": null,
+    "service_type": "brakes",
+    "interval_km": 30000,
+    "interval_engine_hours": null,
+    "interval_days": 365,
+    "active": true,
+    "confirmed": false,
+    "updated_at": "2026-10-08T06:58:52.296138"
+   },
+   "override": null,
+   "effective": {
+    "id": 3,
+    "vehicle_id": null,
+    "service_type": "brakes",
+    "interval_km": 30000,
+    "interval_engine_hours": null,
+    "interval_days": 365,
+    "active": true,
+    "confirmed": false,
+    "updated_at": "2026-10-08T06:58:52.296138"
+   },
+   "confirmed": false
+  },
+  {
+   "service_type": "general_pms",
+   "label": "PMS",
+   "default": {
+    "id": 5,
+    "vehicle_id": null,
+    "service_type": "general_pms",
+    "interval_km": 20000,
+    "interval_engine_hours": 500,
+    "interval_days": 365,
+    "active": true,
+    "confirmed": false,
+    "updated_at": "2026-10-08T06:58:52.296138"
+   },
+   "override": null,
+   "effective": {
+    "id": 5,
+    "vehicle_id": null,
+    "service_type": "general_pms",
+    "interval_km": 20000,
+    "interval_engine_hours": 500,
+    "interval_days": 365,
+    "active": true,
+    "confirmed": false,
+    "updated_at": "2026-10-08T06:58:52.296138"
+   },
+   "confirmed": false
+  },
+  {
+   "service_type": "battery",
+   "label": "Battery",
+   "default": {
+    "id": 6,
+    "vehicle_id": null,
+    "service_type": "battery",
+    "interval_km": null,
+    "interval_engine_hours": null,
+    "interval_days": 730,
+    "active": true,
+    "confirmed": false,
+    "updated_at": "2026-10-08T06:58:52.296138"
+   },
+   "override": null,
+   "effective": {
+    "id": 6,
+    "vehicle_id": null,
+    "service_type": "battery",
+    "interval_km": null,
+    "interval_engine_hours": null,
+    "interval_days": 730,
+    "active": true,
+    "confirmed": false,
+    "updated_at": "2026-10-08T06:58:52.296138"
+   },
+   "confirmed": false
+  }
+ ],
+ "flags": [],
+ "checklists": [],
+ "daily": [],
+ "battery_series": [],
+ "fuel_logs": [],
+ "kmpl_intervals": [],
+ "fuel_checks": [],
+ "has_tracker": false
+}

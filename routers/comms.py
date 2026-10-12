@@ -1,6 +1,8 @@
 from __future__ import annotations
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Depends
+
+from auth.dependencies import require_role
 
 from services import memory_tables
 
@@ -15,6 +17,6 @@ router = APIRouter(tags=["comms"])
 # a row (in-memory, always empty, matching current Neon state before this change).
 
 
-@router.get("/templates")
+@router.get("/templates", dependencies=[Depends(require_role("admin", "dispatcher", "warehouse"))])
 def list_templates():
     return memory_tables.notification_templates.list()

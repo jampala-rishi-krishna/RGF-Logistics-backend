@@ -1,6 +1,8 @@
 from __future__ import annotations
 
-from sqlalchemy import BigInteger, Boolean, Text
+from datetime import datetime
+
+from sqlalchemy import BigInteger, Boolean, DateTime, ForeignKey, Integer, Text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from database import TimestampedBase
@@ -21,6 +23,23 @@ class User(TimestampedBase):
     # Forces a change-password flow on next login. Set True by scripts/seed_minimal.py for the
     # admin account (its password was printed in plaintext to stdout/logs at seed time).
     must_change_password: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    # Links a login to its record in the n8n staff directory (plain int, no FK: staff are not in Neon).
+    # Migration n4f5a6b7c8d9. Driver endpoints scope every query by this value.
+    staff_id: Mapped[int | None] = mapped_column(Integer, unique=True, index=True)
+
+
+
+class UserInvite(TimestampedBase):
+    """Single-use, expiring set-password link (migration n4f5a6b7c8d9). Only the SHA-256 of the token is
+    stored; the token itself exists only in the link that is emailed / copied by an admin."""
+
+    __tablename__ = "user_invites"
+
+    user_id: Mapped[int] = mapped_column(BigInteger, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    token_hash: Mapped[str] = mapped_column(Text, nullable=False, unique=True)
+    purpose: Mapped[str] = mapped_column(Text, nullable=False)  # "invite" | "reset"
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
 class Role(TimestampedBase):

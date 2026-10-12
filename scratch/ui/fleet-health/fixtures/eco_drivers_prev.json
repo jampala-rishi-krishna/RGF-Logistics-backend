@@ -1,0 +1,224 @@
+{
+ "week_start": "2026-09-21",
+ "week_end": "2026-09-27",
+ "min_km": 50.0,
+ "weights": {
+  "speeding_per_100km_seconds": 0.05,
+  "speeding_cap": 30,
+  "harsh_per_100km_events": 2.5,
+  "harsh_cap": 25,
+  "idle_elsewhere_min_per_driving_hour": 1.0,
+  "idle_cap": 25,
+  "kmpl_below_average_pct": 0.5,
+  "kmpl_cap": 20
+ },
+ "fleet_kmpl_30d": 5.06,
+ "drivers": [
+  {
+   "score": 73,
+   "status": "scored",
+   "reason": null,
+   "totals": {
+    "km": 1103.3,
+    "assigned_km": 1103.3,
+    "unassigned_km": 0,
+    "engine_hours": 45.47,
+    "driving_hours": 38.7,
+    "speeding_events": 38,
+    "speeding_seconds": 4283,
+    "harsh_events": 11,
+    "idle_total_min": 406.4,
+    "idle_at_stop_min": 202.8,
+    "idle_elsewhere_min": 203.7,
+    "unclassified_idle_min": 0.0,
+    "max_speed_kmh": 102,
+    "days": 10
+   },
+   "breakdown": [
+    {
+     "key": "speeding",
+     "label": "Speeding",
+     "penalty": 19.4,
+     "cap": 30,
+     "detail": "4283 s over the limit in 1103 km = 388 s per 100 km",
+     "formula": "seconds per 100 km x 0.05, capped at 30"
+    },
+    {
+     "key": "harsh",
+     "label": "Harsh driving",
+     "penalty": 2.5,
+     "cap": 25,
+     "detail": "11 harsh event(s) in 1103 km = 1.0 per 100 km",
+     "formula": "events per 100 km x 2.5, capped at 25"
+    },
+    {
+     "key": "idle",
+     "label": "Idling away from stops",
+     "penalty": 5.3,
+     "cap": 25,
+     "detail": "204 min idle elsewhere in 38.7 driving h (idle at stops 203 min is not penalised)",
+     "formula": "idle-elsewhere minutes per driving hour x 1.0, capped at 25"
+    },
+    {
+     "key": "kmpl",
+     "label": "Fuel economy",
+     "penalty": 0.0,
+     "cap": 20,
+     "detail": "6.28 km/L vs fleet average 5.06 km/L (0% below)",
+     "formula": "% below fleet-average km/L x 0.5, capped at 20"
+    }
+   ],
+   "staff_id": 13,
+   "trucks": [
+    "DCD8953",
+    "NFX5791"
+   ],
+   "kmpl": 6.28,
+   "name": "Juan Dela Cruz",
+   "band": "good",
+   "previous_score": 76,
+   "trend": -3,
+   "rank": 1
+  },
+  {
+   "score": 62,
+   "status": "scored",
+   "reason": null,
+   "totals": {
+    "km": 252.5,
+    "assigned_km": 252.5,
+    "unassigned_km": 0,
+    "engine_hours": 10.62,
+    "driving_hours": 8.85,
+    "speeding_events": 8,
+    "speeding_seconds": 1331,
+    "harsh_events": 4,
+    "idle_total_min": 106.4,
+    "idle_at_stop_min": 41.3,
+    "idle_elsewhere_min": 65.1,
+    "unclassified_idle_min": 0.0,
+    "max_speed_kmh": 101,
+    "days": 3
+   },
+   "breakdown": [
+    {
+     "key": "speeding",
+     "label": "Speeding",
+     "penalty": 26.4,
+     "cap": 30,
+     "detail": "1331 s over the limit in 252 km = 527 s per 100 km",
+     "formula": "seconds per 100 km x 0.05, capped at 30"
+    },
+    {
+     "key": "harsh",
+     "label": "Harsh driving",
+     "penalty": 4.0,
+     "cap": 25,
+     "detail": "4 harsh event(s) in 252 km = 1.6 per 100 km",
+     "formula": "events per 100 km x 2.5, capped at 25"
+    },
+    {
+     "key": "idle",
+     "label": "Idling away from stops",
+     "penalty": 7.4,
+     "cap": 25,
+     "detail": "65 min idle elsewhere in 8.8 driving h (idle at stops 41 min is not penalised)",
+     "formula": "idle-elsewhere minutes per driving hour x 1.0, capped at 25"
+    },
+    {
+     "key": "kmpl",
+     "label": "Fuel economy",
+     "penalty": 0.0,
+     "cap": 20,
+     "detail": "5.54 km/L vs fleet average 5.06 km/L (0% below)",
+     "formula": "% below fleet-average km/L x 0.5, capped at 20"
+    }
+   ],
+   "staff_id": 7,
+   "trucks": [
+    "DCD8954"
+   ],
+   "kmpl": 5.54,
+   "name": "Pedro Reyes",
+   "band": "watch",
+   "previous_score": 70,
+   "trend": -8,
+   "rank": 2
+  },
+  {
+   "score": 56,
+   "status": "scored",
+   "reason": null,
+   "totals": {
+    "km": 673.1,
+    "assigned_km": 673.1,
+    "unassigned_km": 0,
+    "engine_hours": 24.04,
+    "driving_hours": 21.76,
+    "speeding_events": 25,
+    "speeding_seconds": 3259,
+    "harsh_events": 3,
+    "idle_total_min": 136.6,
+    "idle_at_stop_min": 63.6,
+    "idle_elsewhere_min": 73.0,
+    "unclassified_idle_min": 0.0,
+    "max_speed_kmh": 102,
+    "days": 3
+   },
+   "breakdown": [
+    {
+     "key": "speeding",
+     "label": "Speeding",
+     "penalty": 24.2,
+     "cap": 30,
+     "detail": "3259 s over the limit in 673 km = 484 s per 100 km",
+     "formula": "seconds per 100 km x 0.05, capped at 30"
+    },
+    {
+     "key": "harsh",
+     "label": "Harsh driving",
+     "penalty": 1.1,
+     "cap": 25,
+     "detail": "3 harsh event(s) in 673 km = 0.4 per 100 km",
+     "formula": "events per 100 km x 2.5, capped at 25"
+    },
+    {
+     "key": "idle",
+     "label": "Idling away from stops",
+     "penalty": 3.4,
+     "cap": 25,
+     "detail": "73 min idle elsewhere in 21.8 driving h (idle at stops 64 min is not penalised)",
+     "formula": "idle-elsewhere minutes per driving hour x 1.0, capped at 25"
+    },
+    {
+     "key": "kmpl",
+     "label": "Fuel economy",
+     "penalty": 14.8,
+     "cap": 20,
+     "detail": "3.56 km/L vs fleet average 5.06 km/L (30% below)",
+     "formula": "% below fleet-average km/L x 0.5, capped at 20"
+    }
+   ],
+   "staff_id": 8,
+   "trucks": [
+    "DCD8955"
+   ],
+   "kmpl": 3.56,
+   "name": "Ricky Bautista",
+   "band": "watch",
+   "previous_score": 83,
+   "trend": -27,
+   "rank": 3
+  }
+ ],
+ "summary": {
+  "avg_score": 64,
+  "scored": 3,
+  "not_enough_data": 0
+ },
+ "unassigned": {
+  "km": 889.4,
+  "days": 26,
+  "note": "Days with no assignment data are excluded from every driver score; idle on those days is not classified."
+ }
+}

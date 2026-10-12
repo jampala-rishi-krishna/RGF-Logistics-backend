@@ -189,7 +189,7 @@ async def complete_checklist(manifest_id: int, body: ChecklistBody, current_user
     return {"checklist": row_to_dict(checklist), "manifest": row_to_dict(manifest)}
 
 
-@router.get("/dispatch-dashboard", dependencies=[Depends(get_current_user)])
+@router.get("/dispatch-dashboard", dependencies=[Depends(OPS)])
 def dispatch_dashboard(date: str | None = None, refresh: bool = False, db: Session = Depends(get_db)):
     """Live Dispatch Manifest. Current dates use assigned in-memory state + Zoho;
     only the small manifest lookup is read from Neon for departed status."""

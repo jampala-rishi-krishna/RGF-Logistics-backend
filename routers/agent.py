@@ -10,7 +10,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from fastapi.security import HTTPAuthorizationCredentials
 from pydantic import BaseModel
 
-from auth.dependencies import CurrentUser, bearer_scheme, get_current_user
+from auth.dependencies import CurrentUser, bearer_scheme, require_role
 from services import memory_tables
 from services.agent_tools import ACTION_TOOLS, READ_TOOLS, InternalRequestError
 from services.audit import write_audit_log
@@ -71,7 +71,7 @@ class ChatBody(BaseModel):
 @router.post("/chat")
 async def chat(
     body: ChatBody,
-    current_user: CurrentUser = Depends(get_current_user),
+    current_user: CurrentUser = Depends(require_role("admin", "dispatcher", "warehouse")),
     credentials: HTTPAuthorizationCredentials = Depends(bearer_scheme),
 ):
     message = body.message.strip() if body.message else ""
@@ -170,7 +170,7 @@ class ConfirmActionBody(BaseModel):
 @router.post("/confirm-action")
 async def confirm_action(
     body: ConfirmActionBody,
-    current_user: CurrentUser = Depends(get_current_user),
+    current_user: CurrentUser = Depends(require_role("admin", "dispatcher", "warehouse")),
     credentials: HTTPAuthorizationCredentials = Depends(bearer_scheme),
 ):
     tool_fn = ACTION_TOOLS.get(body.tool)

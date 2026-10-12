@@ -1,0 +1,81 @@
+{
+ "days": 30,
+ "sensor_checks": [
+  {
+   "vehicle_id": 1,
+   "plate": "DCD8953",
+   "date": "2026-10-06",
+   "kind": "parked_drop",
+   "litres_est": 18.0,
+   "text": "Possible fuel drop of about 18 L while parked (estimate from the analog sensor), check. Tank capacity is unconfirmed for this truck."
+  },
+  {
+   "vehicle_id": 3,
+   "plate": "DCD8955",
+   "date": "2026-10-04",
+   "kind": "refuel",
+   "litres_est": 55.0,
+   "text": "1 refuel(s), about 55 L (estimate from the analog sensor)."
+  },
+  {
+   "vehicle_id": 3,
+   "plate": "DCD8955",
+   "date": "2026-09-27",
+   "kind": "refuel",
+   "litres_est": 55.0,
+   "text": "1 refuel(s), about 55 L (estimate from the analog sensor)."
+  }
+ ],
+ "log_checks": [
+  {
+   "fill_id": 21,
+   "filled_at": "2026-10-05T06:58:52.361776+00:00",
+   "reason": "220 L is more than the 200 L tank (tank capacity unconfirmed), check",
+   "vehicle_id": 1,
+   "plate": "DCD8953"
+  },
+  {
+   "fill_id": 5,
+   "filled_at": "2026-09-22T06:58:52.361776+00:00",
+   "reason": "86 L is more than the 55 L tank, check",
+   "vehicle_id": 4,
+   "plate": "NFX5791"
+  },
+  {
+   "fill_id": 9,
+   "filled_at": "2026-09-19T06:58:52.361776+00:00",
+   "reason": "106 L is more than the 100 L tank, check",
+   "vehicle_id": 3,
+   "plate": "DCD8955"
+  },
+  {
+   "fill_id": 4,
+   "filled_at": "2026-09-16T06:58:52.361776+00:00",
+   "reason": "70 L is more than the 55 L tank, check",
+   "vehicle_id": 4,
+   "plate": "NFX5791"
+  },
+  {
+   "fill_id": 3,
+   "filled_at": "2026-09-10T06:58:52.361776+00:00",
+   "reason": "82 L is more than the 55 L tank, check",
+   "vehicle_id": 4,
+   "plate": "NFX5791"
+  },
+  {
+   "fill_id": 2,
+   "filled_at": "2026-09-04T06:58:52.361776+00:00",
+   "reason": "94 L is more than the 55 L tank, check",
+   "vehicle_id": 4,
+   "plate": "NFX5791"
+  },
+  {
+   "fill_id": 1,
+   "filled_at": "2026-08-29T06:58:52.361776+00:00",
+   "reason": "74 L is more than the 55 L tank, check",
+   "vehicle_id": 4,
+   "plate": "NFX5791"
+  }
+ ],
+ "label": "Estimates from the analog fuel sensor: they are checks, not conclusions."
+}

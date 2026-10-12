@@ -1,0 +1,1647 @@
+{
+ "generated_at": "2026-10-08T06:58:52.888099+00:00",
+ "service_types": [
+  {
+   "key": "oil_change",
+   "label": "Oil"
+  },
+  {
+   "key": "tires",
+   "label": "Tyres"
+  },
+  {
+   "key": "brakes",
+   "label": "Brakes"
+  },
+  {
+   "key": "reefer_service",
+   "label": "Reefer"
+  },
+  {
+   "key": "general_pms",
+   "label": "PMS"
+  },
+  {
+   "key": "battery",
+   "label": "Battery"
+  }
+ ],
+ "intervals_unconfirmed": true,
+ "trucks": [
+  {
+   "id": 1,
+   "plate": "DCD8953",
+   "vehicle_type": "Reefer truck",
+   "is_reefer": true,
+   "tracker": {
+    "kind": "tracked",
+    "status": "stale",
+    "last_seen": "2026-10-08",
+    "label": "No recent signal"
+   },
+   "locked_reason": null,
+   "capacity_unconfirmed": true,
+   "kind": "tracked",
+   "odometer_km": 44750.0,
+   "services": {
+    "oil_change": {
+     "status": "ok",
+     "usage_pct": 48.1,
+     "driven_by": "engine_hours",
+     "components": {
+      "km": {
+       "since": 650.0,
+       "interval": 10000,
+       "pct": 6.5
+      },
+      "engine_hours": {
+       "since": 120.2,
+       "interval": 250,
+       "pct": 48.1
+      },
+      "days": {
+       "since": 40,
+       "interval": 180,
+       "pct": 22.2
+      }
+     },
+     "interval": {
+      "km": 10000,
+      "engine_hours": 250,
+      "days": 180,
+      "confirmed": false,
+      "scope": "fleet"
+     },
+     "last_service_on": "2026-08-29",
+     "label": "Oil",
+     "engine_hours_partial": false
+    },
+    "tires": {
+     "status": "ok",
+     "usage_pct": 27.4,
+     "driven_by": "days",
+     "components": {
+      "km": {
+       "since": 8750.0,
+       "interval": 40000,
+       "pct": 21.9
+      },
+      "days": {
+       "since": 200,
+       "interval": 730,
+       "pct": 27.4
+      }
+     },
+     "interval": {
+      "km": 40000,
+      "engine_hours": null,
+      "days": 730,
+      "confirmed": false,
+      "scope": "fleet"
+     },
+     "last_service_on": "2026-03-22",
+     "label": "Tyres",
+     "engine_hours_partial": true
+    },
+    "brakes": {
+     "status": "ok",
+     "usage_pct": 32.9,
+     "driven_by": "days",
+     "components": {
+      "km": {
+       "since": 3750.0,
+       "interval": 30000,
+       "pct": 12.5
+      },
+      "days": {
+       "since": 120,
+       "interval": 365,
+       "pct": 32.9
+      }
+     },
+     "interval": {
+      "km": 30000,
+      "engine_hours": null,
+      "days": 365,
+      "confirmed": false,
+      "scope": "fleet"
+     },
+     "last_service_on": "2026-06-10",
+     "label": "Brakes",
+     "engine_hours_partial": true
+    },
+    "reefer_service": {
+     "status": "ok",
+     "usage_pct": 38.2,
+     "driven_by": "engine_hours",
+     "components": {
+      "engine_hours": {
+       "since": 190.8,
+       "interval": 500,
+       "pct": 38.2
+      },
+      "days": {
+       "since": 60,
+       "interval": 180,
+       "pct": 33.3
+      }
+     },
+     "interval": {
+      "km": null,
+      "engine_hours": 500,
+      "days": 180,
+      "confirmed": false,
+      "scope": "fleet"
+     },
+     "last_service_on": "2026-08-09",
+     "label": "Reefer",
+     "engine_hours_partial": true
+    },
+    "general_pms": {
+     "status": "ok",
+     "usage_pct": 38.2,
+     "driven_by": "engine_hours",
+     "components": {
+      "km": {
+       "since": 1750.0,
+       "interval": 20000,
+       "pct": 8.8
+      },
+      "engine_hours": {
+       "since": 190.8,
+       "interval": 500,
+       "pct": 38.2
+      },
+      "days": {
+       "since": 90,
+       "interval": 365,
+       "pct": 24.7
+      }
+     },
+     "interval": {
+      "km": 20000,
+      "engine_hours": 500,
+      "days": 365,
+      "confirmed": false,
+      "scope": "fleet"
+     },
+     "last_service_on": "2026-07-10",
+     "label": "PMS",
+     "engine_hours_partial": true
+    },
+    "battery": {
+     "status": "no_record",
+     "usage_pct": null,
+     "components": {},
+     "interval": {
+      "km": null,
+      "engine_hours": null,
+      "days": 730,
+      "confirmed": false,
+      "scope": "fleet"
+     },
+     "label": "Battery",
+     "engine_hours_partial": false
+    }
+   },
+   "risk": {
+    "score": 5,
+    "band": "low",
+    "breakdown": [
+     {
+      "key": "service",
+      "label": "Service",
+      "points": 0,
+      "max": 40,
+      "detail": "worst usage 48% (0 overdue)",
+      "formula": "100%+ of any interval = 40, 80-100% = 20"
+     },
+     {
+      "key": "flags",
+      "label": "Open issues",
+      "points": 5,
+      "max": 25,
+      "detail": "0 critical x 15 + 1 warning x 5",
+      "formula": "critical 15 each, warning 5 each, capped at 25"
+     },
+     {
+      "key": "checklists",
+      "label": "Failed pre-trip checks (7 d)",
+      "points": 0,
+      "max": 15,
+      "detail": "0 failed",
+      "formula": "5 each, capped at 15"
+     },
+     {
+      "key": "overloads",
+      "label": "Overloaded trips (30 d)",
+      "points": 0,
+      "max": 10,
+      "detail": "0 flagged",
+      "formula": "2 each, capped at 10"
+     },
+     {
+      "key": "repairs",
+      "label": "Repairs / downtime (90 d)",
+      "points": 0,
+      "max": 10,
+      "detail": "0 repair record(s)",
+      "formula": "5 each, capped at 10"
+     }
+    ],
+    "any_overdue": false,
+    "needs_attention": false
+   },
+   "open_flags": [
+    {
+     "id": 4,
+     "vehicle_id": 1,
+     "source": "fuel",
+     "severity": "warning",
+     "message": "Possible fuel drop of about 18 L while parked on 2026-10-06 (estimate from the analog fuel sensor), check. Tank capacity is unconfirmed for this truck, so the litres are less certain.",
+     "ref": null,
+     "photo_ref": null,
+     "reported_by": "Fleet Health",
+     "resolution_note": null,
+     "resolved_by": null,
+     "occurred_at": null,
+     "created_at": "2026-10-08T06:58:52.353618+00:00",
+     "resolved_at": null
+    }
+   ],
+   "open_flags_count": 1,
+   "critical_flags_count": 0,
+   "last_checklist": {
+    "id": 1,
+    "checked_at": "2026-10-08T01:58:52.358559+00:00",
+    "passed": true
+   },
+   "failed_checklists_7d": 0,
+   "battery": {
+    "status": "ok",
+    "reasons": [],
+    "date": "2026-10-08",
+    "parked_min": 12.81,
+    "running_avg": 14.0,
+    "system": 12
+   },
+   "in_repair_record": false,
+   "offer_repair_record": false
+  },
+  {
+   "id": 2,
+   "plate": "DCD8954",
+   "vehicle_type": "Reefer truck",
+   "is_reefer": true,
+   "tracker": {
+    "kind": "tracked",
+    "status": "stale",
+    "last_seen": "2026-10-08",
+    "label": "No recent signal"
+   },
+   "locked_reason": null,
+   "capacity_unconfirmed": true,
+   "kind": "tracked",
+   "odometer_km": 52300.0,
+   "services": {
+    "oil_change": {
+     "status": "ok",
+     "usage_pct": 31.2,
+     "driven_by": "engine_hours",
+     "components": {
+      "km": {
+       "since": 400.0,
+       "interval": 10000,
+       "pct": 4.0
+      },
+      "engine_hours": {
+       "since": 78.0,
+       "interval": 250,
+       "pct": 31.2
+      },
+      "days": {
+       "since": 25,
+       "interval": 180,
+       "pct": 13.9
+      }
+     },
+     "interval": {
+      "km": 10000,
+      "engine_hours": 250,
+      "days": 180,
+      "confirmed": false,
+      "scope": "fleet"
+     },
+     "last_service_on": "2026-09-13",
+     "label": "Oil",
+     "engine_hours_partial": false
+    },
+    "tires": {
+     "status": "no_record",
+     "usage_pct": null,
+     "components": {},
+     "interval": {
+      "km": 40000,
+      "engine_hours": null,
+      "days": 730,
+      "confirmed": false,
+      "scope": "fleet"
+     },
+     "label": "Tyres",
+     "engine_hours_partial": false
+    },
+    "brakes": {
+     "status": "no_record",
+     "usage_pct": null,
+     "components": {},
+     "interval": {
+      "km": 30000,
+      "engine_hours": null,
+      "days": 365,
+      "confirmed": false,
+      "scope": "fleet"
+     },
+     "label": "Brakes",
+     "engine_hours_partial": false
+    },
+    "reefer_service": {
+     "status": "no_record",
+     "usage_pct": null,
+     "components": {},
+     "interval": {
+      "km": null,
+      "engine_hours": 500,
+      "days": 180,
+      "confirmed": false,
+      "scope": "fleet"
+     },
+     "label": "Reefer",
+     "engine_hours_partial": false
+    },
+    "general_pms": {
+     "status": "no_record",
+     "usage_pct": null,
+     "components": {},
+     "interval": {
+      "km": 20000,
+      "engine_hours": 500,
+      "days": 365,
+      "confirmed": false,
+      "scope": "fleet"
+     },
+     "label": "PMS",
+     "engine_hours_partial": false
+    },
+    "battery": {
+     "status": "no_record",
+     "usage_pct": null,
+     "components": {},
+     "interval": {
+      "km": null,
+      "engine_hours": null,
+      "days": 730,
+      "confirmed": false,
+      "scope": "fleet"
+     },
+     "label": "Battery",
+     "engine_hours_partial": false
+    }
+   },
+   "risk": {
+    "score": 7,
+    "band": "low",
+    "breakdown": [
+     {
+      "key": "service",
+      "label": "Service",
+      "points": 0,
+      "max": 40,
+      "detail": "worst usage 31% (0 overdue)",
+      "formula": "100%+ of any interval = 40, 80-100% = 20"
+     },
+     {
+      "key": "flags",
+      "label": "Open issues",
+      "points": 5,
+      "max": 25,
+      "detail": "0 critical x 15 + 1 warning x 5",
+      "formula": "critical 15 each, warning 5 each, capped at 25"
+     },
+     {
+      "key": "checklists",
+      "label": "Failed pre-trip checks (7 d)",
+      "points": 0,
+      "max": 15,
+      "detail": "0 failed",
+      "formula": "5 each, capped at 15"
+     },
+     {
+      "key": "overloads",
+      "label": "Overloaded trips (30 d)",
+      "points": 2,
+      "max": 10,
+      "detail": "1 flagged",
+      "formula": "2 each, capped at 10"
+     },
+     {
+      "key": "repairs",
+      "label": "Repairs / downtime (90 d)",
+      "points": 0,
+      "max": 10,
+      "detail": "0 repair record(s)",
+      "formula": "5 each, capped at 10"
+     }
+    ],
+    "any_overdue": false,
+    "needs_attention": false
+   },
+   "open_flags": [
+    {
+     "id": 5,
+     "vehicle_id": 2,
+     "source": "overload",
+     "severity": "warning",
+     "message": "Over capacity on 2026-10-08: 2,140 kg planned on a 1,800 kg truck (+340 kg)",
+     "ref": "SO-18322, SO-18331",
+     "photo_ref": null,
+     "reported_by": "Dispatch",
+     "resolution_note": null,
+     "resolved_by": null,
+     "occurred_at": null,
+     "created_at": "2026-10-08T06:58:52.353618+00:00",
+     "resolved_at": null
+    }
+   ],
+   "open_flags_count": 1,
+   "critical_flags_count": 0,
+   "last_checklist": {
+    "id": 5,
+    "checked_at": "2026-10-08T01:58:52.358559+00:00",
+    "passed": true
+   },
+   "failed_checklists_7d": 0,
+   "battery": {
+    "status": "ok",
+    "reasons": [],
+    "date": "2026-10-08",
+    "parked_min": 12.67,
+    "running_avg": 14.32,
+    "system": 12
+   },
+   "in_repair_record": false,
+   "offer_repair_record": false
+  },
+  {
+   "id": 3,
+   "plate": "DCD8955",
+   "vehicle_type": "Reefer truck",
+   "is_reefer": true,
+   "tracker": {
+    "kind": "tracked",
+    "status": "stale",
+    "last_seen": "2026-10-08",
+    "label": "No recent signal"
+   },
+   "locked_reason": null,
+   "capacity_unconfirmed": false,
+   "kind": "tracked",
+   "odometer_km": 40850.0,
+   "services": {
+    "oil_change": {
+     "status": "overdue",
+     "usage_pct": 139.2,
+     "driven_by": "engine_hours",
+     "components": {
+      "km": {
+       "since": 9650.0,
+       "interval": 10000,
+       "pct": 96.5
+      },
+      "engine_hours": {
+       "since": 348.1,
+       "interval": 250,
+       "pct": 139.2
+      },
+      "days": {
+       "since": 150,
+       "interval": 180,
+       "pct": 83.3
+      }
+     },
+     "interval": {
+      "km": 10000,
+      "engine_hours": 250,
+      "days": 180,
+      "confirmed": false,
+      "scope": "fleet"
+     },
+     "last_service_on": "2026-05-11",
+     "label": "Oil",
+     "engine_hours_partial": true
+    },
+    "tires": {
+     "status": "no_record",
+     "usage_pct": null,
+     "components": {},
+     "interval": {
+      "km": 40000,
+      "engine_hours": null,
+      "days": 730,
+      "confirmed": false,
+      "scope": "fleet"
+     },
+     "label": "Tyres",
+     "engine_hours_partial": false
+    },
+    "brakes": {
+     "status": "ok",
+     "usage_pct": 5.5,
+     "driven_by": "days",
+     "components": {
+      "km": {
+       "since": 750.0,
+       "interval": 30000,
+       "pct": 2.5
+      },
+      "days": {
+       "since": 20,
+       "interval": 365,
+       "pct": 5.5
+      }
+     },
+     "interval": {
+      "km": 30000,
+      "engine_hours": null,
+      "days": 365,
+      "confirmed": false,
+      "scope": "fleet"
+     },
+     "last_service_on": "2026-09-18",
+     "label": "Brakes",
+     "engine_hours_partial": false
+    },
+    "reefer_service": {
+     "status": "no_record",
+     "usage_pct": null,
+     "components": {},
+     "interval": {
+      "km": null,
+      "engine_hours": 500,
+      "days": 180,
+      "confirmed": false,
+      "scope": "fleet"
+     },
+     "label": "Reefer",
+     "engine_hours_partial": false
+    },
+    "general_pms": {
+     "status": "no_record",
+     "usage_pct": null,
+     "components": {},
+     "interval": {
+      "km": 20000,
+      "engine_hours": 500,
+      "days": 365,
+      "confirmed": false,
+      "scope": "fleet"
+     },
+     "label": "PMS",
+     "engine_hours_partial": false
+    },
+    "battery": {
+     "status": "no_record",
+     "usage_pct": null,
+     "components": {},
+     "interval": {
+      "km": null,
+      "engine_hours": null,
+      "days": 730,
+      "confirmed": false,
+      "scope": "fleet"
+     },
+     "label": "Battery",
+     "engine_hours_partial": false
+    }
+   },
+   "risk": {
+    "score": 50,
+    "band": "medium",
+    "breakdown": [
+     {
+      "key": "service",
+      "label": "Service",
+      "points": 40,
+      "max": 40,
+      "detail": "worst usage 139% (1 overdue)",
+      "formula": "100%+ of any interval = 40, 80-100% = 20"
+     },
+     {
+      "key": "flags",
+      "label": "Open issues",
+      "points": 5,
+      "max": 25,
+      "detail": "0 critical x 15 + 1 warning x 5",
+      "formula": "critical 15 each, warning 5 each, capped at 25"
+     },
+     {
+      "key": "checklists",
+      "label": "Failed pre-trip checks (7 d)",
+      "points": 5,
+      "max": 15,
+      "detail": "1 failed",
+      "formula": "5 each, capped at 15"
+     },
+     {
+      "key": "overloads",
+      "label": "Overloaded trips (30 d)",
+      "points": 0,
+      "max": 10,
+      "detail": "0 flagged",
+      "formula": "2 each, capped at 10"
+     },
+     {
+      "key": "repairs",
+      "label": "Repairs / downtime (90 d)",
+      "points": 0,
+      "max": 10,
+      "detail": "0 repair record(s)",
+      "formula": "5 each, capped at 10"
+     }
+    ],
+    "any_overdue": true,
+    "needs_attention": true
+   },
+   "open_flags": [
+    {
+     "id": 3,
+     "vehicle_id": 3,
+     "source": "battery",
+     "severity": "warning",
+     "message": "Battery warning for 2 days in a row (latest 2026-10-08): parked 12.12 V is below the warning limit 12.2 V (12 V system). Check battery/charging.",
+     "ref": "daily:2026-10-08",
+     "photo_ref": null,
+     "reported_by": "Fleet Health",
+     "resolution_note": null,
+     "resolved_by": null,
+     "occurred_at": null,
+     "created_at": "2026-10-08T06:58:52.351581+00:00",
+     "resolved_at": null
+    }
+   ],
+   "open_flags_count": 1,
+   "critical_flags_count": 0,
+   "last_checklist": {
+    "id": 8,
+    "checked_at": "2026-10-08T01:58:52.358559+00:00",
+    "passed": false
+   },
+   "failed_checklists_7d": 1,
+   "battery": {
+    "status": "ok",
+    "reasons": [],
+    "date": "2026-10-08",
+    "parked_min": 12.81,
+    "running_avg": 13.79,
+    "system": 12
+   },
+   "in_repair_record": false,
+   "offer_repair_record": false
+  },
+  {
+   "id": 4,
+   "plate": "NFX5791",
+   "vehicle_type": "Truck",
+   "is_reefer": false,
+   "tracker": {
+    "kind": "tracked",
+    "status": "stale",
+    "last_seen": "2026-10-08",
+    "label": "No recent signal"
+   },
+   "locked_reason": null,
+   "capacity_unconfirmed": false,
+   "kind": "tracked",
+   "odometer_km": 193070.0,
+   "services": {
+    "oil_change": {
+     "status": "overdue",
+     "usage_pct": 230.7,
+     "driven_by": "km",
+     "components": {
+      "km": {
+       "since": 23070.0,
+       "interval": 10000,
+       "pct": 230.7
+      },
+      "engine_hours": {
+       "since": 314.3,
+       "interval": 250,
+       "pct": 125.7
+      },
+      "days": {
+       "since": 210,
+       "interval": 180,
+       "pct": 116.7
+      }
+     },
+     "interval": {
+      "km": 10000,
+      "engine_hours": 250,
+      "days": 180,
+      "confirmed": false,
+      "scope": "fleet"
+     },
+     "last_service_on": "2026-03-12",
+     "label": "Oil",
+     "engine_hours_partial": true
+    },
+    "tires": {
+     "status": "ok",
+     "usage_pct": 12.7,
+     "driven_by": "km",
+     "components": {
+      "km": {
+       "since": 5070.0,
+       "interval": 40000,
+       "pct": 12.7
+      },
+      "days": {
+       "since": 60,
+       "interval": 730,
+       "pct": 8.2
+      }
+     },
+     "interval": {
+      "km": 40000,
+      "engine_hours": null,
+      "days": 730,
+      "confirmed": false,
+      "scope": "fleet"
+     },
+     "last_service_on": "2026-08-09",
+     "label": "Tyres",
+     "engine_hours_partial": true
+    },
+    "brakes": {
+     "status": "no_record",
+     "usage_pct": null,
+     "components": {},
+     "interval": {
+      "km": 30000,
+      "engine_hours": null,
+      "days": 365,
+      "confirmed": false,
+      "scope": "fleet"
+     },
+     "label": "Brakes",
+     "engine_hours_partial": false
+    },
+    "general_pms": {
+     "status": "no_record",
+     "usage_pct": null,
+     "components": {},
+     "interval": {
+      "km": 20000,
+      "engine_hours": 500,
+      "days": 365,
+      "confirmed": false,
+      "scope": "fleet"
+     },
+     "label": "PMS",
+     "engine_hours_partial": false
+    },
+    "battery": {
+     "status": "no_record",
+     "usage_pct": null,
+     "components": {},
+     "interval": {
+      "km": null,
+      "engine_hours": null,
+      "days": 730,
+      "confirmed": false,
+      "scope": "fleet"
+     },
+     "label": "Battery",
+     "engine_hours_partial": false
+    }
+   },
+   "risk": {
+    "score": 65,
+    "band": "high",
+    "breakdown": [
+     {
+      "key": "service",
+      "label": "Service",
+      "points": 40,
+      "max": 40,
+      "detail": "worst usage 231% (1 overdue)",
+      "formula": "100%+ of any interval = 40, 80-100% = 20"
+     },
+     {
+      "key": "flags",
+      "label": "Open issues",
+      "points": 20,
+      "max": 25,
+      "detail": "1 critical x 15 + 1 warning x 5",
+      "formula": "critical 15 each, warning 5 each, capped at 25"
+     },
+     {
+      "key": "checklists",
+      "label": "Failed pre-trip checks (7 d)",
+      "points": 0,
+      "max": 15,
+      "detail": "0 failed",
+      "formula": "5 each, capped at 15"
+     },
+     {
+      "key": "overloads",
+      "label": "Overloaded trips (30 d)",
+      "points": 0,
+      "max": 10,
+      "detail": "0 flagged",
+      "formula": "2 each, capped at 10"
+     },
+     {
+      "key": "repairs",
+      "label": "Repairs / downtime (90 d)",
+      "points": 5,
+      "max": 10,
+      "detail": "1 repair record(s)",
+      "formula": "5 each, capped at 10"
+     }
+    ],
+    "any_overdue": true,
+    "needs_attention": true
+   },
+   "open_flags": [
+    {
+     "id": 2,
+     "vehicle_id": 4,
+     "source": "email",
+     "severity": "critical",
+     "message": "Juan Dela Cruz reported by email: Engine is overheating near Calamba, need to stop",
+     "ref": "email:18f3c",
+     "photo_ref": null,
+     "reported_by": "Juan Dela Cruz",
+     "resolution_note": null,
+     "resolved_by": null,
+     "occurred_at": null,
+     "created_at": "2026-10-08T06:58:52.351581+00:00",
+     "resolved_at": null
+    },
+    {
+     "id": 1,
+     "vehicle_id": 4,
+     "source": "manual",
+     "severity": "warning",
+     "message": "Left mirror loose",
+     "ref": null,
+     "photo_ref": null,
+     "reported_by": "Rishi",
+     "resolution_note": null,
+     "resolved_by": null,
+     "occurred_at": null,
+     "created_at": "2026-10-08T06:58:52.350573+00:00",
+     "resolved_at": null
+    }
+   ],
+   "open_flags_count": 2,
+   "critical_flags_count": 1,
+   "last_checklist": {
+    "id": 10,
+    "checked_at": "2026-10-07T01:58:52.358559+00:00",
+    "passed": true
+   },
+   "failed_checklists_7d": 0,
+   "battery": {
+    "status": "warning",
+    "reasons": [
+     "parked 12.16 V is below the warning limit 12.2 V (12 V system)"
+    ],
+    "date": "2026-10-08",
+    "parked_min": 12.16,
+    "running_avg": 14.01,
+    "system": 12
+   },
+   "in_repair_record": false,
+   "offer_repair_record": false
+  },
+  {
+   "id": 5,
+   "plate": "NAJ6018",
+   "vehicle_type": "Truck",
+   "is_reefer": null,
+   "tracker": {
+    "kind": "tracked",
+    "status": "stale",
+    "last_seen": "2026-10-08",
+    "label": "No recent signal"
+   },
+   "locked_reason": "For Repair",
+   "capacity_unconfirmed": false,
+   "kind": "tracked",
+   "odometer_km": 261400.0,
+   "services": {
+    "oil_change": {
+     "status": "no_record",
+     "usage_pct": null,
+     "components": {},
+     "interval": {
+      "km": 10000,
+      "engine_hours": 250,
+      "days": 180,
+      "confirmed": false,
+      "scope": "fleet"
+     },
+     "label": "Oil",
+     "engine_hours_partial": false
+    },
+    "tires": {
+     "status": "no_record",
+     "usage_pct": null,
+     "components": {},
+     "interval": {
+      "km": 40000,
+      "engine_hours": null,
+      "days": 730,
+      "confirmed": false,
+      "scope": "fleet"
+     },
+     "label": "Tyres",
+     "engine_hours_partial": false
+    },
+    "brakes": {
+     "status": "no_record",
+     "usage_pct": null,
+     "components": {},
+     "interval": {
+      "km": 30000,
+      "engine_hours": null,
+      "days": 365,
+      "confirmed": false,
+      "scope": "fleet"
+     },
+     "label": "Brakes",
+     "engine_hours_partial": false
+    },
+    "general_pms": {
+     "status": "no_record",
+     "usage_pct": null,
+     "components": {},
+     "interval": {
+      "km": 20000,
+      "engine_hours": 500,
+      "days": 365,
+      "confirmed": false,
+      "scope": "fleet"
+     },
+     "label": "PMS",
+     "engine_hours_partial": false
+    },
+    "battery": {
+     "status": "no_record",
+     "usage_pct": null,
+     "components": {},
+     "interval": {
+      "km": null,
+      "engine_hours": null,
+      "days": 730,
+      "confirmed": false,
+      "scope": "fleet"
+     },
+     "label": "Battery",
+     "engine_hours_partial": false
+    }
+   },
+   "risk": {
+    "score": 5,
+    "band": "low",
+    "breakdown": [
+     {
+      "key": "service",
+      "label": "Service",
+      "points": 0,
+      "max": 40,
+      "detail": "no service usage measured",
+      "formula": "100%+ of any interval = 40, 80-100% = 20"
+     },
+     {
+      "key": "flags",
+      "label": "Open issues",
+      "points": 0,
+      "max": 25,
+      "detail": "0 critical x 15 + 0 warning x 5",
+      "formula": "critical 15 each, warning 5 each, capped at 25"
+     },
+     {
+      "key": "checklists",
+      "label": "Failed pre-trip checks (7 d)",
+      "points": 0,
+      "max": 15,
+      "detail": "0 failed",
+      "formula": "5 each, capped at 15"
+     },
+     {
+      "key": "overloads",
+      "label": "Overloaded trips (30 d)",
+      "points": 0,
+      "max": 10,
+      "detail": "0 flagged",
+      "formula": "2 each, capped at 10"
+     },
+     {
+      "key": "repairs",
+      "label": "Repairs / downtime (90 d)",
+      "points": 5,
+      "max": 10,
+      "detail": "1 repair record(s)",
+      "formula": "5 each, capped at 10"
+     }
+    ],
+    "any_overdue": false,
+    "needs_attention": false
+   },
+   "open_flags": [],
+   "open_flags_count": 0,
+   "critical_flags_count": 0,
+   "last_checklist": null,
+   "failed_checklists_7d": 0,
+   "battery": null,
+   "in_repair_record": true,
+   "offer_repair_record": false
+  },
+  {
+   "id": 6,
+   "plate": "NAN9911",
+   "vehicle_type": "Truck",
+   "is_reefer": null,
+   "tracker": {
+    "kind": "tracked",
+    "status": "stale",
+    "last_seen": "2026-10-08",
+    "label": "No recent signal"
+   },
+   "locked_reason": "Assigned to Production",
+   "capacity_unconfirmed": false,
+   "kind": "tracked",
+   "odometer_km": 199940.0,
+   "services": {
+    "oil_change": {
+     "status": "ok",
+     "usage_pct": 19.1,
+     "driven_by": "engine_hours",
+     "components": {
+      "km": {
+       "since": 440.0,
+       "interval": 10000,
+       "pct": 4.4
+      },
+      "engine_hours": {
+       "since": 47.8,
+       "interval": 250,
+       "pct": 19.1
+      },
+      "days": {
+       "since": 30,
+       "interval": 180,
+       "pct": 16.7
+      }
+     },
+     "interval": {
+      "km": 10000,
+      "engine_hours": 250,
+      "days": 180,
+      "confirmed": false,
+      "scope": "fleet"
+     },
+     "last_service_on": "2026-09-08",
+     "label": "Oil",
+     "engine_hours_partial": false
+    },
+    "tires": {
+     "status": "no_record",
+     "usage_pct": null,
+     "components": {},
+     "interval": {
+      "km": 40000,
+      "engine_hours": null,
+      "days": 730,
+      "confirmed": false,
+      "scope": "fleet"
+     },
+     "label": "Tyres",
+     "engine_hours_partial": false
+    },
+    "brakes": {
+     "status": "no_record",
+     "usage_pct": null,
+     "components": {},
+     "interval": {
+      "km": 30000,
+      "engine_hours": null,
+      "days": 365,
+      "confirmed": false,
+      "scope": "fleet"
+     },
+     "label": "Brakes",
+     "engine_hours_partial": false
+    },
+    "general_pms": {
+     "status": "no_record",
+     "usage_pct": null,
+     "components": {},
+     "interval": {
+      "km": 20000,
+      "engine_hours": 500,
+      "days": 365,
+      "confirmed": false,
+      "scope": "fleet"
+     },
+     "label": "PMS",
+     "engine_hours_partial": false
+    },
+    "battery": {
+     "status": "no_record",
+     "usage_pct": null,
+     "components": {},
+     "interval": {
+      "km": null,
+      "engine_hours": null,
+      "days": 730,
+      "confirmed": false,
+      "scope": "fleet"
+     },
+     "label": "Battery",
+     "engine_hours_partial": false
+    }
+   },
+   "risk": {
+    "score": 10,
+    "band": "low",
+    "breakdown": [
+     {
+      "key": "service",
+      "label": "Service",
+      "points": 0,
+      "max": 40,
+      "detail": "worst usage 19% (0 overdue)",
+      "formula": "100%+ of any interval = 40, 80-100% = 20"
+     },
+     {
+      "key": "flags",
+      "label": "Open issues",
+      "points": 5,
+      "max": 25,
+      "detail": "0 critical x 15 + 1 warning x 5",
+      "formula": "critical 15 each, warning 5 each, capped at 25"
+     },
+     {
+      "key": "checklists",
+      "label": "Failed pre-trip checks (7 d)",
+      "points": 5,
+      "max": 15,
+      "detail": "1 failed",
+      "formula": "5 each, capped at 15"
+     },
+     {
+      "key": "overloads",
+      "label": "Overloaded trips (30 d)",
+      "points": 0,
+      "max": 10,
+      "detail": "0 flagged",
+      "formula": "2 each, capped at 10"
+     },
+     {
+      "key": "repairs",
+      "label": "Repairs / downtime (90 d)",
+      "points": 0,
+      "max": 10,
+      "detail": "0 repair record(s)",
+      "formula": "5 each, capped at 10"
+     }
+    ],
+    "any_overdue": false,
+    "needs_attention": false
+   },
+   "open_flags": [
+    {
+     "id": 6,
+     "vehicle_id": 6,
+     "source": "checklist",
+     "severity": "warning",
+     "message": "Pre-trip check failed: tires.",
+     "ref": "checklist:3",
+     "photo_ref": null,
+     "reported_by": "Warehouse",
+     "resolution_note": null,
+     "resolved_by": null,
+     "occurred_at": null,
+     "created_at": "2026-10-08T06:58:52.356128+00:00",
+     "resolved_at": null
+    }
+   ],
+   "open_flags_count": 1,
+   "critical_flags_count": 0,
+   "last_checklist": {
+    "id": 12,
+    "checked_at": "2026-10-08T01:58:52.358559+00:00",
+    "passed": false
+   },
+   "failed_checklists_7d": 1,
+   "battery": {
+    "status": "ok",
+    "reasons": [],
+    "date": "2026-10-08",
+    "parked_min": 12.71,
+    "running_avg": 14.22,
+    "system": 12
+   },
+   "in_repair_record": false,
+   "offer_repair_record": false
+  },
+  {
+   "id": 7,
+   "plate": "Motorcycle 1",
+   "vehicle_type": "Motorcycle",
+   "is_reefer": false,
+   "tracker": {
+    "kind": "no_tracker",
+    "status": null,
+    "last_seen": null,
+    "label": "No tracker"
+   },
+   "locked_reason": null,
+   "capacity_unconfirmed": false,
+   "kind": "no_tracker",
+   "odometer_km": null,
+   "services": {
+    "oil_change": {
+     "status": "no_record",
+     "usage_pct": null,
+     "components": {},
+     "interval": {
+      "km": 10000,
+      "engine_hours": 250,
+      "days": 180,
+      "confirmed": false,
+      "scope": "fleet"
+     },
+     "label": "Oil",
+     "engine_hours_partial": false
+    },
+    "tires": {
+     "status": "no_record",
+     "usage_pct": null,
+     "components": {},
+     "interval": {
+      "km": 40000,
+      "engine_hours": null,
+      "days": 730,
+      "confirmed": false,
+      "scope": "fleet"
+     },
+     "label": "Tyres",
+     "engine_hours_partial": false
+    },
+    "brakes": {
+     "status": "no_record",
+     "usage_pct": null,
+     "components": {},
+     "interval": {
+      "km": 30000,
+      "engine_hours": null,
+      "days": 365,
+      "confirmed": false,
+      "scope": "fleet"
+     },
+     "label": "Brakes",
+     "engine_hours_partial": false
+    },
+    "general_pms": {
+     "status": "no_record",
+     "usage_pct": null,
+     "components": {},
+     "interval": {
+      "km": 20000,
+      "engine_hours": 500,
+      "days": 365,
+      "confirmed": false,
+      "scope": "fleet"
+     },
+     "label": "PMS",
+     "engine_hours_partial": false
+    },
+    "battery": {
+     "status": "no_record",
+     "usage_pct": null,
+     "components": {},
+     "interval": {
+      "km": null,
+      "engine_hours": null,
+      "days": 730,
+      "confirmed": false,
+      "scope": "fleet"
+     },
+     "label": "Battery",
+     "engine_hours_partial": false
+    }
+   },
+   "risk": {
+    "score": 0,
+    "band": "low",
+    "breakdown": [
+     {
+      "key": "service",
+      "label": "Service",
+      "points": 0,
+      "max": 40,
+      "detail": "no service usage measured",
+      "formula": "100%+ of any interval = 40, 80-100% = 20"
+     },
+     {
+      "key": "flags",
+      "label": "Open issues",
+      "points": 0,
+      "max": 25,
+      "detail": "0 critical x 15 + 0 warning x 5",
+      "formula": "critical 15 each, warning 5 each, capped at 25"
+     },
+     {
+      "key": "checklists",
+      "label": "Failed pre-trip checks (7 d)",
+      "points": 0,
+      "max": 15,
+      "detail": "0 failed",
+      "formula": "5 each, capped at 15"
+     },
+     {
+      "key": "overloads",
+      "label": "Overloaded trips (30 d)",
+      "points": 0,
+      "max": 10,
+      "detail": "0 flagged",
+      "formula": "2 each, capped at 10"
+     },
+     {
+      "key": "repairs",
+      "label": "Repairs / downtime (90 d)",
+      "points": 0,
+      "max": 10,
+      "detail": "0 repair record(s)",
+      "formula": "5 each, capped at 10"
+     }
+    ],
+    "any_overdue": false,
+    "needs_attention": false
+   },
+   "open_flags": [],
+   "open_flags_count": 0,
+   "critical_flags_count": 0,
+   "last_checklist": null,
+   "failed_checklists_7d": 0,
+   "battery": null,
+   "in_repair_record": false,
+   "offer_repair_record": false
+  },
+  {
+   "id": 8,
+   "plate": "Motorcycle 2",
+   "vehicle_type": "Motorcycle",
+   "is_reefer": false,
+   "tracker": {
+    "kind": "no_tracker",
+    "status": null,
+    "last_seen": null,
+    "label": "No tracker"
+   },
+   "locked_reason": null,
+   "capacity_unconfirmed": false,
+   "kind": "no_tracker",
+   "odometer_km": null,
+   "services": {
+    "oil_change": {
+     "status": "no_record",
+     "usage_pct": null,
+     "components": {},
+     "interval": {
+      "km": 10000,
+      "engine_hours": 250,
+      "days": 180,
+      "confirmed": false,
+      "scope": "fleet"
+     },
+     "label": "Oil",
+     "engine_hours_partial": false
+    },
+    "tires": {
+     "status": "no_record",
+     "usage_pct": null,
+     "components": {},
+     "interval": {
+      "km": 40000,
+      "engine_hours": null,
+      "days": 730,
+      "confirmed": false,
+      "scope": "fleet"
+     },
+     "label": "Tyres",
+     "engine_hours_partial": false
+    },
+    "brakes": {
+     "status": "no_record",
+     "usage_pct": null,
+     "components": {},
+     "interval": {
+      "km": 30000,
+      "engine_hours": null,
+      "days": 365,
+      "confirmed": false,
+      "scope": "fleet"
+     },
+     "label": "Brakes",
+     "engine_hours_partial": false
+    },
+    "general_pms": {
+     "status": "no_record",
+     "usage_pct": null,
+     "components": {},
+     "interval": {
+      "km": 20000,
+      "engine_hours": 500,
+      "days": 365,
+      "confirmed": false,
+      "scope": "fleet"
+     },
+     "label": "PMS",
+     "engine_hours_partial": false
+    },
+    "battery": {
+     "status": "no_record",
+     "usage_pct": null,
+     "components": {},
+     "interval": {
+      "km": null,
+      "engine_hours": null,
+      "days": 730,
+      "confirmed": false,
+      "scope": "fleet"
+     },
+     "label": "Battery",
+     "engine_hours_partial": false
+    }
+   },
+   "risk": {
+    "score": 0,
+    "band": "low",
+    "breakdown": [
+     {
+      "key": "service",
+      "label": "Service",
+      "points": 0,
+      "max": 40,
+      "detail": "no service usage measured",
+      "formula": "100%+ of any interval = 40, 80-100% = 20"
+     },
+     {
+      "key": "flags",
+      "label": "Open issues",
+      "points": 0,
+      "max": 25,
+      "detail": "0 critical x 15 + 0 warning x 5",
+      "formula": "critical 15 each, warning 5 each, capped at 25"
+     },
+     {
+      "key": "checklists",
+      "label": "Failed pre-trip checks (7 d)",
+      "points": 0,
+      "max": 15,
+      "detail": "0 failed",
+      "formula": "5 each, capped at 15"
+     },
+     {
+      "key": "overloads",
+      "label": "Overloaded trips (30 d)",
+      "points": 0,
+      "max": 10,
+      "detail": "0 flagged",
+      "formula": "2 each, capped at 10"
+     },
+     {
+      "key": "repairs",
+      "label": "Repairs / downtime (90 d)",
+      "points": 0,
+      "max": 10,
+      "detail": "0 repair record(s)",
+      "formula": "5 each, capped at 10"
+     }
+    ],
+    "any_overdue": false,
+    "needs_attention": false
+   },
+   "open_flags": [],
+   "open_flags_count": 0,
+   "critical_flags_count": 0,
+   "last_checklist": null,
+   "failed_checklists_7d": 0,
+   "battery": null,
+   "in_repair_record": false,
+   "offer_repair_record": false
+  },
+  {
+   "id": -91006,
+   "plate": "BHENTZ",
+   "vehicle_type": "Third-party truck",
+   "is_reefer": null,
+   "tracker": {
+    "kind": "third_party",
+    "status": null,
+    "last_seen": null,
+    "label": "Third-party"
+   },
+   "locked_reason": null,
+   "capacity_unconfirmed": false,
+   "kind": "third_party",
+   "message": "Third-party truck: not maintained by RGF, so it has no service tracking, risk score or eco score."
+  },
+  {
+   "id": -91005,
+   "plate": "WETMARKET",
+   "vehicle_type": "Third-party truck",
+   "is_reefer": null,
+   "tracker": {
+    "kind": "third_party",
+    "status": null,
+    "last_seen": null,
+    "label": "Third-party"
+   },
+   "locked_reason": null,
+   "capacity_unconfirmed": false,
+   "kind": "third_party",
+   "message": "Third-party truck: not maintained by RGF, so it has no service tracking, risk score or eco score."
+  },
+  {
+   "id": -91004,
+   "plate": "INHOUSE RIDER",
+   "vehicle_type": "Third-party truck",
+   "is_reefer": null,
+   "tracker": {
+    "kind": "third_party",
+    "status": null,
+    "last_seen": null,
+    "label": "Third-party"
+   },
+   "locked_reason": null,
+   "capacity_unconfirmed": false,
+   "kind": "third_party",
+   "message": "Third-party truck: not maintained by RGF, so it has no service tracking, risk score or eco score."
+  },
+  {
+   "id": -91003,
+   "plate": "ASIAN CONNECT 3",
+   "vehicle_type": "Third-party truck",
+   "is_reefer": null,
+   "tracker": {
+    "kind": "third_party",
+    "status": null,
+    "last_seen": null,
+    "label": "Third-party"
+   },
+   "locked_reason": null,
+   "capacity_unconfirmed": false,
+   "kind": "third_party",
+   "message": "Third-party truck: not maintained by RGF, so it has no service tracking, risk score or eco score."
+  },
+  {
+   "id": -91002,
+   "plate": "ASIAN CONNECT 2",
+   "vehicle_type": "Third-party truck",
+   "is_reefer": null,
+   "tracker": {
+    "kind": "third_party",
+    "status": null,
+    "last_seen": null,
+    "label": "Third-party"
+   },
+   "locked_reason": null,
+   "capacity_unconfirmed": false,
+   "kind": "third_party",
+   "message": "Third-party truck: not maintained by RGF, so it has no service tracking, risk score or eco score."
+  },
+  {
+   "id": -91001,
+   "plate": "ASIAN CONNECT",
+   "vehicle_type": "Third-party truck",
+   "is_reefer": null,
+   "tracker": {
+    "kind": "third_party",
+    "status": null,
+    "last_seen": null,
+    "label": "Third-party"
+   },
+   "locked_reason": null,
+   "capacity_unconfirmed": false,
+   "kind": "third_party",
+   "message": "Third-party truck: not maintained by RGF, so it has no service tracking, risk score or eco score."
+  }
+ ]
+}

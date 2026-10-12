@@ -6,6 +6,7 @@ from sqlalchemy.orm import Session
 from models.inventory import SalesOrderCache
 from models.sales_order_history import SalesOrderHistory
 from models.sales_order_lines import SalesOrderLine
+from services import delivery_details
 from services.delivery_status import sales_order_delivery_status
 from services.item_weight import calculate_line_weight_kg
 from services.warehouse_stock import stock_for_orders
@@ -47,6 +48,13 @@ def sync_history_row(db: Session, order: SalesOrderCache) -> None:
     history.delivery_status = sales_order_delivery_status(raw)
     history.is_reefer = _is_reefer(raw)
     history.helper_ids = getattr(order, "helper_ids", None) or []
+    # Delivery notes / on-site contact for the driver app: only from a detail that is already in memory, and never
+    # blanked by a later sync that happens not to have it.
+    notes, contact = delivery_details.from_order(order)
+    if contact is not None:
+        history.delivery_contact = contact
+    if notes is not None:
+        history.delivery_notes = notes
     stock = stock_for_orders([order])
     history.mets_qty_available_for_sale = stock.get(f"{order.id}:mets")
     history.glacier_qty_available_for_sale = stock.get(f"{order.id}:glacier")

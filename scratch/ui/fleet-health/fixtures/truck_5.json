@@ -1,0 +1,1457 @@
+{
+ "truck": {
+  "id": 5,
+  "plate": "NAJ6018",
+  "vehicle_type": "Truck",
+  "is_reefer": null,
+  "tracker": {
+   "kind": "tracked",
+   "status": "stale",
+   "last_seen": "2026-10-08",
+   "label": "No recent signal"
+  },
+  "locked_reason": "For Repair",
+  "capacity_unconfirmed": false,
+  "kind": "tracked",
+  "odometer_km": 261400.0,
+  "services": {
+   "oil_change": {
+    "status": "no_record",
+    "usage_pct": null,
+    "components": {},
+    "interval": {
+     "km": 10000,
+     "engine_hours": 250,
+     "days": 180,
+     "confirmed": false,
+     "scope": "fleet"
+    },
+    "label": "Oil",
+    "engine_hours_partial": false
+   },
+   "tires": {
+    "status": "no_record",
+    "usage_pct": null,
+    "components": {},
+    "interval": {
+     "km": 40000,
+     "engine_hours": null,
+     "days": 730,
+     "confirmed": false,
+     "scope": "fleet"
+    },
+    "label": "Tyres",
+    "engine_hours_partial": false
+   },
+   "brakes": {
+    "status": "no_record",
+    "usage_pct": null,
+    "components": {},
+    "interval": {
+     "km": 30000,
+     "engine_hours": null,
+     "days": 365,
+     "confirmed": false,
+     "scope": "fleet"
+    },
+    "label": "Brakes",
+    "engine_hours_partial": false
+   },
+   "general_pms": {
+    "status": "no_record",
+    "usage_pct": null,
+    "components": {},
+    "interval": {
+     "km": 20000,
+     "engine_hours": 500,
+     "days": 365,
+     "confirmed": false,
+     "scope": "fleet"
+    },
+    "label": "PMS",
+    "engine_hours_partial": false
+   },
+   "battery": {
+    "status": "no_record",
+    "usage_pct": null,
+    "components": {},
+    "interval": {
+     "km": null,
+     "engine_hours": null,
+     "days": 730,
+     "confirmed": false,
+     "scope": "fleet"
+    },
+    "label": "Battery",
+    "engine_hours_partial": false
+   }
+  },
+  "risk": {
+   "score": 5,
+   "band": "low",
+   "breakdown": [
+    {
+     "key": "service",
+     "label": "Service",
+     "points": 0,
+     "max": 40,
+     "detail": "no service usage measured",
+     "formula": "100%+ of any interval = 40, 80-100% = 20"
+    },
+    {
+     "key": "flags",
+     "label": "Open issues",
+     "points": 0,
+     "max": 25,
+     "detail": "0 critical x 15 + 0 warning x 5",
+     "formula": "critical 15 each, warning 5 each, capped at 25"
+    },
+    {
+     "key": "checklists",
+     "label": "Failed pre-trip checks (7 d)",
+     "points": 0,
+     "max": 15,
+     "detail": "0 failed",
+     "formula": "5 each, capped at 15"
+    },
+    {
+     "key": "overloads",
+     "label": "Overloaded trips (30 d)",
+     "points": 0,
+     "max": 10,
+     "detail": "0 flagged",
+     "formula": "2 each, capped at 10"
+    },
+    {
+     "key": "repairs",
+     "label": "Repairs / downtime (90 d)",
+     "points": 5,
+     "max": 10,
+     "detail": "1 repair record(s)",
+     "formula": "5 each, capped at 10"
+    }
+   ],
+   "any_overdue": false,
+   "needs_attention": false
+  },
+  "open_flags": [],
+  "open_flags_count": 0,
+  "critical_flags_count": 0,
+  "last_checklist": null,
+  "failed_checklists_7d": 0,
+  "battery": null,
+  "in_repair_record": true,
+  "offer_repair_record": false
+ },
+ "records": [
+  {
+   "id": 11,
+   "vehicle_id": 5,
+   "kind": "repair",
+   "service_type": null,
+   "performed_on": "2026-09-26",
+   "odometer_km": 261000.0,
+   "engine_hours": null,
+   "downtime_start": "2026-09-26T14:58:52.339507+00:00",
+   "downtime_end": null,
+   "reason": "Transmission rebuild",
+   "cost_php": 86000.0,
+   "vendor": "TransCare",
+   "notes": "Awaiting parts",
+   "receipt_ref": null,
+   "created_by": null
+  }
+ ],
+ "intervals": [
+  {
+   "service_type": "oil_change",
+   "label": "Oil",
+   "default": {
+    "id": 1,
+    "vehicle_id": null,
+    "service_type": "oil_change",
+    "interval_km": 10000,
+    "interval_engine_hours": 250,
+    "interval_days": 180,
+    "active": true,
+    "confirmed": false,
+    "updated_at": "2026-10-08T06:58:52.296138"
+   },
+   "override": null,
+   "effective": {
+    "id": 1,
+    "vehicle_id": null,
+    "service_type": "oil_change",
+    "interval_km": 10000,
+    "interval_engine_hours": 250,
+    "interval_days": 180,
+    "active": true,
+    "confirmed": false,
+    "updated_at": "2026-10-08T06:58:52.296138"
+   },
+   "confirmed": false
+  },
+  {
+   "service_type": "tires",
+   "label": "Tyres",
+   "default": {
+    "id": 2,
+    "vehicle_id": null,
+    "service_type": "tires",
+    "interval_km": 40000,
+    "interval_engine_hours": null,
+    "interval_days": 730,
+    "active": true,
+    "confirmed": false,
+    "updated_at": "2026-10-08T06:58:52.296138"
+   },
+   "override": null,
+   "effective": {
+    "id": 2,
+    "vehicle_id": null,
+    "service_type": "tires",
+    "interval_km": 40000,
+    "interval_engine_hours": null,
+    "interval_days": 730,
+    "active": true,
+    "confirmed": false,
+    "updated_at": "2026-10-08T06:58:52.296138"
+   },
+   "confirmed": false
+  },
+  {
+   "service_type": "brakes",
+   "label": "Brakes",
+   "default": {
+    "id": 3,
+    "vehicle_id": null,
+    "service_type": "brakes",
+    "interval_km": 30000,
+    "interval_engine_hours": null,
+    "interval_days": 365,
+    "active": true,
+    "confirmed": false,
+    "updated_at": "2026-10-08T06:58:52.296138"
+   },
+   "override": null,
+   "effective": {
+    "id": 3,
+    "vehicle_id": null,
+    "service_type": "brakes",
+    "interval_km": 30000,
+    "interval_engine_hours": null,
+    "interval_days": 365,
+    "active": true,
+    "confirmed": false,
+    "updated_at": "2026-10-08T06:58:52.296138"
+   },
+   "confirmed": false
+  },
+  {
+   "service_type": "general_pms",
+   "label": "PMS",
+   "default": {
+    "id": 5,
+    "vehicle_id": null,
+    "service_type": "general_pms",
+    "interval_km": 20000,
+    "interval_engine_hours": 500,
+    "interval_days": 365,
+    "active": true,
+    "confirmed": false,
+    "updated_at": "2026-10-08T06:58:52.296138"
+   },
+   "override": null,
+   "effective": {
+    "id": 5,
+    "vehicle_id": null,
+    "service_type": "general_pms",
+    "interval_km": 20000,
+    "interval_engine_hours": 500,
+    "interval_days": 365,
+    "active": true,
+    "confirmed": false,
+    "updated_at": "2026-10-08T06:58:52.296138"
+   },
+   "confirmed": false
+  },
+  {
+   "service_type": "battery",
+   "label": "Battery",
+   "default": {
+    "id": 6,
+    "vehicle_id": null,
+    "service_type": "battery",
+    "interval_km": null,
+    "interval_engine_hours": null,
+    "interval_days": 730,
+    "active": true,
+    "confirmed": false,
+    "updated_at": "2026-10-08T06:58:52.296138"
+   },
+   "override": null,
+   "effective": {
+    "id": 6,
+    "vehicle_id": null,
+    "service_type": "battery",
+    "interval_km": null,
+    "interval_engine_hours": null,
+    "interval_days": 730,
+    "active": true,
+    "confirmed": false,
+    "updated_at": "2026-10-08T06:58:52.296138"
+   },
+   "confirmed": false
+  }
+ ],
+ "flags": [],
+ "checklists": [],
+ "daily": [
+  {
+   "date": "2026-08-10",
+   "km": 0.0,
+   "engine_hours": 0.0,
+   "trips": 0,
+   "assigned": false,
+   "idle_total_min": 0.0,
+   "speeding_seconds": 0,
+   "harsh": 0,
+   "partial_day": false
+  },
+  {
+   "date": "2026-08-11",
+   "km": 0.0,
+   "engine_hours": 0.0,
+   "trips": 0,
+   "assigned": false,
+   "idle_total_min": 0.0,
+   "speeding_seconds": 0,
+   "harsh": 0,
+   "partial_day": false
+  },
+  {
+   "date": "2026-08-12",
+   "km": 0.0,
+   "engine_hours": 0.0,
+   "trips": 0,
+   "assigned": false,
+   "idle_total_min": 0.0,
+   "speeding_seconds": 0,
+   "harsh": 0,
+   "partial_day": false
+  },
+  {
+   "date": "2026-08-13",
+   "km": 0.0,
+   "engine_hours": 0.0,
+   "trips": 0,
+   "assigned": false,
+   "idle_total_min": 0.0,
+   "speeding_seconds": 0,
+   "harsh": 0,
+   "partial_day": false
+  },
+  {
+   "date": "2026-08-14",
+   "km": 0.0,
+   "engine_hours": 0.0,
+   "trips": 0,
+   "assigned": false,
+   "idle_total_min": 0.0,
+   "speeding_seconds": 0,
+   "harsh": 0,
+   "partial_day": false
+  },
+  {
+   "date": "2026-08-15",
+   "km": 0.0,
+   "engine_hours": 0.0,
+   "trips": 0,
+   "assigned": false,
+   "idle_total_min": 0.0,
+   "speeding_seconds": 0,
+   "harsh": 0,
+   "partial_day": false
+  },
+  {
+   "date": "2026-08-16",
+   "km": 0.0,
+   "engine_hours": 0.0,
+   "trips": 0,
+   "assigned": false,
+   "idle_total_min": 0.0,
+   "speeding_seconds": 0,
+   "harsh": 0,
+   "partial_day": false
+  },
+  {
+   "date": "2026-08-17",
+   "km": 0.0,
+   "engine_hours": 0.0,
+   "trips": 0,
+   "assigned": false,
+   "idle_total_min": 0.0,
+   "speeding_seconds": 0,
+   "harsh": 0,
+   "partial_day": false
+  },
+  {
+   "date": "2026-08-18",
+   "km": 0.0,
+   "engine_hours": 0.0,
+   "trips": 0,
+   "assigned": false,
+   "idle_total_min": 0.0,
+   "speeding_seconds": 0,
+   "harsh": 0,
+   "partial_day": false
+  },
+  {
+   "date": "2026-08-19",
+   "km": 0.0,
+   "engine_hours": 0.0,
+   "trips": 0,
+   "assigned": false,
+   "idle_total_min": 0.0,
+   "speeding_seconds": 0,
+   "harsh": 0,
+   "partial_day": false
+  },
+  {
+   "date": "2026-08-20",
+   "km": 0.0,
+   "engine_hours": 0.0,
+   "trips": 0,
+   "assigned": false,
+   "idle_total_min": 0.0,
+   "speeding_seconds": 0,
+   "harsh": 0,
+   "partial_day": false
+  },
+  {
+   "date": "2026-08-21",
+   "km": 0.0,
+   "engine_hours": 0.0,
+   "trips": 0,
+   "assigned": false,
+   "idle_total_min": 0.0,
+   "speeding_seconds": 0,
+   "harsh": 0,
+   "partial_day": false
+  },
+  {
+   "date": "2026-08-22",
+   "km": 0.0,
+   "engine_hours": 0.0,
+   "trips": 0,
+   "assigned": false,
+   "idle_total_min": 0.0,
+   "speeding_seconds": 0,
+   "harsh": 0,
+   "partial_day": false
+  },
+  {
+   "date": "2026-08-23",
+   "km": 0.0,
+   "engine_hours": 0.0,
+   "trips": 0,
+   "assigned": false,
+   "idle_total_min": 0.0,
+   "speeding_seconds": 0,
+   "harsh": 0,
+   "partial_day": false
+  },
+  {
+   "date": "2026-08-24",
+   "km": 0.0,
+   "engine_hours": 0.0,
+   "trips": 0,
+   "assigned": false,
+   "idle_total_min": 0.0,
+   "speeding_seconds": 0,
+   "harsh": 0,
+   "partial_day": false
+  },
+  {
+   "date": "2026-08-25",
+   "km": 0.0,
+   "engine_hours": 0.0,
+   "trips": 0,
+   "assigned": false,
+   "idle_total_min": 0.0,
+   "speeding_seconds": 0,
+   "harsh": 0,
+   "partial_day": false
+  },
+  {
+   "date": "2026-08-26",
+   "km": 0.0,
+   "engine_hours": 0.0,
+   "trips": 0,
+   "assigned": false,
+   "idle_total_min": 0.0,
+   "speeding_seconds": 0,
+   "harsh": 0,
+   "partial_day": false
+  },
+  {
+   "date": "2026-08-27",
+   "km": 0.0,
+   "engine_hours": 0.0,
+   "trips": 0,
+   "assigned": false,
+   "idle_total_min": 0.0,
+   "speeding_seconds": 0,
+   "harsh": 0,
+   "partial_day": false
+  },
+  {
+   "date": "2026-08-28",
+   "km": 0.0,
+   "engine_hours": 0.0,
+   "trips": 0,
+   "assigned": false,
+   "idle_total_min": 0.0,
+   "speeding_seconds": 0,
+   "harsh": 0,
+   "partial_day": false
+  },
+  {
+   "date": "2026-08-29",
+   "km": 0.0,
+   "engine_hours": 0.0,
+   "trips": 0,
+   "assigned": false,
+   "idle_total_min": 0.0,
+   "speeding_seconds": 0,
+   "harsh": 0,
+   "partial_day": false
+  },
+  {
+   "date": "2026-08-30",
+   "km": 0.0,
+   "engine_hours": 0.0,
+   "trips": 0,
+   "assigned": false,
+   "idle_total_min": 0.0,
+   "speeding_seconds": 0,
+   "harsh": 0,
+   "partial_day": false
+  },
+  {
+   "date": "2026-08-31",
+   "km": 0.0,
+   "engine_hours": 0.0,
+   "trips": 0,
+   "assigned": false,
+   "idle_total_min": 0.0,
+   "speeding_seconds": 0,
+   "harsh": 0,
+   "partial_day": false
+  },
+  {
+   "date": "2026-09-01",
+   "km": 0.0,
+   "engine_hours": 0.0,
+   "trips": 0,
+   "assigned": false,
+   "idle_total_min": 0.0,
+   "speeding_seconds": 0,
+   "harsh": 0,
+   "partial_day": false
+  },
+  {
+   "date": "2026-09-02",
+   "km": 0.0,
+   "engine_hours": 0.0,
+   "trips": 0,
+   "assigned": false,
+   "idle_total_min": 0.0,
+   "speeding_seconds": 0,
+   "harsh": 0,
+   "partial_day": false
+  },
+  {
+   "date": "2026-09-03",
+   "km": 0.0,
+   "engine_hours": 0.0,
+   "trips": 0,
+   "assigned": false,
+   "idle_total_min": 0.0,
+   "speeding_seconds": 0,
+   "harsh": 0,
+   "partial_day": false
+  },
+  {
+   "date": "2026-09-04",
+   "km": 0.0,
+   "engine_hours": 0.0,
+   "trips": 0,
+   "assigned": false,
+   "idle_total_min": 0.0,
+   "speeding_seconds": 0,
+   "harsh": 0,
+   "partial_day": false
+  },
+  {
+   "date": "2026-09-05",
+   "km": 0.0,
+   "engine_hours": 0.0,
+   "trips": 0,
+   "assigned": false,
+   "idle_total_min": 0.0,
+   "speeding_seconds": 0,
+   "harsh": 0,
+   "partial_day": false
+  },
+  {
+   "date": "2026-09-06",
+   "km": 0.0,
+   "engine_hours": 0.0,
+   "trips": 0,
+   "assigned": false,
+   "idle_total_min": 0.0,
+   "speeding_seconds": 0,
+   "harsh": 0,
+   "partial_day": false
+  },
+  {
+   "date": "2026-09-07",
+   "km": 0.0,
+   "engine_hours": 0.0,
+   "trips": 0,
+   "assigned": false,
+   "idle_total_min": 0.0,
+   "speeding_seconds": 0,
+   "harsh": 0,
+   "partial_day": false
+  },
+  {
+   "date": "2026-09-08",
+   "km": 0.0,
+   "engine_hours": 0.0,
+   "trips": 0,
+   "assigned": false,
+   "idle_total_min": 0.0,
+   "speeding_seconds": 0,
+   "harsh": 0,
+   "partial_day": false
+  },
+  {
+   "date": "2026-09-09",
+   "km": 0.0,
+   "engine_hours": 0.0,
+   "trips": 0,
+   "assigned": false,
+   "idle_total_min": 0.0,
+   "speeding_seconds": 0,
+   "harsh": 0,
+   "partial_day": false
+  },
+  {
+   "date": "2026-09-10",
+   "km": 0.0,
+   "engine_hours": 0.0,
+   "trips": 0,
+   "assigned": false,
+   "idle_total_min": 0.0,
+   "speeding_seconds": 0,
+   "harsh": 0,
+   "partial_day": false
+  },
+  {
+   "date": "2026-09-11",
+   "km": 0.0,
+   "engine_hours": 0.0,
+   "trips": 0,
+   "assigned": false,
+   "idle_total_min": 0.0,
+   "speeding_seconds": 0,
+   "harsh": 0,
+   "partial_day": false
+  },
+  {
+   "date": "2026-09-12",
+   "km": 0.0,
+   "engine_hours": 0.0,
+   "trips": 0,
+   "assigned": false,
+   "idle_total_min": 0.0,
+   "speeding_seconds": 0,
+   "harsh": 0,
+   "partial_day": false
+  },
+  {
+   "date": "2026-09-13",
+   "km": 0.0,
+   "engine_hours": 0.0,
+   "trips": 0,
+   "assigned": false,
+   "idle_total_min": 0.0,
+   "speeding_seconds": 0,
+   "harsh": 0,
+   "partial_day": false
+  },
+  {
+   "date": "2026-09-14",
+   "km": 0.0,
+   "engine_hours": 0.0,
+   "trips": 0,
+   "assigned": false,
+   "idle_total_min": 0.0,
+   "speeding_seconds": 0,
+   "harsh": 0,
+   "partial_day": false
+  },
+  {
+   "date": "2026-09-15",
+   "km": 0.0,
+   "engine_hours": 0.0,
+   "trips": 0,
+   "assigned": false,
+   "idle_total_min": 0.0,
+   "speeding_seconds": 0,
+   "harsh": 0,
+   "partial_day": false
+  },
+  {
+   "date": "2026-09-16",
+   "km": 0.0,
+   "engine_hours": 0.0,
+   "trips": 0,
+   "assigned": false,
+   "idle_total_min": 0.0,
+   "speeding_seconds": 0,
+   "harsh": 0,
+   "partial_day": false
+  },
+  {
+   "date": "2026-09-17",
+   "km": 0.0,
+   "engine_hours": 0.0,
+   "trips": 0,
+   "assigned": false,
+   "idle_total_min": 0.0,
+   "speeding_seconds": 0,
+   "harsh": 0,
+   "partial_day": false
+  },
+  {
+   "date": "2026-09-18",
+   "km": 0.0,
+   "engine_hours": 0.0,
+   "trips": 0,
+   "assigned": false,
+   "idle_total_min": 0.0,
+   "speeding_seconds": 0,
+   "harsh": 0,
+   "partial_day": false
+  },
+  {
+   "date": "2026-09-19",
+   "km": 0.0,
+   "engine_hours": 0.0,
+   "trips": 0,
+   "assigned": false,
+   "idle_total_min": 0.0,
+   "speeding_seconds": 0,
+   "harsh": 0,
+   "partial_day": false
+  },
+  {
+   "date": "2026-09-20",
+   "km": 0.0,
+   "engine_hours": 0.0,
+   "trips": 0,
+   "assigned": false,
+   "idle_total_min": 0.0,
+   "speeding_seconds": 0,
+   "harsh": 0,
+   "partial_day": false
+  },
+  {
+   "date": "2026-09-21",
+   "km": 0.0,
+   "engine_hours": 0.0,
+   "trips": 0,
+   "assigned": false,
+   "idle_total_min": 0.0,
+   "speeding_seconds": 0,
+   "harsh": 0,
+   "partial_day": false
+  },
+  {
+   "date": "2026-09-22",
+   "km": 0.0,
+   "engine_hours": 0.0,
+   "trips": 0,
+   "assigned": false,
+   "idle_total_min": 0.0,
+   "speeding_seconds": 0,
+   "harsh": 0,
+   "partial_day": false
+  },
+  {
+   "date": "2026-09-23",
+   "km": 0.0,
+   "engine_hours": 0.0,
+   "trips": 0,
+   "assigned": false,
+   "idle_total_min": 0.0,
+   "speeding_seconds": 0,
+   "harsh": 0,
+   "partial_day": false
+  },
+  {
+   "date": "2026-09-24",
+   "km": 0.0,
+   "engine_hours": 0.0,
+   "trips": 0,
+   "assigned": false,
+   "idle_total_min": 0.0,
+   "speeding_seconds": 0,
+   "harsh": 0,
+   "partial_day": false
+  },
+  {
+   "date": "2026-09-25",
+   "km": 0.0,
+   "engine_hours": 0.0,
+   "trips": 0,
+   "assigned": false,
+   "idle_total_min": 0.0,
+   "speeding_seconds": 0,
+   "harsh": 0,
+   "partial_day": false
+  },
+  {
+   "date": "2026-09-26",
+   "km": 0.0,
+   "engine_hours": 0.0,
+   "trips": 0,
+   "assigned": false,
+   "idle_total_min": 0.0,
+   "speeding_seconds": 0,
+   "harsh": 0,
+   "partial_day": false
+  },
+  {
+   "date": "2026-09-27",
+   "km": 0.0,
+   "engine_hours": 0.0,
+   "trips": 0,
+   "assigned": false,
+   "idle_total_min": 0.0,
+   "speeding_seconds": 0,
+   "harsh": 0,
+   "partial_day": false
+  },
+  {
+   "date": "2026-09-28",
+   "km": 0.0,
+   "engine_hours": 0.0,
+   "trips": 0,
+   "assigned": false,
+   "idle_total_min": 0.0,
+   "speeding_seconds": 0,
+   "harsh": 0,
+   "partial_day": false
+  },
+  {
+   "date": "2026-09-29",
+   "km": 0.0,
+   "engine_hours": 0.0,
+   "trips": 0,
+   "assigned": false,
+   "idle_total_min": 0.0,
+   "speeding_seconds": 0,
+   "harsh": 0,
+   "partial_day": false
+  },
+  {
+   "date": "2026-09-30",
+   "km": 0.0,
+   "engine_hours": 0.0,
+   "trips": 0,
+   "assigned": false,
+   "idle_total_min": 0.0,
+   "speeding_seconds": 0,
+   "harsh": 0,
+   "partial_day": false
+  },
+  {
+   "date": "2026-10-01",
+   "km": 0.0,
+   "engine_hours": 0.0,
+   "trips": 0,
+   "assigned": false,
+   "idle_total_min": 0.0,
+   "speeding_seconds": 0,
+   "harsh": 0,
+   "partial_day": false
+  },
+  {
+   "date": "2026-10-02",
+   "km": 0.0,
+   "engine_hours": 0.0,
+   "trips": 0,
+   "assigned": false,
+   "idle_total_min": 0.0,
+   "speeding_seconds": 0,
+   "harsh": 0,
+   "partial_day": true
+  },
+  {
+   "date": "2026-10-03",
+   "km": 0.0,
+   "engine_hours": 0.0,
+   "trips": 0,
+   "assigned": false,
+   "idle_total_min": 0.0,
+   "speeding_seconds": 0,
+   "harsh": 0,
+   "partial_day": false
+  },
+  {
+   "date": "2026-10-04",
+   "km": 0.0,
+   "engine_hours": 0.0,
+   "trips": 0,
+   "assigned": false,
+   "idle_total_min": 0.0,
+   "speeding_seconds": 0,
+   "harsh": 0,
+   "partial_day": false
+  },
+  {
+   "date": "2026-10-05",
+   "km": 0.0,
+   "engine_hours": 0.0,
+   "trips": 0,
+   "assigned": false,
+   "idle_total_min": 0.0,
+   "speeding_seconds": 0,
+   "harsh": 0,
+   "partial_day": false
+  },
+  {
+   "date": "2026-10-06",
+   "km": 0.0,
+   "engine_hours": 0.0,
+   "trips": 0,
+   "assigned": false,
+   "idle_total_min": 0.0,
+   "speeding_seconds": 0,
+   "harsh": 0,
+   "partial_day": false
+  },
+  {
+   "date": "2026-10-07",
+   "km": 0.0,
+   "engine_hours": 0.0,
+   "trips": 0,
+   "assigned": false,
+   "idle_total_min": 0.0,
+   "speeding_seconds": 0,
+   "harsh": 0,
+   "partial_day": false
+  },
+  {
+   "date": "2026-10-08",
+   "km": 0.0,
+   "engine_hours": 0.0,
+   "trips": 0,
+   "assigned": false,
+   "idle_total_min": 0.0,
+   "speeding_seconds": 0,
+   "harsh": 0,
+   "partial_day": false
+  }
+ ],
+ "battery_series": [
+  {
+   "date": "2026-08-10",
+   "parked_min": null,
+   "running_avg": null,
+   "system": null,
+   "status": "no_data",
+   "reasons": []
+  },
+  {
+   "date": "2026-08-11",
+   "parked_min": null,
+   "running_avg": null,
+   "system": null,
+   "status": "no_data",
+   "reasons": []
+  },
+  {
+   "date": "2026-08-12",
+   "parked_min": null,
+   "running_avg": null,
+   "system": null,
+   "status": "no_data",
+   "reasons": []
+  },
+  {
+   "date": "2026-08-13",
+   "parked_min": null,
+   "running_avg": null,
+   "system": null,
+   "status": "no_data",
+   "reasons": []
+  },
+  {
+   "date": "2026-08-14",
+   "parked_min": null,
+   "running_avg": null,
+   "system": null,
+   "status": "no_data",
+   "reasons": []
+  },
+  {
+   "date": "2026-08-15",
+   "parked_min": null,
+   "running_avg": null,
+   "system": null,
+   "status": "no_data",
+   "reasons": []
+  },
+  {
+   "date": "2026-08-16",
+   "parked_min": null,
+   "running_avg": null,
+   "system": null,
+   "status": "no_data",
+   "reasons": []
+  },
+  {
+   "date": "2026-08-17",
+   "parked_min": null,
+   "running_avg": null,
+   "system": null,
+   "status": "no_data",
+   "reasons": []
+  },
+  {
+   "date": "2026-08-18",
+   "parked_min": null,
+   "running_avg": null,
+   "system": null,
+   "status": "no_data",
+   "reasons": []
+  },
+  {
+   "date": "2026-08-19",
+   "parked_min": null,
+   "running_avg": null,
+   "system": null,
+   "status": "no_data",
+   "reasons": []
+  },
+  {
+   "date": "2026-08-20",
+   "parked_min": null,
+   "running_avg": null,
+   "system": null,
+   "status": "no_data",
+   "reasons": []
+  },
+  {
+   "date": "2026-08-21",
+   "parked_min": null,
+   "running_avg": null,
+   "system": null,
+   "status": "no_data",
+   "reasons": []
+  },
+  {
+   "date": "2026-08-22",
+   "parked_min": null,
+   "running_avg": null,
+   "system": null,
+   "status": "no_data",
+   "reasons": []
+  },
+  {
+   "date": "2026-08-23",
+   "parked_min": null,
+   "running_avg": null,
+   "system": null,
+   "status": "no_data",
+   "reasons": []
+  },
+  {
+   "date": "2026-08-24",
+   "parked_min": null,
+   "running_avg": null,
+   "system": null,
+   "status": "no_data",
+   "reasons": []
+  },
+  {
+   "date": "2026-08-25",
+   "parked_min": null,
+   "running_avg": null,
+   "system": null,
+   "status": "no_data",
+   "reasons": []
+  },
+  {
+   "date": "2026-08-26",
+   "parked_min": null,
+   "running_avg": null,
+   "system": null,
+   "status": "no_data",
+   "reasons": []
+  },
+  {
+   "date": "2026-08-27",
+   "parked_min": null,
+   "running_avg": null,
+   "system": null,
+   "status": "no_data",
+   "reasons": []
+  },
+  {
+   "date": "2026-08-28",
+   "parked_min": null,
+   "running_avg": null,
+   "system": null,
+   "status": "no_data",
+   "reasons": []
+  },
+  {
+   "date": "2026-08-29",
+   "parked_min": null,
+   "running_avg": null,
+   "system": null,
+   "status": "no_data",
+   "reasons": []
+  },
+  {
+   "date": "2026-08-30",
+   "parked_min": null,
+   "running_avg": null,
+   "system": null,
+   "status": "no_data",
+   "reasons": []
+  },
+  {
+   "date": "2026-08-31",
+   "parked_min": null,
+   "running_avg": null,
+   "system": null,
+   "status": "no_data",
+   "reasons": []
+  },
+  {
+   "date": "2026-09-01",
+   "parked_min": null,
+   "running_avg": null,
+   "system": null,
+   "status": "no_data",
+   "reasons": []
+  },
+  {
+   "date": "2026-09-02",
+   "parked_min": null,
+   "running_avg": null,
+   "system": null,
+   "status": "no_data",
+   "reasons": []
+  },
+  {
+   "date": "2026-09-03",
+   "parked_min": null,
+   "running_avg": null,
+   "system": null,
+   "status": "no_data",
+   "reasons": []
+  },
+  {
+   "date": "2026-09-04",
+   "parked_min": null,
+   "running_avg": null,
+   "system": null,
+   "status": "no_data",
+   "reasons": []
+  },
+  {
+   "date": "2026-09-05",
+   "parked_min": null,
+   "running_avg": null,
+   "system": null,
+   "status": "no_data",
+   "reasons": []
+  },
+  {
+   "date": "2026-09-06",
+   "parked_min": null,
+   "running_avg": null,
+   "system": null,
+   "status": "no_data",
+   "reasons": []
+  },
+  {
+   "date": "2026-09-07",
+   "parked_min": null,
+   "running_avg": null,
+   "system": null,
+   "status": "no_data",
+   "reasons": []
+  },
+  {
+   "date": "2026-09-08",
+   "parked_min": null,
+   "running_avg": null,
+   "system": null,
+   "status": "no_data",
+   "reasons": []
+  },
+  {
+   "date": "2026-09-09",
+   "parked_min": null,
+   "running_avg": null,
+   "system": null,
+   "status": "no_data",
+   "reasons": []
+  },
+  {
+   "date": "2026-09-10",
+   "parked_min": null,
+   "running_avg": null,
+   "system": null,
+   "status": "no_data",
+   "reasons": []
+  },
+  {
+   "date": "2026-09-11",
+   "parked_min": null,
+   "running_avg": null,
+   "system": null,
+   "status": "no_data",
+   "reasons": []
+  },
+  {
+   "date": "2026-09-12",
+   "parked_min": null,
+   "running_avg": null,
+   "system": null,
+   "status": "no_data",
+   "reasons": []
+  },
+  {
+   "date": "2026-09-13",
+   "parked_min": null,
+   "running_avg": null,
+   "system": null,
+   "status": "no_data",
+   "reasons": []
+  },
+  {
+   "date": "2026-09-14",
+   "parked_min": null,
+   "running_avg": null,
+   "system": null,
+   "status": "no_data",
+   "reasons": []
+  },
+  {
+   "date": "2026-09-15",
+   "parked_min": null,
+   "running_avg": null,
+   "system": null,
+   "status": "no_data",
+   "reasons": []
+  },
+  {
+   "date": "2026-09-16",
+   "parked_min": null,
+   "running_avg": null,
+   "system": null,
+   "status": "no_data",
+   "reasons": []
+  },
+  {
+   "date": "2026-09-17",
+   "parked_min": null,
+   "running_avg": null,
+   "system": null,
+   "status": "no_data",
+   "reasons": []
+  },
+  {
+   "date": "2026-09-18",
+   "parked_min": null,
+   "running_avg": null,
+   "system": null,
+   "status": "no_data",
+   "reasons": []
+  },
+  {
+   "date": "2026-09-19",
+   "parked_min": null,
+   "running_avg": null,
+   "system": null,
+   "status": "no_data",
+   "reasons": []
+  },
+  {
+   "date": "2026-09-20",
+   "parked_min": null,
+   "running_avg": null,
+   "system": null,
+   "status": "no_data",
+   "reasons": []
+  },
+  {
+   "date": "2026-09-21",
+   "parked_min": null,
+   "running_avg": null,
+   "system": null,
+   "status": "no_data",
+   "reasons": []
+  },
+  {
+   "date": "2026-09-22",
+   "parked_min": null,
+   "running_avg": null,
+   "system": null,
+   "status": "no_data",
+   "reasons": []
+  },
+  {
+   "date": "2026-09-23",
+   "parked_min": null,
+   "running_avg": null,
+   "system": null,
+   "status": "no_data",
+   "reasons": []
+  },
+  {
+   "date": "2026-09-24",
+   "parked_min": null,
+   "running_avg": null,
+   "system": null,
+   "status": "no_data",
+   "reasons": []
+  },
+  {
+   "date": "2026-09-25",
+   "parked_min": null,
+   "running_avg": null,
+   "system": null,
+   "status": "no_data",
+   "reasons": []
+  },
+  {
+   "date": "2026-09-26",
+   "parked_min": null,
+   "running_avg": null,
+   "system": null,
+   "status": "no_data",
+   "reasons": []
+  },
+  {
+   "date": "2026-09-27",
+   "parked_min": null,
+   "running_avg": null,
+   "system": null,
+   "status": "no_data",
+   "reasons": []
+  },
+  {
+   "date": "2026-09-28",
+   "parked_min": null,
+   "running_avg": null,
+   "system": null,
+   "status": "no_data",
+   "reasons": []
+  },
+  {
+   "date": "2026-09-29",
+   "parked_min": null,
+   "running_avg": null,
+   "system": null,
+   "status": "no_data",
+   "reasons": []
+  },
+  {
+   "date": "2026-09-30",
+   "parked_min": null,
+   "running_avg": null,
+   "system": null,
+   "status": "no_data",
+   "reasons": []
+  },
+  {
+   "date": "2026-10-01",
+   "parked_min": null,
+   "running_avg": null,
+   "system": null,
+   "status": "no_data",
+   "reasons": []
+  },
+  {
+   "date": "2026-10-02",
+   "parked_min": null,
+   "running_avg": null,
+   "system": null,
+   "status": "no_data",
+   "reasons": []
+  },
+  {
+   "date": "2026-10-03",
+   "parked_min": null,
+   "running_avg": null,
+   "system": null,
+   "status": "no_data",
+   "reasons": []
+  },
+  {
+   "date": "2026-10-04",
+   "parked_min": null,
+   "running_avg": null,
+   "system": null,
+   "status": "no_data",
+   "reasons": []
+  },
+  {
+   "date": "2026-10-05",
+   "parked_min": null,
+   "running_avg": null,
+   "system": null,
+   "status": "no_data",
+   "reasons": []
+  },
+  {
+   "date": "2026-10-06",
+   "parked_min": null,
+   "running_avg": null,
+   "system": null,
+   "status": "no_data",
+   "reasons": []
+  },
+  {
+   "date": "2026-10-07",
+   "parked_min": null,
+   "running_avg": null,
+   "system": null,
+   "status": "no_data",
+   "reasons": []
+  },
+  {
+   "date": "2026-10-08",
+   "parked_min": null,
+   "running_avg": null,
+   "system": null,
+   "status": "no_data",
+   "reasons": []
+  }
+ ],
+ "fuel_logs": [],
+ "kmpl_intervals": [],
+ "fuel_checks": [],
+ "has_tracker": true
+}

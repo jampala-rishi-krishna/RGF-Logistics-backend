@@ -14,6 +14,7 @@ from sqlalchemy.orm import Session
 
 from datetime import date as date_type
 
+from auth.dependencies import require_role
 from database import get_db, SessionLocal
 from models.vehicle import Vehicle
 from models.inventory import SalesOrderCache
@@ -30,6 +31,8 @@ from services.delivery_status import is_delivered, sales_order_delivery_status
 from services.zoho_client import ZohoError
 from services import zoho_acquisition, zoho_usage
 
+READ_ROLES = Depends(require_role("admin", "dispatcher", "warehouse"))
+WRITE_ROLES = Depends(require_role("admin", "dispatcher"))
 router = APIRouter(tags=["fleet"])
 logger = logging.getLogger("fleet_refresh")
 OPS_TZ = ZoneInfo("Asia/Manila")
@@ -216,12 +219,12 @@ def _historical_vehicle_payload(vehicle: Vehicle, rows: list[SalesOrderHistory],
     })
     return payload
 
-# fleet-module/index.js enforces no role gate on any of these routes today - ported faithfully
-# (no gate added). See the migration report's Step 2 notes for the full audit of which modules
-# had zero auth wired in.
+# Role gates (2026-10-12): the Catalyst port left these routes open. Reads: admin, dispatcher (planner is aliased to
+# dispatcher), warehouse. Refresh / manual position: admin, dispatcher. Drivers, helpers, officers and portal clients
+# are refused. /ws/fleet (websocket) is NOT covered by these dependencies.
 
 
-@router.get("/vehicles")
+@router.get("/vehicles", dependencies=[READ_ROLES])
 def list_vehicles(status: str | None = None, date: str | None = None, db: Session = Depends(get_db)):
     requested_date = date_type.fromisoformat(date) if date else None
     if date:
@@ -285,7 +288,7 @@ def list_vehicles(status: str | None = None, date: str | None = None, db: Sessio
     return result
 
 
-@router.post("/vehicles/refresh")
+@router.post("/vehicles/refresh", dependencies=[WRITE_ROLES])
 @zoho_acquisition.operation("fleet-refresh", reuse_details=True)
 def refresh_vehicles(force: bool = False, db: Session = Depends(get_db)):
     """Recompute Fleet from live Zoho data for currently-assigned SOs only (never a bulk
@@ -363,7 +366,7 @@ def scheduled_fleet_sync() -> None:
         logger.exception("[FLEET_REFRESH] Scheduled Zoho fleet sync failed")
 
 
-@router.get("/vehicles/{vehicle_id}")
+@router.get("/vehicles/{vehicle_id}", dependencies=[READ_ROLES])
 def get_vehicle(vehicle_id: int, db: Session = Depends(get_db)):
     vehicle = db.get(Vehicle, vehicle_id)
     if vehicle is None:
@@ -371,20 +374,20 @@ def get_vehicle(vehicle_id: int, db: Session = Depends(get_db)):
     return _merge_live(_vehicle_payload(vehicle, db))
 
 
-@router.get("/vehicles/{vehicle_id}/trail")
+@router.get("/vehicles/{vehicle_id}/trail", dependencies=[READ_ROLES])
 def get_vehicle_trail(vehicle_id: int, limit: int = 50):
     """GPS history is not persisted (see migration b7e2c9a4d1f6) - live position only,
     from the in-memory store / WebSocket."""
     return []
 
 
-@router.get("/geofences")
+@router.get("/geofences", dependencies=[READ_ROLES])
 def list_geofences():
     # 2026-09-24 (Step 6): geofences dropped from Neon - nothing ever wrote a row.
     return memory_tables.GEOFENCES
 
 
-@router.get("/drivers")
+@router.get("/drivers", dependencies=[READ_ROLES])
 def list_drivers():
     # 2026-09-24 (Step 6): drivers dropped from Neon - nothing ever wrote a row.
     return memory_tables.DRIVERS
@@ -398,7 +401,7 @@ class PositionUpdateBody(BaseModel):
     skipTrail: bool = False
 
 
-@router.post("/vehicles/{vehicle_id}/position")
+@router.post("/vehicles/{vehicle_id}/position", dependencies=[WRITE_ROLES])
 async def post_vehicle_position(vehicle_id: int, body: PositionUpdateBody, db: Session = Depends(get_db)):
     """Manual/testing entry point into the same in-memory live GPS store the Cartrack
     poller writes to. No DB session is used for the GPS write - only to resolve the

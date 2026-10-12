@@ -1,0 +1,63 @@
+{
+ "kg_per_litre": 2.68,
+ "formula": "CO2 (kg) = diesel litres from the fuel log x 2.68",
+ "months": [
+  {
+   "month": "2026-08",
+   "litres": 323.1,
+   "co2_kg": 865.9,
+   "trucks": {
+    "DCD8953": {
+     "litres": 81.9,
+     "co2_kg": 219.5
+    },
+    "DCD8954": {
+     "litres": 82.3,
+     "co2_kg": 220.6
+    },
+    "DCD8955": {
+     "litres": 84.9,
+     "co2_kg": 227.5
+    },
+    "NFX5791": {
+     "litres": 74.0,
+     "co2_kg": 198.3
+    }
+   }
+  },
+  {
+   "month": "2026-09",
+   "litres": 1336.3,
+   "co2_kg": 3581.3,
+   "trucks": {
+    "DCD8953": {
+     "litres": 243.7,
+     "co2_kg": 653.1
+    },
+    "DCD8954": {
+     "litres": 379.8,
+     "co2_kg": 1017.9
+    },
+    "DCD8955": {
+     "litres": 381.5,
+     "co2_kg": 1022.4
+    },
+    "NFX5791": {
+     "litres": 331.3,
+     "co2_kg": 887.9
+    }
+   }
+  },
+  {
+   "month": "2026-10",
+   "litres": 298.6,
+   "co2_kg": 800.2,
+   "trucks": {
+    "DCD8953": {
+     "litres": 298.6,
+     "co2_kg": 800.2
+    }
+   }
+  }
+ ]
+}

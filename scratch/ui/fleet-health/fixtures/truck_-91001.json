@@ -1,0 +1,18 @@
+{
+ "truck": {
+  "id": -91001,
+  "plate": "ASIAN CONNECT",
+  "vehicle_type": "Third-party truck",
+  "is_reefer": null,
+  "tracker": {
+   "kind": "third_party",
+   "status": null,
+   "last_seen": null,
+   "label": "Third-party"
+  },
+  "locked_reason": null,
+  "capacity_unconfirmed": false,
+  "kind": "third_party",
+  "message": "Third-party truck: not maintained by RGF, so it has no service tracking, risk score or eco score."
+ }
+}

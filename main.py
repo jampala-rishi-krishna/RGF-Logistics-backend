@@ -10,7 +10,8 @@ from contextlib import asynccontextmanager
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from dotenv import load_dotenv
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import Depends, FastAPI, WebSocket, WebSocketDisconnect
+from auth.dependencies import require_role
 from fastapi import Request
 from fastapi.responses import JSONResponse
 from sqlalchemy.exc import SQLAlchemyError
@@ -30,7 +31,7 @@ logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.getLogger("httpcore").setLevel(logging.WARNING)
 logger = logging.getLogger("main")
 
-from routers import admin, agent, alerts, assignment, auth, comms, communications, dispatch, fleet, fleet_health, gmail, load_planning, optimization, orders, reports, routes, voice, warehouse, pipeline, zoho_webhooks
+from routers import admin, agent, alerts, assignment, auth, comms, communications, dispatch, driver, driver_overview, driver_trip, fleet, fleet_health, gmail, load_planning, media, officer, optimization, orders, reports, routes, voice, warehouse, pipeline, zoho_webhooks
 from services.fleet_health import sampler as fleet_health_sampler
 from services import fleet_static_cache, gmail_sender, staff_directory_cache, live_sales_order_cache, voice_control, whatsapp_control, zoho_so_lock, zoho_usage
 from services.cartrack_poller import poll_cartrack_and_update, report_unmatched_roster_on_startup
@@ -219,6 +220,11 @@ os.makedirs(media_root, exist_ok=True)
 app.mount("/media", StaticFiles(directory=media_root), name="media")
 
 app.include_router(auth.router)
+app.include_router(driver.router)
+app.include_router(driver_trip.router)
+app.include_router(officer.router)
+app.include_router(driver_overview.router)
+app.include_router(media.router)
 app.include_router(fleet.router)
 app.include_router(orders.router)
 app.include_router(alerts.router)
@@ -277,7 +283,7 @@ async def sqlalchemy_error_handler(request: Request, exc: SQLAlchemyError):
 
 
 @app.post("/poll-now")
-async def poll_now():
+async def poll_now(_user=Depends(require_role("admin", "dispatcher"))):
     """Manual trigger for verification - runs one poll cycle immediately."""
     if not CARTRACK_CONFIGURED:
         return {"status": "skipped", "reason": "Cartrack not configured"}

@@ -29,6 +29,7 @@ from services import gmail_sender, assignment_email_status
 from services.sales_order_location import address_lines
 from services.item_weight import calculate_line_weight_kg, calculate_order_weight_kg
 from services.delivery_status import is_delivered
+from services.staff_roles import helper_ids_of, staff_kind
 from services import staff_directory_cache, live_sales_order_cache, memory_tables, vapi_client, vehicle_flags, voice_calls, voice_control, whatsapp_control
 from services.sales_order_history_sync import sync_history_row
 from routers.fleet import invalidate_fleet_cache
@@ -171,13 +172,19 @@ class AssignmentBody(BaseModel):
     # `driver_id` column only stores one integer, so persistence still records a
     # single "primary" driver (the first id) — see assign_order() below.
     driver_ids: list[int] = []
+    # Optional helpers (staff role HELPER), NOT including the driver. `driver_ids` above is the pre-helper-picker
+    # field and is still accepted: its first entry is the driver when `driver_id` is absent.
+    helper_ids: list[int] = []
+
+    def primary_driver_id(self) -> int | None:
+        if self.driver_id is not None:
+            return self.driver_id
+        return self.driver_ids[0] if self.driver_ids else None
 
     def all_driver_ids(self) -> list[int]:
-        if self.driver_ids:
-            return list(dict.fromkeys(self.driver_ids))
-        if self.driver_id is not None:
-            return [self.driver_id]
-        return []
+        """Driver first, then everyone else selected (helpers); no duplicates."""
+        ordered = [self.driver_id] if self.driver_id is not None else []
+        return list(dict.fromkeys([*ordered, *self.helper_ids, *self.driver_ids]))
 
 
 class AssignmentEmailBody(AssignmentBody):
@@ -197,10 +204,19 @@ class AssignmentEmailBody(AssignmentBody):
 ASSIGNMENT_TABLE_COLUMNS = ("SO number", "Client", "Total kg", "Total Packs", "Shipping Address")
 
 
-def _assignment_email_text(profile, orders, weight_fn=None) -> str:
+def _helper_line(helpers) -> str:
+    """'Helper: Name · 09xx' (several helpers are separated with '; '). Empty when there is none."""
+    parts = [f"{h.name}{' · ' + str(h.phone) if getattr(h, 'phone', None) else ''}" for h in helpers or [] if getattr(h, "name", None)]
+    return f"Helper: {'; '.join(parts)}" if parts else ""
+
+
+def _assignment_email_text(profile, orders, weight_fn=None, helpers=()) -> str:
     """Plain-text alternative of the driver email (same facts as the HTML table)."""
     weight_fn = weight_fn or _weight
-    lines = ["Route details for the assigned driver.", "Please review the assigned sales orders below before dispatch and reply to confirm receipt.", "", f"Truck: {profile.plate_no or '-'}", ""]
+    lines = ["Route details for the assigned driver.", "Please review the assigned sales orders below before dispatch and reply to confirm receipt.", "", f"Truck: {profile.plate_no or '-'}"]
+    if _helper_line(helpers):
+        lines.append(_helper_line(helpers))
+    lines.append("")
     for order in orders:
         raw = order.raw_json or {}
         address_text = ", ".join(address_lines(raw.get("shipping_address") or order.shipping_address))
@@ -209,7 +225,7 @@ def _assignment_email_text(profile, orders, weight_fn=None) -> str:
     return "\n".join(lines).strip()
 
 
-def _assignment_email_html(drivers: list, profile, orders, assigned_by: str, assigned_at: str, weight_fn=None) -> tuple[str, str, str]:
+def _assignment_email_html(drivers: list, profile, orders, assigned_by: str, assigned_at: str, weight_fn=None, helpers=()) -> tuple[str, str, str]:
     weight_fn = weight_fn or _weight
     primary = drivers[0]
     driver_names = ", ".join(d.name for d in drivers if d.name) or "Driver"
@@ -226,13 +242,15 @@ def _assignment_email_html(drivers: list, profile, orders, assigned_by: str, ass
         packs = sum(float(item.get("quantity") or 0) for item in raw.get("line_items", []))
         rows.append(f"<tr><td style='{cell}'>{escape(str(order.salesorder_number or order.id))}</td><td style='{cell}'>{escape(str(order.customer_name or '-'))}</td><td style='{cell}'>{weight_fn(order):,.1f}</td><td style='{cell}'>{packs:,.0f}</td><td style='{cell}'>{escape(address_text or '-')}</td></tr>")
     headers = "".join(f"<th style='{head}'>{heading}</th>" for heading in ASSIGNMENT_TABLE_COLUMNS)
+    helper_html = f"<p style='margin:0 0 16px;font-size:14px;line-height:1.5;font-weight:700;'>{escape(_helper_line(helpers))}</p>" if _helper_line(helpers) else ""
     body_html = (
         "<p style='margin:0 0 16px;font-size:14px;line-height:1.5;'>Please review the assigned sales orders below before dispatch and reply to confirm receipt.</p>"
+        f"{helper_html}"
         "<div style='overflow-x:auto;-webkit-overflow-scrolling:touch;'>"
         f"<table cellspacing='0' cellpadding='0' border='0' style='border-collapse:collapse;width:100%;min-width:520px;'><thead><tr>{headers}</tr></thead><tbody>{''.join(rows)}</tbody></table>"
         "</div>"
     )
-    html_body = render_rarechain_email("COLD-CHAIN OPERATIONS / PHILIPPINES", "New dispatch assignment.", f"{driver_names} {'have' if len(drivers) > 1 else 'has'} been assigned to truck {profile.plate_no or '-'}.", "https://images.pexels.com/photos/7464230/pexels-photo-7464230.jpeg?auto=compress&amp;cs=tinysrgb&amp;w=1200", [{"label": "TRUCK PLATE", "value": profile.plate_no or "-"}, {"label": "WAREHOUSE PICKUP", "value": profile.capacity_note or "-"}, {"label": "TOTAL SOs", "value": str(len(orders))}], "https://images.pexels.com/photos/6169056/pexels-photo-6169056.jpeg?auto=compress&amp;cs=tinysrgb&amp;w=1800", "Route details for the assigned driver.", body_html)
+    html_body = render_rarechain_email("COLD-CHAIN OPERATIONS / PHILIPPINES", "New dispatch assignment.", f"{driver_names} {'have' if len(drivers) > 1 else 'has'} been assigned to truck {profile.plate_no or '-'}.", "https://images.pexels.com/photos/7464230/pexels-photo-7464230.jpeg?auto=compress&amp;cs=tinysrgb&amp;w=1200", [{"label": "TRUCK PLATE", "value": profile.plate_no or "-"}, {"label": "WAREHOUSE PICKUP", "value": profile.capacity_note or "-"}, {"label": "TOTAL SOs", "value": str(len(orders))}, *([{"label": "HELPER", "value": ", ".join(h.name for h in helpers if getattr(h, "name", None))}] if helpers else [])], "https://images.pexels.com/photos/6169056/pexels-photo-6169056.jpeg?auto=compress&amp;cs=tinysrgb&amp;w=1800", "Route details for the assigned driver.", body_html)
     return subject, html_body, body_html
 
 
@@ -355,7 +373,7 @@ def assignment_options(salesorder_id: str, extra_ids: str | None = Query(None, d
     extra_orders = [o for o in (live_sales_order_cache.find_cached(oid) or live_sales_order_cache.ensure_zoho_data(oid) for oid in extras) if o is not None]
     selected_weights = [weight] + [_weight_if_known(o) for o in extra_orders]
     selected_weight = None if any(value is None for value in selected_weights) else round(sum(selected_weights), 3)
-    result = {"order": {"id": order.id, "number": order.salesorder_number, "customer": order.customer_name, "address": (order.raw_json or {}).get("shipping_address"), "weight_kg": weight, "selected_weight_kg": selected_weight, "weight_verified": weight is not None, "weight_warning": None if weight is not None else "Zoho package weight unavailable; assignment is allowed but capacity remains unverified.", "requires_reefer": _reefer(order), "assignment_status": order.assignment_status}, "constraint": constraint and {"opening_time": constraint.opening_time, "receiving_cutoff_time": constraint.receiving_cutoff_time, "avg_processing_time_minutes": constraint.avg_processing_time_minutes, "requires_reefer": constraint.requires_reefer, "notes": constraint.notes}, "constraint_status": "on file" if constraint else "No delivery constraints on file", "vehicles": [{"vehicle_id": p.plate_no, "vehicle_type": p.vehicle_type, "capacity_kg": p.rated_capacity_kg, "capacity_note": p.capacity_note, "reefer": p.is_reefer, "gps_tracked": p.is_gps_tracked, "third_party": p.is_third_party, "locked": str(p.plate_no or "").upper() in LOCKED_VEHICLES, "lock_reason": LOCKED_VEHICLES.get(str(p.plate_no or "").upper()), "assigned_weight_kg": float(assigned.get(p.plate_no, 0) or 0), "remaining_capacity_kg": None if p.rated_capacity_kg is None else max(0, float(p.rated_capacity_kg) - float(assigned.get(p.plate_no, 0) or 0))} for p in profiles if str(p.plate_no or "").upper() not in LOCKED_VEHICLES], "drivers": [{"id": d.get("id"), "name": d.get("name"), "title": d.get("title")} for d in drivers]}
+    result = {"order": {"id": order.id, "number": order.salesorder_number, "customer": order.customer_name, "address": (order.raw_json or {}).get("shipping_address"), "weight_kg": weight, "selected_weight_kg": selected_weight, "weight_verified": weight is not None, "weight_warning": None if weight is not None else "Zoho package weight unavailable; assignment is allowed but capacity remains unverified.", "requires_reefer": _reefer(order), "assignment_status": order.assignment_status}, "constraint": constraint and {"opening_time": constraint.opening_time, "receiving_cutoff_time": constraint.receiving_cutoff_time, "avg_processing_time_minutes": constraint.avg_processing_time_minutes, "requires_reefer": constraint.requires_reefer, "notes": constraint.notes}, "constraint_status": "on file" if constraint else "No delivery constraints on file", "vehicles": [{"vehicle_id": p.plate_no, "vehicle_type": p.vehicle_type, "capacity_kg": p.rated_capacity_kg, "capacity_note": p.capacity_note, "reefer": p.is_reefer, "gps_tracked": p.is_gps_tracked, "third_party": p.is_third_party, "locked": str(p.plate_no or "").upper() in LOCKED_VEHICLES, "lock_reason": LOCKED_VEHICLES.get(str(p.plate_no or "").upper()), "assigned_weight_kg": float(assigned.get(p.plate_no, 0) or 0), "remaining_capacity_kg": None if p.rated_capacity_kg is None else max(0, float(p.rated_capacity_kg) - float(assigned.get(p.plate_no, 0) or 0))} for p in profiles if str(p.plate_no or "").upper() not in LOCKED_VEHICLES], "drivers": [{"id": d.get("id"), "name": d.get("name"), "title": d.get("title"), "kind": staff_kind(d), "phone": d.get("phone")} for d in drivers]}
     _assignment_options_cache[cache_key] = (now, result)
     return result
 
@@ -399,14 +417,15 @@ def assign_order(salesorder_id: str, body: AssignmentBody, current_user: Current
     if any(_reefer(item) for item in orders) and profile.is_reefer is False:
         raise HTTPException(409, "This order requires a reefer-capable vehicle.")
     driver_ids = body.all_driver_ids()
+    primary_driver_id = body.primary_driver_id()
+    if body.helper_ids and primary_driver_id is None:
+        raise HTTPException(400, "Pick a driver before adding helpers.")
     for driver_id in driver_ids:
         if not staff_directory_cache.get_by_id(driver_id):
             raise HTTPException(404, "Driver was not found.")
-    # sales_order_history / the live cache only have a single `driver_id` column,
-    # so the first selected driver is persisted as the "primary" driver. Every id
-    # in driver_ids still gets the assignment notifications (see
-    # send_assignment_email below) regardless of this DB limitation.
-    primary_driver_id = driver_ids[0] if driver_ids else None
+    # driver_id = the driver. helper_ids keeps EVERY selected id including the driver (backward compatible);
+    # the helpers are always helper_ids minus the driver, by value (services/staff_roles.helper_ids_of).
+    # Every selected person still gets the assignment notifications (send_assignment_email below).
     assigned_at = datetime.now(timezone.utc)
     for item in orders:
         item.vehicle_id = body.vehicle_id
@@ -418,6 +437,7 @@ def assign_order(salesorder_id: str, body: AssignmentBody, current_user: Current
         live_sales_order_cache.set_assignment(item.id, vehicle_id=body.vehicle_id, driver_id=primary_driver_id, assigned_at=assigned_at, assigned_by=current_user.id, assignment_status="assigned")
         sync_history_row(db, item)
     db.commit()
+    live_sales_order_cache.bump_assignment_generation()
     # Fleet Health: an over-capacity assignment is recorded as an "overload" issue on that truck (never blocks the assignment).
     for overage in over_capacity:
         try:
@@ -430,7 +450,7 @@ def assign_order(salesorder_id: str, body: AssignmentBody, current_user: Current
             logger.warning("[FLEET_HEALTH] overload issue not recorded for %s: %s", body.vehicle_id, exc)
     invalidate_fleet_cache()
     _invalidate_assignment_options_cache()
-    response = {"success": True, "salesorder_ids": [item.id for item in orders], "vehicle_id": body.vehicle_id, "driver_id": primary_driver_id, "driver_ids": driver_ids, "assignment_status": "assigned", "over_capacity": bool(over_capacity), "over_capacity_kg": max((o["over_kg"] for o in over_capacity), default=0.0), "over_capacity_percent": max((o["over_percent"] or 0.0 for o in over_capacity), default=0.0), "capacity_verified": all(value is not None for value in known_weights + existing_weights), "capacity_warning": None if all(value is not None for value in known_weights + existing_weights) else "Assignment completed, but one or more Zoho package weights were unavailable; capacity must be verified before dispatch."}
+    response = {"success": True, "salesorder_ids": [item.id for item in orders], "vehicle_id": body.vehicle_id, "driver_id": primary_driver_id, "driver_ids": driver_ids, "helper_ids": helper_ids_of(primary_driver_id, driver_ids), "assignment_status": "assigned", "over_capacity": bool(over_capacity), "over_capacity_kg": max((o["over_kg"] for o in over_capacity), default=0.0), "over_capacity_percent": max((o["over_percent"] or 0.0 for o in over_capacity), default=0.0), "capacity_verified": all(value is not None for value in known_weights + existing_weights), "capacity_warning": None if all(value is not None for value in known_weights + existing_weights) else "Assignment completed, but one or more Zoho package weights were unavailable; capacity must be verified before dispatch."}
     # Automatic notification, as before the Send button existed: one email per driver (all their SOs) + one team
     # email, then WhatsApp/SMS/voice subject to their own pause switches. A failure here never undoes the assignment.
     order_ids_assigned = [item.id for item in orders]
@@ -442,7 +462,7 @@ def assign_order(salesorder_id: str, body: AssignmentBody, current_user: Current
     else:
         try:
             response["notifications"] = send_assignment_email(
-                AssignmentEmailBody(salesorder_ids=order_ids_assigned, vehicle_id=body.vehicle_id, driver_ids=driver_ids, manual_vehicle=body.manual_vehicle,
+                AssignmentEmailBody(salesorder_ids=order_ids_assigned, vehicle_id=body.vehicle_id, driver_id=primary_driver_id, helper_ids=helper_ids_of(primary_driver_id, driver_ids), manual_vehicle=body.manual_vehicle,
                                     assigned_by=current_user.full_name or current_user.email, assignment_batch_id=batch_id),
                 current_user, db)
         except Exception as exc:  # noqa: BLE001
@@ -480,6 +500,7 @@ def unassign_order(salesorder_id: str, current_user: CurrentUser = Depends(requi
     )
     sync_history_row(db, order)
     db.commit()
+    live_sales_order_cache.bump_assignment_generation()
     invalidate_fleet_cache()
     live_sales_order_cache.invalidate_assigned_zoho()
     live_sales_order_cache.invalidate_windows()
@@ -504,7 +525,7 @@ def optimize_assigned_stops(vehicle_id: str, current_user: CurrentUser = Depends
         order.route_id = str(route["id"])
         live_sales_order_cache.set_assignment(order.id, route_id=str(route["id"]))
         sync_history_row(db, order)
-        memory_tables.route_stops.create(route_id=route["id"], sequence=sequence, location_name=order.customer_name or order.salesorder_number, lat=None, lng=None)
+        memory_tables.route_stops.create(route_id=route["id"], so_id=order.id, sequence=sequence, location_name=order.customer_name or order.salesorder_number, lat=None, lng=None)
     db.commit()
     return {"success": True, "route_id": str(route["id"]), "vehicle_id": vehicle_id, "stop_sequence": result.routes[0].stop_sequence, "orders": [{"id": o.id, "salesorder_number": o.salesorder_number, "route_id": o.route_id} for o in orders]}
 
@@ -528,6 +549,14 @@ def send_assignment_email(body: AssignmentEmailBody, current_user: CurrentUser =
         raise HTTPException(400, "At least one sales order is required.")
     orders = [o for o in (live_sales_order_cache.find_cached(oid) or live_sales_order_cache.ensure_zoho_data(oid) for oid in ids) if o is not None]
     driver_ids = body.all_driver_ids()
+    primary_id = body.primary_driver_id()
+    if (body.resend or body.email_only) and ids:
+        # Resend / Retry: who is the driver and who are the helpers comes from the stored assignment, never from the order
+        # of the ids the caller listed.
+        stored = live_sales_order_cache.get_assignment(ids[0]) or {}
+        if stored.get("driver_id") is not None:
+            primary_id = stored["driver_id"]
+            driver_ids = list(dict.fromkeys([primary_id, *(stored.get("helper_ids") or [])]))
     driver_rows = [staff_directory_cache.get_by_id(driver_id) for driver_id in driver_ids]
     profile = db.execute(select(Vehicle).where(Vehicle.plate_no == body.vehicle_id)).scalar_one_or_none()
     manual_profile = _manual_vehicle_profile(body.manual_vehicle, body.vehicle_id)
@@ -538,7 +567,12 @@ def send_assignment_email(body: AssignmentEmailBody, current_user: CurrentUser =
         return {"skipped": True, "reason": "Third-party vehicle has no staff recipient."}
     if not driver_ids or any(row is None for row in driver_rows):
         raise HTTPException(404, "Driver was not found.")
-    drivers = [SimpleNamespace(**row) for row in driver_rows]
+    everyone = [SimpleNamespace(**row) for row in driver_rows]
+    helper_set = set(helper_ids_of(primary_id, driver_ids))
+    drivers = [person for person in everyone if person.id not in helper_set]
+    helpers = [person for person in everyone if person.id in helper_set]
+    if not drivers:
+        raise HTTPException(400, "Pick a driver before adding helpers.")
     if len(orders) != len(set(ids)) or not profile:
         raise HTTPException(404, "Sales order or vehicle was not found.")
     def address(order):
@@ -546,16 +580,16 @@ def send_assignment_email(body: AssignmentEmailBody, current_user: CurrentUser =
     def packs(order): return sum(float(item.get("quantity") or 0) for item in (order.raw_json or {}).get("line_items", []))
     assigned_by = body.assigned_by or current_user.full_name or current_user.email
     assigned_at = datetime.now(timezone.utc).isoformat()
-    driver_subject, generated_driver_html, body_html = _assignment_email_html(drivers, profile, orders, assigned_by, assigned_at)
+    driver_subject, generated_driver_html, body_html = _assignment_email_html(drivers, profile, orders, assigned_by, assigned_at, helpers=helpers)
     primary = drivers[0]
     driver_names = ", ".join(d.name for d in drivers if d.name) or "Driver"
     warehouse = {"METS": "Mets Cold Storage", "GLACIER": "Glacier Cold Storage"}.get(str(primary.warehouse or "").upper(), primary.warehouse or profile.capacity_note or "-")
     team_subject = f"Assignment Confirmed: {driver_names} - {profile.plate_no or '-'}"
-    team_html = render_rarechain_email("COLD-CHAIN OPERATIONS / PHILIPPINES", "Assignment confirmed and dispatched.", f"{driver_names} {'have' if len(drivers) > 1 else 'has'} been assigned to truck {profile.plate_no or '-'} for {len(orders)} sales order(s).", "https://images.pexels.com/photos/7464230/pexels-photo-7464230.jpeg?auto=compress&amp;cs=tinysrgb&amp;w=1200", [{"label": "TRUCK PLATE", "value": profile.plate_no or "-"}, {"label": "DRIVER(S)" if len(drivers) > 1 else "DRIVER", "value": driver_names}, {"label": "WAREHOUSE", "value": warehouse}], "https://images.pexels.com/photos/6169056/pexels-photo-6169056.jpeg?auto=compress&amp;cs=tinysrgb&amp;w=1800", "Route details for your records.", f"<p style='margin:0 0 16px;'>Hi {{{{RECIPIENT_FIRST_NAME}}}},</p>{body_html}")
+    team_html = render_rarechain_email("COLD-CHAIN OPERATIONS / PHILIPPINES", "Assignment confirmed and dispatched.", f"{driver_names} {'have' if len(drivers) > 1 else 'has'} been assigned to truck {profile.plate_no or '-'} for {len(orders)} sales order(s).", "https://images.pexels.com/photos/7464230/pexels-photo-7464230.jpeg?auto=compress&amp;cs=tinysrgb&amp;w=1200", [{"label": "TRUCK PLATE", "value": profile.plate_no or "-"}, {"label": "DRIVER(S)" if len(drivers) > 1 else "DRIVER", "value": driver_names}, *([{"label": "HELPER", "value": ", ".join(h.name for h in helpers if h.name)}] if helpers else []), {"label": "WAREHOUSE", "value": warehouse}], "https://images.pexels.com/photos/6169056/pexels-photo-6169056.jpeg?auto=compress&amp;cs=tinysrgb&amp;w=1800", "Route details for your records.", f"<p style='margin:0 0 16px;'>Hi {{{{RECIPIENT_FIRST_NAME}}}},</p>{body_html}")
     if body.preview:
         return {"driverHtmlBody": generated_driver_html, "driverSubject": driver_subject, "teamHtmlBody": team_html, "teamSubject": team_subject}
     driver_html = body.html_body or generated_driver_html
-    driver_text = None if body.html_body else _assignment_email_text(profile, orders)  # edited HTML: the text part is derived from it
+    driver_text = None if body.html_body else _assignment_email_text(profile, orders, helpers=helpers)  # edited HTML: the text part is derived from it
     email_only = body.resend or body.email_only  # Resend / Retry: email only, never re-notify by WhatsApp/SMS/voice
     email_jobs: list = []
     sales_orders_payload = [{"soNumber": order.salesorder_number, "clientName": order.customer_name, "totalKgs": _weight(order), "totalPacks": packs(order), "shippingAddress": address(order)} for order in orders]
@@ -569,7 +603,7 @@ def send_assignment_email(body: AssignmentEmailBody, current_user: CurrentUser =
     voice_paused = not voice_control.is_active()  # master switch: every outbound AI call (direct Vapi or the n8n voice webhook) is skipped
     so_numbers = [order.salesorder_number for order in orders]
     assignment_key = f"{body.vehicle_id}|{','.join(sorted(map(str, ids)))}|{','.join(sorted(map(str, driver_ids)))}"
-    for index, driver in enumerate(drivers):
+    for index, driver in enumerate(everyone):  # the driver and any helpers each get their own notification
         payload = {
             "driverName": driver.name,
             "driverEmail": driver.email,

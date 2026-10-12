@@ -4,15 +4,20 @@ import os
 import time
 from datetime import datetime, timezone
 
-from fastapi import APIRouter, File, Form, HTTPException, UploadFile
+from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
 from pydantic import BaseModel
 
+from auth.dependencies import CurrentUser, require_role
 from services import memory_tables
 
 router = APIRouter(prefix="/orders", tags=["orders"])
 
-# orders-module/index.js enforces no role gate on any route and writes no audit_log entries -
-# ported faithfully (confirmed pre-existing gap, not newly introduced here).
+# Role gates (2026-10-12): reads = admin, dispatcher, warehouse, client; writes (/events, /proof) = admin, dispatcher, warehouse.
+#
+# PORTAL / client: these in-memory orders carry a customer_id but a `users` row has NO customer link yet, so a client
+# login cannot be scoped to "their" orders. Until that link exists a client gets [] from the list and 404 from the
+# detail (the `customerId` query parameter is ignored for clients - it is caller-controlled). Never another customer's data.
+# Nothing in the codebase creates memory_tables.orders rows either (the store is always empty today).
 #
 # 2026-09-24 (Step 6): orders/customers/order_events/delivery_proofs dropped from Neon (not
 # in the final kept-table list) - in-memory only now. This is the customer-tracking Portal
@@ -23,13 +28,21 @@ router = APIRouter(prefix="/orders", tags=["orders"])
 MEDIA_ROOT = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "media", "delivery_proofs")
 
 
+READ_ROLES = Depends(require_role("admin", "dispatcher", "warehouse", "client"))
+WRITE_ROLES = Depends(require_role("admin", "dispatcher", "warehouse"))
+
+
 @router.get("")
-def list_orders(customerId: str | None = None):
+def list_orders(customerId: str | None = None, user: CurrentUser = READ_ROLES):
+    if user.role == "client":
+        return []
     return memory_tables.orders.list(customer_id=customerId)
 
 
 @router.get("/{order_id}")
-def get_order(order_id: int):
+def get_order(order_id: int, user: CurrentUser = READ_ROLES):
+    if user.role == "client":
+        raise HTTPException(404, "Order not found")
     order = memory_tables.orders.get(order_id)
     if order is None:
         raise HTTPException(404, "Order not found")
@@ -41,7 +54,7 @@ class OrderEventBody(BaseModel):
     notes: str | None = None
 
 
-@router.post("/{order_id}/events", status_code=201)
+@router.post("/{order_id}/events", status_code=201, dependencies=[WRITE_ROLES])
 def post_order_event(order_id: int, body: OrderEventBody):
     if memory_tables.orders.get(order_id) is None:
         raise HTTPException(404, "Order not found")
@@ -55,7 +68,7 @@ def post_order_event(order_id: int, body: OrderEventBody):
     )
 
 
-@router.post("/{order_id}/proof", status_code=201)
+@router.post("/{order_id}/proof", status_code=201, dependencies=[WRITE_ROLES])
 async def post_delivery_proof(
     order_id: int,
     file: UploadFile = File(...),

@@ -28,6 +28,20 @@ FULL_REPULL_SECONDS = int(os.environ.get("ZOHO_FULL_REPULL_SECONDS", "7200"))
 # never re-read from Neon on a normal request. ---
 _state_lock = threading.Lock()
 _assignment_state: dict[str, dict] = {}
+# Bumped on every assignment-state mutation (assign, unassign, email status, completion...). The driver app's
+# in-memory "today" cache compares it, so it re-reads Neon only after something actually changed.
+_assignment_generation = 0
+
+
+def assignment_generation() -> int:
+    return _assignment_generation
+
+
+def bump_assignment_generation() -> None:
+    """Call after the Neon commit of an assignment change, so a reader that raced the commit re-reads."""
+    global _assignment_generation
+    with _state_lock:
+        _assignment_generation += 1
 # Zoho business data (customer, weight, raw_json) for every id currently in _assignment_state,
 # fetched live from Zoho (not Neon) and kept warm regardless of which date window is cached.
 _assigned_zoho: dict[str, SalesOrderCache] = {}
@@ -255,8 +269,10 @@ def load_assignment_state_from_history(db) -> None:
 
 
 def set_assignment(order_id: str, **fields) -> None:
+    global _assignment_generation
     with _state_lock:
         _assignment_state.setdefault(order_id, {}).update(fields)
+        _assignment_generation += 1
     record = _assigned_zoho.get(order_id)
     if record is not None:
         for key, value in fields.items():

@@ -26,11 +26,16 @@ class CurrentUser:
     full_name: str
     status: str | None
     must_change_password: bool = False
+    staff_id: int | None = None
 
 
 def _load_user(user_id: int) -> CurrentUser | None:
     """Loaded once per TTL window (services/user_cache.py), not per request. A normal
-    authenticated request never opens a DB session at all on a cache hit."""
+    authenticated request never opens a DB session at all on a cache hit.
+
+    Disabling a user: the admin status endpoint invalidates this cache entry (immediate on the single API
+    instance). Worst case, e.g. a status changed directly in the database, the user is cut off when the entry
+    expires - at most user_cache.TTL_SECONDS (10 minutes) - even though a driver JWT lives 30 days."""
     cached = user_cache.get(user_id)
     if cached is not None:
         return CurrentUser(**cached)
@@ -38,7 +43,7 @@ def _load_user(user_id: int) -> CurrentUser | None:
         user = db.get(User, user_id)
         if user is None or user.status not in (None, "active"):
             return None
-        current = CurrentUser(id=user.id, email=user.email, role=user.role, full_name=user.full_name, status=user.status, must_change_password=user.must_change_password)
+        current = CurrentUser(id=user.id, email=user.email, role=user.role, full_name=user.full_name, status=user.status, must_change_password=user.must_change_password, staff_id=user.staff_id)
     user_cache.put(user_id, asdict(current))
     return current
 

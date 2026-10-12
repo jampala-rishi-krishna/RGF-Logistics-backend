@@ -12,7 +12,7 @@ from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, Depends, HTTPException
 
-from auth.dependencies import get_current_user
+from auth.dependencies import require_role
 from services import zoho_acquisition, zoho_client
 from services.zoho_client import (
     ZohoError,
@@ -26,7 +26,7 @@ from services.zoho_client import (
     fetch_transfer_orders,
 )
 
-router = APIRouter(prefix="/api/reports", tags=["reports"], dependencies=[Depends(get_current_user)])
+router = APIRouter(prefix="/api/reports", tags=["reports"], dependencies=[Depends(require_role("admin", "dispatcher", "warehouse"))])
 
 PHT = ZoneInfo("Asia/Manila")
 _CACHE_TTL_SECONDS = 60

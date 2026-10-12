@@ -1,0 +1,1765 @@
+{
+ "truck": {
+  "id": 4,
+  "plate": "NFX5791",
+  "vehicle_type": "Truck",
+  "is_reefer": false,
+  "tracker": {
+   "kind": "tracked",
+   "status": "stale",
+   "last_seen": "2026-10-08",
+   "label": "No recent signal"
+  },
+  "locked_reason": null,
+  "capacity_unconfirmed": false,
+  "kind": "tracked",
+  "odometer_km": 193070.0,
+  "services": {
+   "oil_change": {
+    "status": "overdue",
+    "usage_pct": 230.7,
+    "driven_by": "km",
+    "components": {
+     "km": {
+      "since": 23070.0,
+      "interval": 10000,
+      "pct": 230.7
+     },
+     "engine_hours": {
+      "since": 314.3,
+      "interval": 250,
+      "pct": 125.7
+     },
+     "days": {
+      "since": 210,
+      "interval": 180,
+      "pct": 116.7
+     }
+    },
+    "interval": {
+     "km": 10000,
+     "engine_hours": 250,
+     "days": 180,
+     "confirmed": false,
+     "scope": "fleet"
+    },
+    "last_service_on": "2026-03-12",
+    "label": "Oil",
+    "engine_hours_partial": true
+   },
+   "tires": {
+    "status": "ok",
+    "usage_pct": 12.7,
+    "driven_by": "km",
+    "components": {
+     "km": {
+      "since": 5070.0,
+      "interval": 40000,
+      "pct": 12.7
+     },
+     "days": {
+      "since": 60,
+      "interval": 730,
+      "pct": 8.2
+     }
+    },
+    "interval": {
+     "km": 40000,
+     "engine_hours": null,
+     "days": 730,
+     "confirmed": false,
+     "scope": "fleet"
+    },
+    "last_service_on": "2026-08-09",
+    "label": "Tyres",
+    "engine_hours_partial": true
+   },
+   "brakes": {
+    "status": "no_record",
+    "usage_pct": null,
+    "components": {},
+    "interval": {
+     "km": 30000,
+     "engine_hours": null,
+     "days": 365,
+     "confirmed": false,
+     "scope": "fleet"
+    },
+    "label": "Brakes",
+    "engine_hours_partial": false
+   },
+   "general_pms": {
+    "status": "no_record",
+    "usage_pct": null,
+    "components": {},
+    "interval": {
+     "km": 20000,
+     "engine_hours": 500,
+     "days": 365,
+     "confirmed": false,
+     "scope": "fleet"
+    },
+    "label": "PMS",
+    "engine_hours_partial": false
+   },
+   "battery": {
+    "status": "no_record",
+    "usage_pct": null,
+    "components": {},
+    "interval": {
+     "km": null,
+     "engine_hours": null,
+     "days": 730,
+     "confirmed": false,
+     "scope": "fleet"
+    },
+    "label": "Battery",
+    "engine_hours_partial": false
+   }
+  },
+  "risk": {
+   "score": 65,
+   "band": "high",
+   "breakdown": [
+    {
+     "key": "service",
+     "label": "Service",
+     "points": 40,
+     "max": 40,
+     "detail": "worst usage 231% (1 overdue)",
+     "formula": "100%+ of any interval = 40, 80-100% = 20"
+    },
+    {
+     "key": "flags",
+     "label": "Open issues",
+     "points": 20,
+     "max": 25,
+     "detail": "1 critical x 15 + 1 warning x 5",
+     "formula": "critical 15 each, warning 5 each, capped at 25"
+    },
+    {
+     "key": "checklists",
+     "label": "Failed pre-trip checks (7 d)",
+     "points": 0,
+     "max": 15,
+     "detail": "0 failed",
+     "formula": "5 each, capped at 15"
+    },
+    {
+     "key": "overloads",
+     "label": "Overloaded trips (30 d)",
+     "points": 0,
+     "max": 10,
+     "detail": "0 flagged",
+     "formula": "2 each, capped at 10"
+    },
+    {
+     "key": "repairs",
+     "label": "Repairs / downtime (90 d)",
+     "points": 5,
+     "max": 10,
+     "detail": "1 repair record(s)",
+     "formula": "5 each, capped at 10"
+    }
+   ],
+   "any_overdue": true,
+   "needs_attention": true
+  },
+  "open_flags": [
+   {
+    "id": 2,
+    "vehicle_id": 4,
+    "source": "email",
+    "severity": "critical",
+    "message": "Juan Dela Cruz reported by email: Engine is overheating near Calamba, need to stop",
+    "ref": "email:18f3c",
+    "photo_ref": null,
+    "reported_by": "Juan Dela Cruz",
+    "resolution_note": null,
+    "resolved_by": null,
+    "occurred_at": null,
+    "created_at": "2026-10-08T06:58:52.351581+00:00",
+    "resolved_at": null
+   },
+   {
+    "id": 1,
+    "vehicle_id": 4,
+    "source": "manual",
+    "severity": "warning",
+    "message": "Left mirror loose",
+    "ref": null,
+    "photo_ref": null,
+    "reported_by": "Rishi",
+    "resolution_note": null,
+    "resolved_by": null,
+    "occurred_at": null,
+    "created_at": "2026-10-08T06:58:52.350573+00:00",
+    "resolved_at": null
+   }
+  ],
+  "open_flags_count": 2,
+  "critical_flags_count": 1,
+  "last_checklist": {
+   "id": 10,
+   "checked_at": "2026-10-07T01:58:52.358559+00:00",
+   "passed": true
+  },
+  "failed_checklists_7d": 0,
+  "battery": {
+   "status": "warning",
+   "reasons": [
+    "parked 12.16 V is below the warning limit 12.2 V (12 V system)"
+   ],
+   "date": "2026-10-08",
+   "parked_min": 12.16,
+   "running_avg": 14.01,
+   "system": 12
+  },
+  "in_repair_record": false,
+  "offer_repair_record": false
+ },
+ "records": [
+  {
+   "id": 10,
+   "vehicle_id": 4,
+   "kind": "service",
+   "service_type": "tires",
+   "performed_on": "2026-08-09",
+   "odometer_km": 188000.0,
+   "engine_hours": null,
+   "downtime_start": null,
+   "downtime_end": null,
+   "reason": null,
+   "cost_php": null,
+   "vendor": null,
+   "notes": null,
+   "receipt_ref": null,
+   "created_by": null
+  },
+  {
+   "id": 13,
+   "vehicle_id": 4,
+   "kind": "repair",
+   "service_type": null,
+   "performed_on": "2026-07-30",
+   "odometer_km": 191000.0,
+   "engine_hours": null,
+   "downtime_start": "2026-07-29T14:58:52.339507+00:00",
+   "downtime_end": "2026-08-01T14:58:52.339507+00:00",
+   "reason": "Radiator hose",
+   "cost_php": 4300.0,
+   "vendor": "Isuzu Pasig",
+   "notes": null,
+   "receipt_ref": null,
+   "created_by": null
+  },
+  {
+   "id": 9,
+   "vehicle_id": 4,
+   "kind": "service",
+   "service_type": "oil_change",
+   "performed_on": "2026-03-12",
+   "odometer_km": 170000.0,
+   "engine_hours": null,
+   "downtime_start": null,
+   "downtime_end": null,
+   "reason": null,
+   "cost_php": 5400.0,
+   "vendor": "Isuzu Pasig",
+   "notes": null,
+   "receipt_ref": null,
+   "created_by": null
+  }
+ ],
+ "intervals": [
+  {
+   "service_type": "oil_change",
+   "label": "Oil",
+   "default": {
+    "id": 1,
+    "vehicle_id": null,
+    "service_type": "oil_change",
+    "interval_km": 10000,
+    "interval_engine_hours": 250,
+    "interval_days": 180,
+    "active": true,
+    "confirmed": false,
+    "updated_at": "2026-10-08T06:58:52.296138"
+   },
+   "override": null,
+   "effective": {
+    "id": 1,
+    "vehicle_id": null,
+    "service_type": "oil_change",
+    "interval_km": 10000,
+    "interval_engine_hours": 250,
+    "interval_days": 180,
+    "active": true,
+    "confirmed": false,
+    "updated_at": "2026-10-08T06:58:52.296138"
+   },
+   "confirmed": false
+  },
+  {
+   "service_type": "tires",
+   "label": "Tyres",
+   "default": {
+    "id": 2,
+    "vehicle_id": null,
+    "service_type": "tires",
+    "interval_km": 40000,
+    "interval_engine_hours": null,
+    "interval_days": 730,
+    "active": true,
+    "confirmed": false,
+    "updated_at": "2026-10-08T06:58:52.296138"
+   },
+   "override": null,
+   "effective": {
+    "id": 2,
+    "vehicle_id": null,
+    "service_type": "tires",
+    "interval_km": 40000,
+    "interval_engine_hours": null,
+    "interval_days": 730,
+    "active": true,
+    "confirmed": false,
+    "updated_at": "2026-10-08T06:58:52.296138"
+   },
+   "confirmed": false
+  },
+  {
+   "service_type": "brakes",
+   "label": "Brakes",
+   "default": {
+    "id": 3,
+    "vehicle_id": null,
+    "service_type": "brakes",
+    "interval_km": 30000,
+    "interval_engine_hours": null,
+    "interval_days": 365,
+    "active": true,
+    "confirmed": false,
+    "updated_at": "2026-10-08T06:58:52.296138"
+   },
+   "override": null,
+   "effective": {
+    "id": 3,
+    "vehicle_id": null,
+    "service_type": "brakes",
+    "interval_km": 30000,
+    "interval_engine_hours": null,
+    "interval_days": 365,
+    "active": true,
+    "confirmed": false,
+    "updated_at": "2026-10-08T06:58:52.296138"
+   },
+   "confirmed": false
+  },
+  {
+   "service_type": "general_pms",
+   "label": "PMS",
+   "default": {
+    "id": 5,
+    "vehicle_id": null,
+    "service_type": "general_pms",
+    "interval_km": 20000,
+    "interval_engine_hours": 500,
+    "interval_days": 365,
+    "active": true,
+    "confirmed": false,
+    "updated_at": "2026-10-08T06:58:52.296138"
+   },
+   "override": null,
+   "effective": {
+    "id": 5,
+    "vehicle_id": null,
+    "service_type": "general_pms",
+    "interval_km": 20000,
+    "interval_engine_hours": 500,
+    "interval_days": 365,
+    "active": true,
+    "confirmed": false,
+    "updated_at": "2026-10-08T06:58:52.296138"
+   },
+   "confirmed": false
+  },
+  {
+   "service_type": "battery",
+   "label": "Battery",
+   "default": {
+    "id": 6,
+    "vehicle_id": null,
+    "service_type": "battery",
+    "interval_km": null,
+    "interval_engine_hours": null,
+    "interval_days": 730,
+    "active": true,
+    "confirmed": false,
+    "updated_at": "2026-10-08T06:58:52.296138"
+   },
+   "override": null,
+   "effective": {
+    "id": 6,
+    "vehicle_id": null,
+    "service_type": "battery",
+    "interval_km": null,
+    "interval_engine_hours": null,
+    "interval_days": 730,
+    "active": true,
+    "confirmed": false,
+    "updated_at": "2026-10-08T06:58:52.296138"
+   },
+   "confirmed": false
+  }
+ ],
+ "flags": [
+  {
+   "id": 2,
+   "vehicle_id": 4,
+   "source": "email",
+   "severity": "critical",
+   "message": "Juan Dela Cruz reported by email: Engine is overheating near Calamba, need to stop",
+   "ref": "email:18f3c",
+   "photo_ref": null,
+   "reported_by": "Juan Dela Cruz",
+   "resolution_note": null,
+   "resolved_by": null,
+   "occurred_at": null,
+   "created_at": "2026-10-08T06:58:52.351581+00:00",
+   "resolved_at": null
+  },
+  {
+   "id": 1,
+   "vehicle_id": 4,
+   "source": "manual",
+   "severity": "warning",
+   "message": "Left mirror loose",
+   "ref": null,
+   "photo_ref": null,
+   "reported_by": "Rishi",
+   "resolution_note": null,
+   "resolved_by": null,
+   "occurred_at": null,
+   "created_at": "2026-10-08T06:58:52.350573+00:00",
+   "resolved_at": null
+  }
+ ],
+ "checklists": [
+  {
+   "id": 10,
+   "vehicle_id": 4,
+   "staff_id": 13,
+   "checked_at": "2026-10-07T01:58:52.358559+00:00",
+   "items": {
+    "tires": "ok",
+    "lights": "ok",
+    "brakes": "ok",
+    "leaks": "ok",
+    "mirrors_wipers": "ok",
+    "body_damage": "ok",
+    "reefer_running": "na",
+    "documents": "ok"
+   },
+   "reefer_temp_c": null,
+   "notes": null,
+   "passed": true,
+   "entered_by": 1
+  },
+  {
+   "id": 11,
+   "vehicle_id": 4,
+   "staff_id": 13,
+   "checked_at": "2026-10-06T01:58:52.358559+00:00",
+   "items": {
+    "tires": "ok",
+    "lights": "ok",
+    "brakes": "ok",
+    "leaks": "ok",
+    "mirrors_wipers": "ok",
+    "body_damage": "ok",
+    "reefer_running": "na",
+    "documents": "ok"
+   },
+   "reefer_temp_c": null,
+   "notes": null,
+   "passed": true,
+   "entered_by": 1
+  }
+ ],
+ "daily": [
+  {
+   "date": "2026-08-10",
+   "km": 211.0,
+   "engine_hours": 7.46,
+   "trips": 18,
+   "assigned": true,
+   "idle_total_min": 19.7,
+   "speeding_seconds": 621,
+   "harsh": 0,
+   "partial_day": false
+  },
+  {
+   "date": "2026-08-11",
+   "km": 273.3,
+   "engine_hours": 9.33,
+   "trips": 23,
+   "assigned": true,
+   "idle_total_min": 21.1,
+   "speeding_seconds": 658,
+   "harsh": 0,
+   "partial_day": false
+  },
+  {
+   "date": "2026-08-12",
+   "km": 208.8,
+   "engine_hours": 7.83,
+   "trips": 18,
+   "assigned": true,
+   "idle_total_min": 36.5,
+   "speeding_seconds": 979,
+   "harsh": 0,
+   "partial_day": false
+  },
+  {
+   "date": "2026-08-13",
+   "km": 121.9,
+   "engine_hours": 4.85,
+   "trips": 11,
+   "assigned": false,
+   "idle_total_min": 32.3,
+   "speeding_seconds": 398,
+   "harsh": 2,
+   "partial_day": false
+  },
+  {
+   "date": "2026-08-14",
+   "km": 274.3,
+   "engine_hours": 8.2,
+   "trips": 23,
+   "assigned": true,
+   "idle_total_min": 53.8,
+   "speeding_seconds": 1267,
+   "harsh": 2,
+   "partial_day": false
+  },
+  {
+   "date": "2026-08-15",
+   "km": 116.0,
+   "engine_hours": 5.28,
+   "trips": 10,
+   "assigned": true,
+   "idle_total_min": 40.5,
+   "speeding_seconds": 545,
+   "harsh": 1,
+   "partial_day": false
+  },
+  {
+   "date": "2026-08-16",
+   "km": 0.0,
+   "engine_hours": 0.0,
+   "trips": 0,
+   "assigned": false,
+   "idle_total_min": 0.0,
+   "speeding_seconds": 0,
+   "harsh": 0,
+   "partial_day": false
+  },
+  {
+   "date": "2026-08-17",
+   "km": 226.5,
+   "engine_hours": 8.47,
+   "trips": 19,
+   "assigned": false,
+   "idle_total_min": 7.4,
+   "speeding_seconds": 908,
+   "harsh": 3,
+   "partial_day": false
+  },
+  {
+   "date": "2026-08-18",
+   "km": 100.0,
+   "engine_hours": 4.66,
+   "trips": 9,
+   "assigned": false,
+   "idle_total_min": 50.2,
+   "speeding_seconds": 72,
+   "harsh": 0,
+   "partial_day": false
+  },
+  {
+   "date": "2026-08-19",
+   "km": 66.5,
+   "engine_hours": 3.86,
+   "trips": 6,
+   "assigned": true,
+   "idle_total_min": 47.6,
+   "speeding_seconds": 290,
+   "harsh": 1,
+   "partial_day": false
+  },
+  {
+   "date": "2026-08-20",
+   "km": 123.5,
+   "engine_hours": 4.84,
+   "trips": 11,
+   "assigned": true,
+   "idle_total_min": 22.4,
+   "speeding_seconds": 588,
+   "harsh": 0,
+   "partial_day": false
+  },
+  {
+   "date": "2026-08-21",
+   "km": 101.4,
+   "engine_hours": 3.47,
+   "trips": 9,
+   "assigned": true,
+   "idle_total_min": 39.6,
+   "speeding_seconds": 216,
+   "harsh": 0,
+   "partial_day": false
+  },
+  {
+   "date": "2026-08-22",
+   "km": 228.3,
+   "engine_hours": 8.48,
+   "trips": 20,
+   "assigned": false,
+   "idle_total_min": 40.0,
+   "speeding_seconds": 603,
+   "harsh": 1,
+   "partial_day": false
+  },
+  {
+   "date": "2026-08-23",
+   "km": 0.0,
+   "engine_hours": 0.0,
+   "trips": 0,
+   "assigned": false,
+   "idle_total_min": 0.0,
+   "speeding_seconds": 0,
+   "harsh": 0,
+   "partial_day": false
+  },
+  {
+   "date": "2026-08-24",
+   "km": 191.1,
+   "engine_hours": 6.65,
+   "trips": 16,
+   "assigned": true,
+   "idle_total_min": 38.0,
+   "speeding_seconds": 227,
+   "harsh": 2,
+   "partial_day": false
+  },
+  {
+   "date": "2026-08-25",
+   "km": 137.6,
+   "engine_hours": 5.18,
+   "trips": 12,
+   "assigned": true,
+   "idle_total_min": 43.8,
+   "speeding_seconds": 429,
+   "harsh": 2,
+   "partial_day": false
+  },
+  {
+   "date": "2026-08-26",
+   "km": 113.2,
+   "engine_hours": 4.09,
+   "trips": 10,
+   "assigned": false,
+   "idle_total_min": 21.6,
+   "speeding_seconds": 136,
+   "harsh": 1,
+   "partial_day": false
+  },
+  {
+   "date": "2026-08-27",
+   "km": 241.7,
+   "engine_hours": 7.77,
+   "trips": 21,
+   "assigned": true,
+   "idle_total_min": 28.9,
+   "speeding_seconds": 699,
+   "harsh": 0,
+   "partial_day": false
+  },
+  {
+   "date": "2026-08-28",
+   "km": 61.7,
+   "engine_hours": 3.12,
+   "trips": 6,
+   "assigned": true,
+   "idle_total_min": 39.6,
+   "speeding_seconds": 161,
+   "harsh": 2,
+   "partial_day": false
+  },
+  {
+   "date": "2026-08-29",
+   "km": 188.7,
+   "engine_hours": 6.65,
+   "trips": 16,
+   "assigned": true,
+   "idle_total_min": 59.0,
+   "speeding_seconds": 346,
+   "harsh": 0,
+   "partial_day": false
+  },
+  {
+   "date": "2026-08-30",
+   "km": 0.0,
+   "engine_hours": 0.0,
+   "trips": 0,
+   "assigned": false,
+   "idle_total_min": 0.0,
+   "speeding_seconds": 0,
+   "harsh": 0,
+   "partial_day": false
+  },
+  {
+   "date": "2026-08-31",
+   "km": 129.3,
+   "engine_hours": 5.95,
+   "trips": 11,
+   "assigned": true,
+   "idle_total_min": 33.1,
+   "speeding_seconds": 695,
+   "harsh": 2,
+   "partial_day": false
+  },
+  {
+   "date": "2026-09-01",
+   "km": 64.3,
+   "engine_hours": 3.19,
+   "trips": 6,
+   "assigned": true,
+   "idle_total_min": 40.9,
+   "speeding_seconds": 251,
+   "harsh": 0,
+   "partial_day": false
+  },
+  {
+   "date": "2026-09-02",
+   "km": 137.8,
+   "engine_hours": 4.93,
+   "trips": 12,
+   "assigned": false,
+   "idle_total_min": 43.8,
+   "speeding_seconds": 787,
+   "harsh": 2,
+   "partial_day": false
+  },
+  {
+   "date": "2026-09-03",
+   "km": 76.7,
+   "engine_hours": 3.75,
+   "trips": 7,
+   "assigned": true,
+   "idle_total_min": 55.8,
+   "speeding_seconds": 64,
+   "harsh": 0,
+   "partial_day": false
+  },
+  {
+   "date": "2026-09-04",
+   "km": 251.7,
+   "engine_hours": 8.66,
+   "trips": 21,
+   "assigned": true,
+   "idle_total_min": 66.5,
+   "speeding_seconds": 294,
+   "harsh": 0,
+   "partial_day": false
+  },
+  {
+   "date": "2026-09-05",
+   "km": 127.5,
+   "engine_hours": 4.05,
+   "trips": 11,
+   "assigned": true,
+   "idle_total_min": 61.5,
+   "speeding_seconds": 74,
+   "harsh": 1,
+   "partial_day": false
+  },
+  {
+   "date": "2026-09-06",
+   "km": 0.0,
+   "engine_hours": 0.0,
+   "trips": 0,
+   "assigned": false,
+   "idle_total_min": 0.0,
+   "speeding_seconds": 0,
+   "harsh": 0,
+   "partial_day": false
+  },
+  {
+   "date": "2026-09-07",
+   "km": 239.6,
+   "engine_hours": 7.58,
+   "trips": 20,
+   "assigned": true,
+   "idle_total_min": 30.4,
+   "speeding_seconds": 260,
+   "harsh": 0,
+   "partial_day": false
+  },
+  {
+   "date": "2026-09-08",
+   "km": 130.0,
+   "engine_hours": 5.99,
+   "trips": 11,
+   "assigned": true,
+   "idle_total_min": 24.1,
+   "speeding_seconds": 275,
+   "harsh": 2,
+   "partial_day": false
+  },
+  {
+   "date": "2026-09-09",
+   "km": 253.6,
+   "engine_hours": 8.65,
+   "trips": 22,
+   "assigned": true,
+   "idle_total_min": 29.8,
+   "speeding_seconds": 946,
+   "harsh": 1,
+   "partial_day": false
+  },
+  {
+   "date": "2026-09-10",
+   "km": 138.7,
+   "engine_hours": 5.15,
+   "trips": 12,
+   "assigned": true,
+   "idle_total_min": 32.9,
+   "speeding_seconds": 244,
+   "harsh": 2,
+   "partial_day": false
+  },
+  {
+   "date": "2026-09-11",
+   "km": 184.3,
+   "engine_hours": 6.84,
+   "trips": 16,
+   "assigned": true,
+   "idle_total_min": 52.7,
+   "speeding_seconds": 616,
+   "harsh": 3,
+   "partial_day": false
+  },
+  {
+   "date": "2026-09-12",
+   "km": 131.3,
+   "engine_hours": 6.05,
+   "trips": 11,
+   "assigned": true,
+   "idle_total_min": 19.9,
+   "speeding_seconds": 709,
+   "harsh": 1,
+   "partial_day": false
+  },
+  {
+   "date": "2026-09-13",
+   "km": 0.0,
+   "engine_hours": 0.0,
+   "trips": 0,
+   "assigned": false,
+   "idle_total_min": 0.0,
+   "speeding_seconds": 0,
+   "harsh": 0,
+   "partial_day": false
+  },
+  {
+   "date": "2026-09-14",
+   "km": 182.2,
+   "engine_hours": 6.29,
+   "trips": 16,
+   "assigned": true,
+   "idle_total_min": 5.4,
+   "speeding_seconds": 472,
+   "harsh": 2,
+   "partial_day": false
+  },
+  {
+   "date": "2026-09-15",
+   "km": 169.5,
+   "engine_hours": 6.51,
+   "trips": 15,
+   "assigned": true,
+   "idle_total_min": 14.2,
+   "speeding_seconds": 664,
+   "harsh": 2,
+   "partial_day": false
+  },
+  {
+   "date": "2026-09-16",
+   "km": 194.4,
+   "engine_hours": 7.81,
+   "trips": 17,
+   "assigned": true,
+   "idle_total_min": 36.9,
+   "speeding_seconds": 909,
+   "harsh": 0,
+   "partial_day": false
+  },
+  {
+   "date": "2026-09-17",
+   "km": 173.7,
+   "engine_hours": 6.13,
+   "trips": 15,
+   "assigned": true,
+   "idle_total_min": 50.4,
+   "speeding_seconds": 1003,
+   "harsh": 1,
+   "partial_day": false
+  },
+  {
+   "date": "2026-09-18",
+   "km": 95.7,
+   "engine_hours": 3.9,
+   "trips": 8,
+   "assigned": true,
+   "idle_total_min": 39.3,
+   "speeding_seconds": 567,
+   "harsh": 0,
+   "partial_day": false
+  },
+  {
+   "date": "2026-09-19",
+   "km": 180.7,
+   "engine_hours": 6.77,
+   "trips": 16,
+   "assigned": true,
+   "idle_total_min": 23.7,
+   "speeding_seconds": 121,
+   "harsh": 3,
+   "partial_day": false
+  },
+  {
+   "date": "2026-09-20",
+   "km": 0.0,
+   "engine_hours": 0.0,
+   "trips": 0,
+   "assigned": false,
+   "idle_total_min": 0.0,
+   "speeding_seconds": 0,
+   "harsh": 0,
+   "partial_day": false
+  },
+  {
+   "date": "2026-09-21",
+   "km": 119.1,
+   "engine_hours": 5.02,
+   "trips": 10,
+   "assigned": true,
+   "idle_total_min": 62.5,
+   "speeding_seconds": 639,
+   "harsh": 0,
+   "partial_day": false
+  },
+  {
+   "date": "2026-09-22",
+   "km": 82.1,
+   "engine_hours": 2.81,
+   "trips": 7,
+   "assigned": false,
+   "idle_total_min": 31.7,
+   "speeding_seconds": 170,
+   "harsh": 0,
+   "partial_day": false
+  },
+  {
+   "date": "2026-09-23",
+   "km": 152.6,
+   "engine_hours": 5.77,
+   "trips": 13,
+   "assigned": true,
+   "idle_total_min": 44.0,
+   "speeding_seconds": 818,
+   "harsh": 2,
+   "partial_day": false
+  },
+  {
+   "date": "2026-09-24",
+   "km": 173.8,
+   "engine_hours": 6.13,
+   "trips": 15,
+   "assigned": true,
+   "idle_total_min": 20.4,
+   "speeding_seconds": 435,
+   "harsh": 2,
+   "partial_day": false
+  },
+  {
+   "date": "2026-09-25",
+   "km": 244.7,
+   "engine_hours": 8.2,
+   "trips": 21,
+   "assigned": true,
+   "idle_total_min": 64.8,
+   "speeding_seconds": 661,
+   "harsh": 3,
+   "partial_day": false
+  },
+  {
+   "date": "2026-09-26",
+   "km": 86.8,
+   "engine_hours": 3.22,
+   "trips": 8,
+   "assigned": true,
+   "idle_total_min": 38.4,
+   "speeding_seconds": 362,
+   "harsh": 1,
+   "partial_day": false
+  },
+  {
+   "date": "2026-09-27",
+   "km": 0.0,
+   "engine_hours": 0.0,
+   "trips": 0,
+   "assigned": false,
+   "idle_total_min": 0.0,
+   "speeding_seconds": 0,
+   "harsh": 0,
+   "partial_day": false
+  },
+  {
+   "date": "2026-09-28",
+   "km": 64.3,
+   "engine_hours": 3.97,
+   "trips": 6,
+   "assigned": true,
+   "idle_total_min": 17.0,
+   "speeding_seconds": 236,
+   "harsh": 2,
+   "partial_day": false
+  },
+  {
+   "date": "2026-09-29",
+   "km": 158.2,
+   "engine_hours": 6.72,
+   "trips": 14,
+   "assigned": false,
+   "idle_total_min": 38.1,
+   "speeding_seconds": 920,
+   "harsh": 0,
+   "partial_day": false
+  },
+  {
+   "date": "2026-09-30",
+   "km": 138.4,
+   "engine_hours": 5.52,
+   "trips": 12,
+   "assigned": true,
+   "idle_total_min": 9.4,
+   "speeding_seconds": 701,
+   "harsh": 2,
+   "partial_day": false
+  },
+  {
+   "date": "2026-10-01",
+   "km": 168.5,
+   "engine_hours": 6.92,
+   "trips": 15,
+   "assigned": false,
+   "idle_total_min": 34.4,
+   "speeding_seconds": 331,
+   "harsh": 0,
+   "partial_day": false
+  },
+  {
+   "date": "2026-10-02",
+   "km": 207.4,
+   "engine_hours": 6.7,
+   "trips": 18,
+   "assigned": true,
+   "idle_total_min": 40.9,
+   "speeding_seconds": 939,
+   "harsh": 2,
+   "partial_day": true
+  },
+  {
+   "date": "2026-10-03",
+   "km": 120.9,
+   "engine_hours": 5.78,
+   "trips": 11,
+   "assigned": false,
+   "idle_total_min": 16.1,
+   "speeding_seconds": 533,
+   "harsh": 2,
+   "partial_day": false
+  },
+  {
+   "date": "2026-10-04",
+   "km": 0.0,
+   "engine_hours": 0.0,
+   "trips": 0,
+   "assigned": false,
+   "idle_total_min": 0.0,
+   "speeding_seconds": 0,
+   "harsh": 0,
+   "partial_day": false
+  },
+  {
+   "date": "2026-10-05",
+   "km": 257.2,
+   "engine_hours": 9.3,
+   "trips": 22,
+   "assigned": false,
+   "idle_total_min": 65.3,
+   "speeding_seconds": 1033,
+   "harsh": 1,
+   "partial_day": false
+  },
+  {
+   "date": "2026-10-06",
+   "km": 256.9,
+   "engine_hours": 8.12,
+   "trips": 22,
+   "assigned": true,
+   "idle_total_min": 39.5,
+   "speeding_seconds": 1195,
+   "harsh": 1,
+   "partial_day": false
+  },
+  {
+   "date": "2026-10-07",
+   "km": 114.3,
+   "engine_hours": 4.97,
+   "trips": 10,
+   "assigned": false,
+   "idle_total_min": 56.8,
+   "speeding_seconds": 162,
+   "harsh": 2,
+   "partial_day": false
+  },
+  {
+   "date": "2026-10-08",
+   "km": 159.5,
+   "engine_hours": 6.8,
+   "trips": 14,
+   "assigned": true,
+   "idle_total_min": 19.4,
+   "speeding_seconds": 370,
+   "harsh": 0,
+   "partial_day": false
+  }
+ ],
+ "battery_series": [
+  {
+   "date": "2026-08-10",
+   "parked_min": null,
+   "running_avg": null,
+   "system": null,
+   "status": "no_data",
+   "reasons": []
+  },
+  {
+   "date": "2026-08-11",
+   "parked_min": null,
+   "running_avg": null,
+   "system": null,
+   "status": "no_data",
+   "reasons": []
+  },
+  {
+   "date": "2026-08-12",
+   "parked_min": null,
+   "running_avg": null,
+   "system": null,
+   "status": "no_data",
+   "reasons": []
+  },
+  {
+   "date": "2026-08-13",
+   "parked_min": null,
+   "running_avg": null,
+   "system": null,
+   "status": "no_data",
+   "reasons": []
+  },
+  {
+   "date": "2026-08-14",
+   "parked_min": null,
+   "running_avg": null,
+   "system": null,
+   "status": "no_data",
+   "reasons": []
+  },
+  {
+   "date": "2026-08-15",
+   "parked_min": null,
+   "running_avg": null,
+   "system": null,
+   "status": "no_data",
+   "reasons": []
+  },
+  {
+   "date": "2026-08-16",
+   "parked_min": null,
+   "running_avg": null,
+   "system": null,
+   "status": "no_data",
+   "reasons": []
+  },
+  {
+   "date": "2026-08-17",
+   "parked_min": null,
+   "running_avg": null,
+   "system": null,
+   "status": "no_data",
+   "reasons": []
+  },
+  {
+   "date": "2026-08-18",
+   "parked_min": null,
+   "running_avg": null,
+   "system": null,
+   "status": "no_data",
+   "reasons": []
+  },
+  {
+   "date": "2026-08-19",
+   "parked_min": null,
+   "running_avg": null,
+   "system": null,
+   "status": "no_data",
+   "reasons": []
+  },
+  {
+   "date": "2026-08-20",
+   "parked_min": null,
+   "running_avg": null,
+   "system": null,
+   "status": "no_data",
+   "reasons": []
+  },
+  {
+   "date": "2026-08-21",
+   "parked_min": null,
+   "running_avg": null,
+   "system": null,
+   "status": "no_data",
+   "reasons": []
+  },
+  {
+   "date": "2026-08-22",
+   "parked_min": null,
+   "running_avg": null,
+   "system": null,
+   "status": "no_data",
+   "reasons": []
+  },
+  {
+   "date": "2026-08-23",
+   "parked_min": null,
+   "running_avg": null,
+   "system": null,
+   "status": "no_data",
+   "reasons": []
+  },
+  {
+   "date": "2026-08-24",
+   "parked_min": null,
+   "running_avg": null,
+   "system": null,
+   "status": "no_data",
+   "reasons": []
+  },
+  {
+   "date": "2026-08-25",
+   "parked_min": null,
+   "running_avg": null,
+   "system": null,
+   "status": "no_data",
+   "reasons": []
+  },
+  {
+   "date": "2026-08-26",
+   "parked_min": null,
+   "running_avg": null,
+   "system": null,
+   "status": "no_data",
+   "reasons": []
+  },
+  {
+   "date": "2026-08-27",
+   "parked_min": null,
+   "running_avg": null,
+   "system": null,
+   "status": "no_data",
+   "reasons": []
+  },
+  {
+   "date": "2026-08-28",
+   "parked_min": null,
+   "running_avg": null,
+   "system": null,
+   "status": "no_data",
+   "reasons": []
+  },
+  {
+   "date": "2026-08-29",
+   "parked_min": null,
+   "running_avg": null,
+   "system": null,
+   "status": "no_data",
+   "reasons": []
+  },
+  {
+   "date": "2026-08-30",
+   "parked_min": null,
+   "running_avg": null,
+   "system": null,
+   "status": "no_data",
+   "reasons": []
+  },
+  {
+   "date": "2026-08-31",
+   "parked_min": null,
+   "running_avg": null,
+   "system": null,
+   "status": "no_data",
+   "reasons": []
+  },
+  {
+   "date": "2026-09-01",
+   "parked_min": null,
+   "running_avg": null,
+   "system": null,
+   "status": "no_data",
+   "reasons": []
+  },
+  {
+   "date": "2026-09-02",
+   "parked_min": null,
+   "running_avg": null,
+   "system": null,
+   "status": "no_data",
+   "reasons": []
+  },
+  {
+   "date": "2026-09-03",
+   "parked_min": null,
+   "running_avg": null,
+   "system": null,
+   "status": "no_data",
+   "reasons": []
+  },
+  {
+   "date": "2026-09-04",
+   "parked_min": null,
+   "running_avg": null,
+   "system": null,
+   "status": "no_data",
+   "reasons": []
+  },
+  {
+   "date": "2026-09-05",
+   "parked_min": null,
+   "running_avg": null,
+   "system": null,
+   "status": "no_data",
+   "reasons": []
+  },
+  {
+   "date": "2026-09-06",
+   "parked_min": null,
+   "running_avg": null,
+   "system": null,
+   "status": "no_data",
+   "reasons": []
+  },
+  {
+   "date": "2026-09-07",
+   "parked_min": null,
+   "running_avg": null,
+   "system": null,
+   "status": "no_data",
+   "reasons": []
+  },
+  {
+   "date": "2026-09-08",
+   "parked_min": null,
+   "running_avg": null,
+   "system": null,
+   "status": "no_data",
+   "reasons": []
+  },
+  {
+   "date": "2026-09-09",
+   "parked_min": null,
+   "running_avg": null,
+   "system": null,
+   "status": "no_data",
+   "reasons": []
+  },
+  {
+   "date": "2026-09-10",
+   "parked_min": null,
+   "running_avg": null,
+   "system": null,
+   "status": "no_data",
+   "reasons": []
+  },
+  {
+   "date": "2026-09-11",
+   "parked_min": null,
+   "running_avg": null,
+   "system": null,
+   "status": "no_data",
+   "reasons": []
+  },
+  {
+   "date": "2026-09-12",
+   "parked_min": null,
+   "running_avg": null,
+   "system": null,
+   "status": "no_data",
+   "reasons": []
+  },
+  {
+   "date": "2026-09-13",
+   "parked_min": null,
+   "running_avg": null,
+   "system": null,
+   "status": "no_data",
+   "reasons": []
+  },
+  {
+   "date": "2026-09-14",
+   "parked_min": 13.14,
+   "running_avg": 14.1,
+   "system": 12,
+   "status": "ok",
+   "reasons": []
+  },
+  {
+   "date": "2026-09-15",
+   "parked_min": 12.97,
+   "running_avg": 14.21,
+   "system": 12,
+   "status": "ok",
+   "reasons": []
+  },
+  {
+   "date": "2026-09-16",
+   "parked_min": 13.06,
+   "running_avg": 13.7,
+   "system": 12,
+   "status": "ok",
+   "reasons": []
+  },
+  {
+   "date": "2026-09-17",
+   "parked_min": 12.93,
+   "running_avg": 14.17,
+   "system": 12,
+   "status": "ok",
+   "reasons": []
+  },
+  {
+   "date": "2026-09-18",
+   "parked_min": 12.93,
+   "running_avg": 14.12,
+   "system": 12,
+   "status": "ok",
+   "reasons": []
+  },
+  {
+   "date": "2026-09-19",
+   "parked_min": 13.04,
+   "running_avg": 14.38,
+   "system": 12,
+   "status": "ok",
+   "reasons": []
+  },
+  {
+   "date": "2026-09-20",
+   "parked_min": 12.95,
+   "running_avg": 14.19,
+   "system": 12,
+   "status": "ok",
+   "reasons": []
+  },
+  {
+   "date": "2026-09-21",
+   "parked_min": 12.95,
+   "running_avg": 14.22,
+   "system": 12,
+   "status": "ok",
+   "reasons": []
+  },
+  {
+   "date": "2026-09-22",
+   "parked_min": 13.03,
+   "running_avg": 14.12,
+   "system": 12,
+   "status": "ok",
+   "reasons": []
+  },
+  {
+   "date": "2026-09-23",
+   "parked_min": 13.0,
+   "running_avg": 14.14,
+   "system": 12,
+   "status": "ok",
+   "reasons": []
+  },
+  {
+   "date": "2026-09-24",
+   "parked_min": 12.94,
+   "running_avg": 13.84,
+   "system": 12,
+   "status": "ok",
+   "reasons": []
+  },
+  {
+   "date": "2026-09-25",
+   "parked_min": 12.87,
+   "running_avg": 14.27,
+   "system": 12,
+   "status": "ok",
+   "reasons": []
+  },
+  {
+   "date": "2026-09-26",
+   "parked_min": 12.82,
+   "running_avg": 14.36,
+   "system": 12,
+   "status": "ok",
+   "reasons": []
+  },
+  {
+   "date": "2026-09-27",
+   "parked_min": 12.79,
+   "running_avg": 14.05,
+   "system": 12,
+   "status": "ok",
+   "reasons": []
+  },
+  {
+   "date": "2026-09-28",
+   "parked_min": 12.88,
+   "running_avg": 14.31,
+   "system": 12,
+   "status": "ok",
+   "reasons": []
+  },
+  {
+   "date": "2026-09-29",
+   "parked_min": 12.74,
+   "running_avg": 13.92,
+   "system": 12,
+   "status": "ok",
+   "reasons": []
+  },
+  {
+   "date": "2026-09-30",
+   "parked_min": 12.78,
+   "running_avg": 13.9,
+   "system": 12,
+   "status": "ok",
+   "reasons": []
+  },
+  {
+   "date": "2026-10-01",
+   "parked_min": 12.91,
+   "running_avg": 14.19,
+   "system": 12,
+   "status": "ok",
+   "reasons": []
+  },
+  {
+   "date": "2026-10-02",
+   "parked_min": 12.72,
+   "running_avg": 13.93,
+   "system": 12,
+   "status": "ok",
+   "reasons": []
+  },
+  {
+   "date": "2026-10-03",
+   "parked_min": 12.86,
+   "running_avg": 14.23,
+   "system": 12,
+   "status": "ok",
+   "reasons": []
+  },
+  {
+   "date": "2026-10-04",
+   "parked_min": 12.74,
+   "running_avg": 13.95,
+   "system": 12,
+   "status": "ok",
+   "reasons": []
+  },
+  {
+   "date": "2026-10-05",
+   "parked_min": 12.7,
+   "running_avg": 14.01,
+   "system": 12,
+   "status": "ok",
+   "reasons": []
+  },
+  {
+   "date": "2026-10-06",
+   "parked_min": 12.13,
+   "running_avg": 14.35,
+   "system": 12,
+   "status": "warning",
+   "reasons": [
+    "parked 12.13 V is below the warning limit 12.2 V (12 V system)"
+   ]
+  },
+  {
+   "date": "2026-10-07",
+   "parked_min": 12.17,
+   "running_avg": 13.78,
+   "system": 12,
+   "status": "warning",
+   "reasons": [
+    "parked 12.17 V is below the warning limit 12.2 V (12 V system)"
+   ]
+  },
+  {
+   "date": "2026-10-08",
+   "parked_min": 12.16,
+   "running_avg": 14.01,
+   "system": 12,
+   "status": "warning",
+   "reasons": [
+    "parked 12.16 V is below the warning limit 12.2 V (12 V system)"
+   ]
+  }
+ ],
+ "fuel_logs": [
+  {
+   "id": 5,
+   "vehicle_id": 4,
+   "staff_id": 13,
+   "filled_at": "2026-09-22T06:58:52.361776+00:00",
+   "litres": 85.5,
+   "amount_php": 5191.56,
+   "odometer_km": 193991.3,
+   "full_tank": true,
+   "station": "Petron Sucat",
+   "receipt_ref": null,
+   "price_per_litre": 60.72
+  },
+  {
+   "id": 4,
+   "vehicle_id": 4,
+   "staff_id": 13,
+   "filled_at": "2026-09-16T06:58:52.361776+00:00",
+   "litres": 69.9,
+   "amount_php": 4207.28,
+   "odometer_km": 193304.6,
+   "full_tank": true,
+   "station": "Shell Carmona",
+   "receipt_ref": null,
+   "price_per_litre": 60.19
+  },
+  {
+   "id": 3,
+   "vehicle_id": 4,
+   "staff_id": 13,
+   "filled_at": "2026-09-10T06:58:52.361776+00:00",
+   "litres": 81.6,
+   "amount_php": 4793.18,
+   "odometer_km": 192961.3,
+   "full_tank": true,
+   "station": "Petron Sucat",
+   "receipt_ref": null,
+   "price_per_litre": 58.74
+  },
+  {
+   "id": 2,
+   "vehicle_id": 4,
+   "staff_id": 13,
+   "filled_at": "2026-09-04T06:58:52.361776+00:00",
+   "litres": 94.3,
+   "amount_php": 5651.4,
+   "odometer_km": 192595.8,
+   "full_tank": true,
+   "station": "Shell Carmona",
+   "receipt_ref": null,
+   "price_per_litre": 59.93
+  },
+  {
+   "id": 1,
+   "vehicle_id": 4,
+   "staff_id": 13,
+   "filled_at": "2026-08-29T06:58:52.361776+00:00",
+   "litres": 74.0,
+   "amount_php": 4576.16,
+   "odometer_km": 192100.0,
+   "full_tank": true,
+   "station": "Shell Carmona",
+   "receipt_ref": null,
+   "price_per_litre": 61.84
+  }
+ ],
+ "kmpl_intervals": [
+  {
+   "start_at": "2026-08-29T06:58:52.361776+00:00",
+   "end_at": "2026-09-04T06:58:52.361776+00:00",
+   "km": 495.8,
+   "litres": 94.3,
+   "kmpl": 5.26
+  },
+  {
+   "start_at": "2026-09-04T06:58:52.361776+00:00",
+   "end_at": "2026-09-10T06:58:52.361776+00:00",
+   "km": 365.5,
+   "litres": 81.6,
+   "kmpl": 4.48
+  },
+  {
+   "start_at": "2026-09-10T06:58:52.361776+00:00",
+   "end_at": "2026-09-16T06:58:52.361776+00:00",
+   "km": 343.3,
+   "litres": 69.9,
+   "kmpl": 4.91
+  },
+  {
+   "start_at": "2026-09-16T06:58:52.361776+00:00",
+   "end_at": "2026-09-22T06:58:52.361776+00:00",
+   "km": 686.7,
+   "litres": 85.5,
+   "kmpl": 8.03
+  }
+ ],
+ "fuel_checks": [
+  {
+   "fill_id": 1,
+   "filled_at": "2026-08-29T06:58:52.361776+00:00",
+   "reason": "74 L is more than the 55 L tank, check"
+  },
+  {
+   "fill_id": 2,
+   "filled_at": "2026-09-04T06:58:52.361776+00:00",
+   "reason": "94 L is more than the 55 L tank, check"
+  },
+  {
+   "fill_id": 3,
+   "filled_at": "2026-09-10T06:58:52.361776+00:00",
+   "reason": "82 L is more than the 55 L tank, check"
+  },
+  {
+   "fill_id": 4,
+   "filled_at": "2026-09-16T06:58:52.361776+00:00",
+   "reason": "70 L is more than the 55 L tank, check"
+  },
+  {
+   "fill_id": 5,
+   "filled_at": "2026-09-22T06:58:52.361776+00:00",
+   "reason": "86 L is more than the 55 L tank, check"
+  }
+ ],
+ "has_tracker": true
+}

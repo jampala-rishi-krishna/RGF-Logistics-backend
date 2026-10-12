@@ -22,6 +22,12 @@ services:
         sync: false
       - key: ALLOWED_ORIGINS
         sync: false
+      - key: APP_BASE_URL
+        sync: false
+      - key: DISPATCH_PHONE
+        sync: false
+      - key: JWT_DRIVER_EXPIRE_MINUTES
+        sync: false
       - key: ZOHO_CLIENT_ID
         sync: false
       - key: ZOHO_CLIENT_SECRET

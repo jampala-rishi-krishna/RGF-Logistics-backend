@@ -62,3 +62,7 @@ class SalesOrderHistory(TimestampedBase):
     email_message_id: Mapped[str | None] = mapped_column(Text)
     # Identifies one assignment (migration m3e4f5a6b7c8); set in the same UPDATE as the first email status.
     assignment_batch_id: Mapped[str | None] = mapped_column(Text)
+    # Delivery details copied from the SO detail at assign time (migration n4f5a6b7c8d9), in the same UPDATE as the
+    # assignment, only when that detail was already cached. NULL = not cached at assign time. Never fetched from Zoho for this.
+    delivery_notes: Mapped[str | None] = mapped_column(Text)
+    delivery_contact: Mapped[dict | None] = mapped_column(JSONB)  # {"person", "phone", "attention"}

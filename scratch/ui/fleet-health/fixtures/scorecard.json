@@ -1,0 +1,54 @@
+{
+ "switch": {
+  "enabled": false,
+  "changed_by": null,
+  "changed_at": null,
+  "default": false,
+  "schedule": "Monday 08:00 Asia/Manila",
+  "whatsapp_active": false
+ },
+ "preview": {
+  "week_start": "2026-09-28",
+  "week_end": "2026-10-04",
+  "items": [
+   {
+    "staff_id": 8,
+    "name": "Ricky Bautista",
+    "score": 82,
+    "trucks": [
+     "DCD8955"
+    ],
+    "message": "Hi Ricky! Eco-driving score mo this week: 82/100 (+25 vs last week). Bawasan ang bilis, sundin ang speed limit sa highway. - RGF Logistics",
+    "has_phone": true,
+    "will_send": true,
+    "skip_reason": null
+   },
+   {
+    "staff_id": 13,
+    "name": "Juan Dela Cruz",
+    "score": 73,
+    "trucks": [
+     "DCD8953",
+     "NFX5791"
+    ],
+    "message": "Hi Juan! Eco-driving score mo this week: 73/100 (same as last week). Bawasan ang bilis, sundin ang speed limit sa highway. - RGF Logistics",
+    "has_phone": true,
+    "will_send": true,
+    "skip_reason": null
+   },
+   {
+    "staff_id": 7,
+    "name": "Pedro Reyes",
+    "score": 59,
+    "trucks": [
+     "DCD8954"
+    ],
+    "message": "Hi Pedro! Eco-driving score mo this week: 59/100 (-3 vs last week). I-check ang gulong at iwasan ang biglaang arangkada para tipid sa diesel. - RGF Logistics",
+    "has_phone": true,
+    "will_send": true,
+    "skip_reason": null
+   }
+  ],
+  "will_send_count": 3
+ }
+}
