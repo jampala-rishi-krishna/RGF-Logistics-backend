@@ -392,6 +392,8 @@ class SchedulerTests(Base):
         merged = []
         with patch.object(fleet, "SessionLocal", return_value=session), \
                 patch.object(live_sales_order_cache, "refresh_shared_window", return_value=1), \
+                patch.object(live_sales_order_cache, "has_active_assignments", return_value=True), \
+                patch("services.zoho_usage.is_working_time", return_value=True), \
                 patch.object(live_sales_order_cache, "get_assigned_snapshot", return_value=[order]), \
                 patch.object(live_sales_order_cache, "merge_zoho_payload", side_effect=lambda o, f: merged.append(o.id)), \
                 patch.object(live_sales_order_cache, "set_assignment"), \
@@ -401,6 +403,15 @@ class SchedulerTests(Base):
         history.assert_called_once()
         self.assertEqual(fake.gets("salesorders/1"), 0)
         self.assertEqual(metrics.snapshot()["http_attempts"], 0)  # per-SO scheduler traffic removed
+
+
+    def test_scheduled_fleet_sync_skips_when_idle_or_off_hours(self):
+        for working, assigned in ((False, True), (True, False)):
+            with patch.object(live_sales_order_cache, "has_active_assignments", return_value=assigned), \
+                    patch("services.zoho_usage.is_working_time", return_value=working), \
+                    patch.object(fleet, "refresh_vehicles") as refresh:
+                fleet.scheduled_fleet_sync()
+            refresh.assert_not_called()
 
 
 class LoggingTests(Base):

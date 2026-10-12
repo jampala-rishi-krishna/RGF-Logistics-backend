@@ -286,6 +286,12 @@ def ids_for_batch(batch_id: str) -> list[str]:
                 if state.get("assignment_batch_id") == batch_id and (state.get("assignment_status") or "unassigned") != "unassigned"]
 
 
+def has_active_assignments() -> bool:
+    """True when at least one SO is in the "assigned" state. Memory only, never calls Zoho."""
+    with _state_lock:
+        return any(s.get("assignment_status") == "assigned" for s in _assignment_state.values())
+
+
 def cached_assigned_records() -> list:
     """Assigned SOs whose Zoho data is ALREADY in memory. Never calls Zoho (unlike get_assigned_snapshot)."""
     with _state_lock:

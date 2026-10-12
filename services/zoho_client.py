@@ -188,7 +188,6 @@ def _request_http(method: str, path: str, url: str, query: dict, logical_id: str
             token = get_access_token()  # Accounts endpoint: deliberately not gated as Inventory
             with limiter.admit() as ticket:
                 started = time.monotonic()
-                zoho_usage.record_call(feature, background=route.get("route") == "background")
                 metrics = _request_metrics.get()
                 if metrics is not None:
                     metrics["api_calls"] = int(metrics.get("api_calls", 0)) + 1
@@ -203,6 +202,10 @@ def _request_http(method: str, path: str, url: str, query: dict, logical_id: str
                     params=query,
                     timeout=REQUEST_TIMEOUT,
                 )
+            # Count what Zoho counts: a 429 was rejected before processing (tracked apart, not in the
+            # total); every other answered attempt counts, retries after a 5xx included.
+            zoho_usage.record_call("rate_limited" if response.status_code == 429 else feature,
+                                   background=route.get("route") == "background")
             elapsed_ms = int((time.monotonic() - started) * 1000)
             logger.info("[ZOHO] endpoint=%s status=%s ms=%s attempt=%s", path, response.status_code, elapsed_ms, attempt + 1)
             zoho_acquisition.event("http_outcome", logical_id=logical_id, endpoint=path, attempt=attempt + 1,
@@ -245,6 +248,8 @@ def _request_http(method: str, path: str, url: str, query: dict, logical_id: str
                                    attempt=attempt + 1, status=response.status_code, rows=rows, has_more_page=has_more, ms=elapsed_ms)
             return payload
         except httpx.TimeoutException as exc:
+            # The request may have reached Zoho before the timeout, so stay conservative and count it.
+            zoho_usage.record_call(feature, background=zoho_acquisition.route_context().get("route") == "background")
             elapsed_ms = int((time.monotonic() - started) * 1000)
             logger.warning("[ZOHO] endpoint=%s status=timeout ms=%s attempt=%s", path, elapsed_ms, attempt + 1)
             zoho_acquisition.event("http_outcome", logical_id=logical_id, endpoint=path, attempt=attempt + 1,

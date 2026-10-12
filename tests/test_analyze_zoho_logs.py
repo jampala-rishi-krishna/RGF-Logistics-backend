@@ -170,7 +170,7 @@ class AnalyzerTests(unittest.TestCase):
         session = MagicMock()
         session.__enter__.return_value = session
         session.execute.return_value.scalars.return_value.all.return_value = []
-        with patch.object(zoho_client.httpx, "request", FakeZoho()), patch.object(fleet, "SessionLocal", return_value=session),                 patch.object(live_sales_order_cache, "get_assigned_snapshot", return_value=[order]),                 patch.object(live_sales_order_cache, "merge_zoho_payload"), patch.object(live_sales_order_cache, "set_assignment"),                 patch.object(fleet, "sync_history_row"):
+        with patch.object(zoho_client.httpx, "request", FakeZoho()), patch.object(fleet, "SessionLocal", return_value=session),                 patch.object(live_sales_order_cache, "has_active_assignments", return_value=True), patch("services.zoho_usage.is_working_time", return_value=True),                 patch.object(live_sales_order_cache, "get_assigned_snapshot", return_value=[order]),                 patch.object(live_sales_order_cache, "merge_zoho_payload"), patch.object(live_sales_order_cache, "set_assignment"),                 patch.object(fleet, "sync_history_row"):
             fleet.scheduled_fleet_sync()
             fleet.scheduled_fleet_sync()
         attempts = [l for l in self.handler.lines if "event=http_attempt" in l]

@@ -39,10 +39,15 @@ FEATURES = {
     "fleet_sync",
     "prewarm",
     "token_refresh",
+    "rate_limited",
+    "lock_webhook",
     "other",
 }
-# OAuth token refreshes hit accounts.zoho.com, not the API: tracked, but never part of the total or budget.
-UNCOUNTED = {"token_refresh"}
+# Tracked, but never part of the total or budget: OAuth token refreshes hit accounts.zoho.com, a 429 was
+# rejected before Zoho processed it, the lock webhook POST is not an Inventory API call, and lock_status
+# calls run under the separate lock credential (a different Zoho user), so they are not this app user's
+# calls. They still count against the org-wide Zoho limit, which is why they stay tracked.
+UNCOUNTED = {"token_refresh", "rate_limited", "lock_webhook", "lock_status"}
 ESSENTIAL_FEATURES = {"acknowledge", "lock_status", "so_detail"}
 # While the startup restore has failed, only these pass freely; so_detail is hard-capped (see failsafe_so_detail_cap).
 FAILSAFE_FREE_FEATURES = {"acknowledge", "lock_status"}
@@ -157,9 +162,9 @@ def set_time_override(value: datetime | None) -> None:
 
 def budget() -> int:
     try:
-        return max(1, int(os.environ.get("ZOHO_DAILY_BUDGET", "4000")))
+        return max(1, int(os.environ.get("ZOHO_DAILY_BUDGET", "4500")))
     except ValueError:
-        return 4000
+        return 4500
 
 
 def org_limit() -> int:
@@ -282,7 +287,7 @@ def record_call(feature_name: str | None = None, *, background: bool = False) ->
     global _failsafe_so_detail
     now = _now()
     real = feature_name or current_feature()
-    name = _label.get() or real
+    name = real if real in UNCOUNTED else (_label.get() or real)  # a scheduler label never turns a 429 into a counted call
     if name not in FEATURES:
         name = "other"
     source = "background" if (background or _forced_background.get()) else "request"
@@ -432,7 +437,6 @@ def snapshot() -> dict:
         limit = budget()
         counted = {k: v for k, v in by_cat.items() if k not in UNCOUNTED}
         counted.setdefault("other", 0)
-        counted.setdefault("lock_status", 0)
         return {
             "date": _day,
             "timezone": timezone_name(),
@@ -442,6 +446,7 @@ def snapshot() -> dict:
             "by_feature": counted,
             "by_source": {"request": by_source.get("request", 0), "background": by_source.get("background", 0)},
             "token_refresh": by_cat.get("token_refresh", 0),
+            "not_counted": {k: by_cat.get(k, 0) for k in ("rate_limited", "lock_webhook", "lock_status")},
             "unflushed": sum(v for v in _delta.values()),
             "percent_used": round(total / limit * 100, 1),
             "guard": guard_state_locked(total),

@@ -245,7 +245,7 @@ def _lock_via_webhook(so_id: str, status: dict) -> dict:
         url = _required("ZOHO_SO_LOCK_WEBHOOK_URL")
         limiter = zoho_rate_limiter.limiter_for(_required("ZOHO_ORG_ID"))
         with limiter.admit():
-            zoho_usage.record_call("lock_status", background=zoho_acquisition.route_context().get("route") == "background")
+            zoho_usage.record_call("lock_webhook", background=zoho_acquisition.route_context().get("route") == "background")
             response = httpx.request("POST", url, json={"salesorder_id": so_id}, timeout=REQUEST_TIMEOUT)
     except ZohoError as exc:
         return {"locked": False, "already_locked": False, "lock_status": status, "lock_error": _connection_error(exc)}

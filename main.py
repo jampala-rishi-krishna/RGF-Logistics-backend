@@ -133,7 +133,7 @@ async def lifespan(app: FastAPI):
     # Re-enabled 2026-09-24, scoped: this only ever touches sales_order_history rows for
     # SOs that are already assignment_status == "assigned" (see fleet.refresh_vehicles) -
     # it cannot write an unassigned SO, because unassigned SOs are never stored at all.
-    fleet_sync_interval = int(os.environ.get("FLEET_ZOHO_SYNC_INTERVAL_SECONDS", "1800"))
+    fleet_sync_interval = int(os.environ.get("FLEET_ZOHO_SYNC_INTERVAL_SECONDS", "3600"))
     scheduler.add_job(
         fleet.scheduled_fleet_sync,
         trigger="interval",

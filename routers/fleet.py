@@ -357,7 +357,17 @@ def refresh_vehicles(force: bool = False, db: Session = Depends(get_db)):
 
 
 def scheduled_fleet_sync() -> None:
-    """Run the same authoritative Zoho reconciliation without a browser open."""
+    """Run the same authoritative Zoho reconciliation without a browser open.
+
+    Skipped (zero Zoho calls) outside working hours or when no SO is currently assigned:
+    there is nothing for the sync to reconcile, and a post-restart run would otherwise
+    re-list and re-hydrate the whole shared window for no benefit."""
+    if not zoho_usage.is_working_time():
+        logger.info("[FLEET_REFRESH] Scheduled sync skipped: outside working hours")
+        return
+    if not live_sales_order_cache.has_active_assignments():
+        logger.info("[FLEET_REFRESH] Scheduled sync skipped: no assigned SOs")
+        return
     try:
         with zoho_usage.labelled("fleet_sync"), SessionLocal() as db:
             refresh_vehicles(force=True, db=db)

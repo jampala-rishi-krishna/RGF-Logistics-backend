@@ -228,7 +228,7 @@ class RestartTests(UsageCase):
         self.assertEqual(zoho_usage.failsafe_so_detail_cap(), 50)
 
     def test_neon_down_at_startup_fails_safe_then_recovers(self):
-        self.store.rows[(date.fromisoformat(zoho_usage.snapshot()["date"]), "so_detail", "request")] = 3500
+        self.store.rows[(date.fromisoformat(zoho_usage.snapshot()["date"]), "so_detail", "request")] = 3700
         self.store.down = True
         with patch.object(zoho_usage, "RESTORE_RETRY_SECONDS", 3600), patch.object(zoho_usage, "FLUSH_SECONDS", 3600):
             snap = zoho_usage.start("test-instance")
@@ -241,10 +241,10 @@ class RestartTests(UsageCase):
         self.store.down = False
         self.assertTrue(zoho_usage.restore())
         snap = zoho_usage.snapshot()
-        self.assertEqual(snap["zoho_calls_today"], 3501)  # restored 3500 + the 1 counted while down
+        self.assertEqual(snap["zoho_calls_today"], 3701)  # restored 3700 + the 1 counted while down
         self.assertEqual(snap["guard"], "cache_only")
         with self.assertRaises(zoho_usage.ZohoBudgetGuard):
-            zoho_usage.enforce_budget("inventory_list")  # 3501 >= 80% of 4000, restored value drives the guard
+            zoho_usage.enforce_budget("inventory_list")  # 3701 >= 80% of 4500, restored value drives the guard
 
     def test_flush_failure_keeps_delta_and_retries(self):
         for _ in range(4):
@@ -312,14 +312,17 @@ class SqlUpsertTests(unittest.TestCase):
 class CallSiteCountingTests(UsageCase):
     ENV = {"ZOHO_ORG_ID": "org-test", "ZOHO_CLIENT_ID": "c", "ZOHO_CLIENT_SECRET": "s", "ZOHO_REFRESH_TOKEN": "r"}
 
-    def test_429_retry_counts_both_attempts(self):
+    def test_429_is_tracked_apart_and_only_the_answered_retry_counts(self):
         responses = [SimpleNamespace(status_code=429, headers={"Retry-After": "0"}, json=lambda: {}),
                      SimpleNamespace(status_code=200, headers={}, json=lambda: {"code": 0, "salesorder": {"salesorder_id": "1"}})]
         with patch.dict(os.environ, self.ENV), patch.object(zoho_client, "get_access_token", return_value="t"), \
                 patch.object(zoho_client, "_sleep", lambda s: None), \
                 patch.object(zoho_client.httpx, "request", side_effect=lambda *a, **k: responses.pop(0)):
             zoho_client.fetch_sales_order_detail("1")
-        self.assertEqual(zoho_usage.snapshot()["by_feature"]["so_detail"], 2)
+        snap = zoho_usage.snapshot()
+        self.assertEqual(snap["by_feature"]["so_detail"], 1)
+        self.assertEqual(snap["not_counted"]["rate_limited"], 1)
+        self.assertEqual(snap["zoho_calls_today"], 1)
 
     def test_401_attempt_is_counted_and_token_refresh_is_excluded_from_total(self):
         zoho_client._access_token = None
@@ -345,9 +348,9 @@ class CallSiteCountingTests(UsageCase):
                 patch.object(zoho_so_lock.httpx, "request", return_value=api_resp):
             zoho_so_lock._request("GET", "https://x/y")
         snap = zoho_usage.snapshot()
-        self.assertEqual(snap["by_feature"]["lock_status"], 1)
+        self.assertEqual(snap["not_counted"]["lock_status"], 1)  # separate lock credential: tracked, not in the total
         self.assertEqual(snap["token_refresh"], 1)
-        self.assertEqual(snap["zoho_calls_today"], 1)
+        self.assertEqual(snap["zoho_calls_today"], 0)
 
     def test_items_are_split_into_batch_and_detail(self):
         ok = SimpleNamespace(status_code=200, headers={}, json=lambda: {"code": 0, "items": [], "item": {}})
