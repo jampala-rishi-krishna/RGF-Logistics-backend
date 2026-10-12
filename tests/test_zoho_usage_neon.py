@@ -75,7 +75,7 @@ class RestartTests(UsageCase):
         self.assertEqual(snap["zoho_calls_today"], 8)
         self.assertEqual(snap["token_refresh"], 1)
         self.assertEqual(snap["by_source"], {"request": 7, "background": 1})
-        with patch.dict(os.environ, {"ZOHO_DAILY_BUDGET": "10"}):  # 8 of 10 used -> 80% guard survives the restart
+        with patch.dict(os.environ, {"ZOHO_DAILY_BUDGET": "10", "ZOHO_GUARD_CACHE_ONLY_PCT": "80"}):  # 8 of 10 used -> 80% guard survives the restart
             with self.assertRaises(zoho_usage.ZohoBudgetGuard):
                 zoho_usage.enforce_budget("inventory_list")
             zoho_usage.enforce_budget("so_detail")  # essential still allowed
@@ -124,7 +124,7 @@ class RestartTests(UsageCase):
         self.assertEqual(snap["zoho_calls_today"], 122)                     # 100 + B's 20 + A's 2
         zoho_usage.record_call("so_detail")
         self.assertEqual(zoho_usage.snapshot()["zoho_calls_today"], 123)    # unflushed delta stays on top
-        with patch.dict(os.environ, {"ZOHO_DAILY_BUDGET": "150"}):          # guard uses the refreshed total (123 >= 80%)
+        with patch.dict(os.environ, {"ZOHO_DAILY_BUDGET": "150", "ZOHO_GUARD_CACHE_ONLY_PCT": "80"}):          # guard uses the refreshed total (123 >= 80%)
             with self.assertRaises(zoho_usage.ZohoBudgetGuard):
                 zoho_usage.enforce_budget("inventory_list")
 
@@ -181,7 +181,7 @@ class RestartTests(UsageCase):
         from datetime import datetime
         from zoneinfo import ZoneInfo
         manila = ZoneInfo("Asia/Manila")
-        with patch.dict(os.environ, {"ZOHO_DAILY_BUDGET": "10"}):
+        with patch.dict(os.environ, {"ZOHO_DAILY_BUDGET": "10", "ZOHO_GUARD_CACHE_ONLY_PCT": "80"}):
             zoho_usage.set_time_override(datetime(2026, 10, 8, 23, 59, 50, tzinfo=manila))
             for _ in range(9):
                 zoho_usage.record_call("inventory_list")
@@ -228,7 +228,7 @@ class RestartTests(UsageCase):
         self.assertEqual(zoho_usage.failsafe_so_detail_cap(), 50)
 
     def test_neon_down_at_startup_fails_safe_then_recovers(self):
-        self.store.rows[(date.fromisoformat(zoho_usage.snapshot()["date"]), "so_detail", "request")] = 3700
+        self.store.rows[(date.fromisoformat(zoho_usage.snapshot()["date"]), "so_detail", "request")] = 4200  # >= 92% of 4500
         self.store.down = True
         with patch.object(zoho_usage, "RESTORE_RETRY_SECONDS", 3600), patch.object(zoho_usage, "FLUSH_SECONDS", 3600):
             snap = zoho_usage.start("test-instance")
@@ -241,10 +241,10 @@ class RestartTests(UsageCase):
         self.store.down = False
         self.assertTrue(zoho_usage.restore())
         snap = zoho_usage.snapshot()
-        self.assertEqual(snap["zoho_calls_today"], 3701)  # restored 3700 + the 1 counted while down
+        self.assertEqual(snap["zoho_calls_today"], 4201)  # restored 4200 + the 1 counted while down
         self.assertEqual(snap["guard"], "cache_only")
         with self.assertRaises(zoho_usage.ZohoBudgetGuard):
-            zoho_usage.enforce_budget("inventory_list")  # 3701 >= 80% of 4500, restored value drives the guard
+            zoho_usage.enforce_budget("inventory_list")  # 4201 >= 92% of 4500, restored value drives the guard
 
     def test_flush_failure_keeps_delta_and_retries(self):
         for _ in range(4):

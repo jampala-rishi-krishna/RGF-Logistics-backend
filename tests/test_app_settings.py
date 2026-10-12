@@ -85,6 +85,7 @@ def test_defaults_when_nothing_is_set(env):
     assert app_settings.get("DRIVER_STALE_MINUTES") == 15
     assert app_settings.get("ZOHO_DAILY_BUDGET") == 4500
     assert app_settings.get("ZOHO_FAILSAFE_SO_DETAIL_CAP") == 50
+    assert app_settings.get("ZOHO_GUARD_CACHE_ONLY_PCT") == 92
 
 
 def test_env_beats_default_and_admin_beats_env(env, monkeypatch):
@@ -111,6 +112,7 @@ def test_invalid_env_value_falls_back_to_the_default(env, monkeypatch):
     ("DRIVER_STALE_MINUTES", 0), ("DRIVER_STALE_MINUTES", 1441), ("DRIVER_STALE_MINUTES", "abc"), ("DRIVER_STALE_MINUTES", ""), ("DRIVER_STALE_MINUTES", None),
     ("DRIVER_STALE_MINUTES", True), ("ZOHO_DAILY_BUDGET", 99), ("ZOHO_DAILY_BUDGET", 10001), ("ZOHO_FAILSAFE_SO_DETAIL_CAP", -1),
     ("ZOHO_FAILSAFE_SO_DETAIL_CAP", 1001), ("DISPATCH_PHONE", "call me maybe"), ("DISPATCH_PHONE", "1" * 33),
+    ("ZOHO_GUARD_CACHE_ONLY_PCT", 49), ("ZOHO_GUARD_CACHE_ONLY_PCT", 100), ("ZOHO_GUARD_CACHE_ONLY_PCT", "ninety"),
 ])
 def test_invalid_values_are_rejected_and_nothing_is_written(env, key, value):
     with env.Session() as db, pytest.raises(app_settings.SettingError):
@@ -139,7 +141,7 @@ SECRET_WORDS = re.compile(r"SECRET|TOKEN|PASSWORD|API_KEY|ACCESS_KEY|R2_|JWT|DAT
 
 
 def test_the_whitelist_contains_no_secret_names():
-    assert sorted(app_settings.DEFINITIONS) == ["DISPATCH_PHONE", "DRIVER_STALE_MINUTES", "ZOHO_DAILY_BUDGET", "ZOHO_FAILSAFE_SO_DETAIL_CAP"]
+    assert sorted(app_settings.DEFINITIONS) == ["DISPATCH_PHONE", "DRIVER_STALE_MINUTES", "ZOHO_DAILY_BUDGET", "ZOHO_FAILSAFE_SO_DETAIL_CAP", "ZOHO_GUARD_CACHE_ONLY_PCT"]
     assert [k for k in app_settings.DEFINITIONS if SECRET_WORDS.search(k)] == []
 
 
@@ -188,7 +190,7 @@ def test_reads_never_touch_the_database(env, monkeypatch):
     for _ in range(1000):
         assert app_settings.get_int("ZOHO_DAILY_BUDGET") == 5000
         assert zoho_usage.budget() == 5000
-    assert len(app_settings.describe()) == 4
+    assert len(app_settings.describe()) == 5
     assert app_settings.get_str("DISPATCH_PHONE") == ""
 
 

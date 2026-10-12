@@ -49,6 +49,8 @@ FEATURES = {
 # calls. They still count against the org-wide Zoho limit, which is why they stay tracked.
 UNCOUNTED = {"token_refresh", "rate_limited", "lock_webhook", "lock_status"}
 ESSENTIAL_FEATURES = {"acknowledge", "lock_status", "so_detail"}
+# At 100% of the budget everything stops except these two (so_detail is essential only below 100%).
+HARD_STOP_EXEMPT = {"acknowledge", "lock_status"}
 # While the startup restore has failed, only these pass freely; so_detail is hard-capped (see failsafe_so_detail_cap).
 FAILSAFE_FREE_FEATURES = {"acknowledge", "lock_status"}
 SOURCES = ("request", "background")
@@ -251,12 +253,19 @@ def should_skip_background(feature_name: str | None = None, *, background: bool 
     return background and name not in ESSENTIAL_FEATURES and not is_working_time()
 
 
+def cache_only_pct() -> int:
+    """Percent of the budget at which non-essential calls pause (Admin > Settings ZOHO_GUARD_CACHE_ONLY_PCT, default 92)."""
+    from services import app_settings
+
+    return max(50, min(99, app_settings.get_int("ZOHO_GUARD_CACHE_ONLY_PCT")))
+
+
 def guard_state_locked(total: int) -> str:
     limit = budget()
     if _enabled and not _restored:
         return "unknown_restoring"
     percent = total / limit * 100
-    return "exhausted" if percent >= 100 else "cache_only" if percent >= 80 else "warn" if percent >= 50 else "ok"
+    return "exhausted" if percent >= 100 else "cache_only" if percent >= cache_only_pct() else "warn" if percent >= 50 else "ok"
 
 
 def enforce_budget(feature_name: str | None = None) -> None:
@@ -271,13 +280,15 @@ def enforce_budget(feature_name: str | None = None) -> None:
                 return
             raise ZohoBudgetGuard("Zoho usage total not yet restored from the database; only acknowledge/lock calls "
                                   "(and a capped number of SO detail calls) are allowed.")
-        if name in ESSENTIAL_FEATURES:
+        if name in HARD_STOP_EXEMPT:
             return
         used = _total_locked()
     limit = budget()
-    if used >= limit:
+    if used >= limit:  # 100%: hard stop for everything except acknowledge / lock
         raise ZohoBudgetGuard("Zoho daily budget exhausted; serving cache only.")
-    if used >= int(limit * 0.8):
+    if name in ESSENTIAL_FEATURES:
+        return
+    if used >= int(limit * cache_only_pct() / 100):
         raise ZohoBudgetGuard("Zoho daily budget guard active; non-essential Zoho calls are paused.")
 
 

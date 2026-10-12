@@ -37,7 +37,8 @@ class SettingDef:
 DEFINITIONS: dict[str, SettingDef] = {d.key: d for d in (
     SettingDef("DISPATCH_PHONE", "Dispatch phone", "Number the driver app's 'Call dispatch' button dials. Leave empty to hide the button.", "phone", ""),
     SettingDef("DRIVER_STALE_MINUTES", "Driver stale threshold", "A driver on a trip with no action for this long is flagged stale in Driver Overview.", "int", 15, 1, 1440, "minutes"),
-    SettingDef("ZOHO_DAILY_BUDGET", "Zoho daily budget", "Platform soft budget of Zoho API calls per day. At 80% non-essential Zoho calls pause; at 100% only essential ones run. Cannot exceed the organisation limit.", "int", 4500, 100, None, "calls/day"),
+    SettingDef("ZOHO_DAILY_BUDGET", "Zoho daily budget", "Platform soft budget of Zoho API calls per day. Once usage reaches the cache-only percentage non-essential Zoho calls pause; at 100% everything stops except acknowledge and lock calls. Cannot exceed the organisation limit.", "int", 4500, 100, None, "calls/day"),
+    SettingDef("ZOHO_GUARD_CACHE_ONLY_PCT", "Zoho guard: cache-only at", "Percentage of the daily budget at which non-essential Zoho calls (order lists, item details, ...) pause and the app serves cached data. Sales Order details, acknowledge and lock calls still run until 100%.", "int", 92, 50, 99, "% of budget"),
     SettingDef("ZOHO_FAILSAFE_SO_DETAIL_CAP", "Zoho fail-safe SO-detail cap", "While today's Zoho usage total could not be restored from the database, at most this many Sales Order detail calls are allowed.", "int", 50, 0, 1000, "calls"),
 )}
 
