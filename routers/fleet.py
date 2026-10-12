@@ -43,6 +43,14 @@ _sync_lock = threading.Lock()
 # a restart or an explicit /vehicles/refresh. _fleet_cache_built is the real signal now.
 _fleet_cache: list[dict] = []
 _fleet_cache_built = False
+# Single-flight build: at most ONE thread rebuilds the Fleet cache (and so talks to Zoho) at a time, however many
+# /vehicles requests arrive during a cold start or after an invalidation. _build_generation counts finished builds
+# so a request that waited on the lock reuses that build instead of starting another. _stale_fleet_cache is the
+# last fully built snapshot, kept across invalidation so readers that arrive mid-rebuild are served it, not blocked.
+ASSIGNED_ONLY = frozenset({"assigned"})  # the only assignment state Fleet displays
+_build_lock = threading.Lock()
+_build_generation = 0
+_stale_fleet_cache: list[dict] = []
 OPERATIONAL_CAPACITY_KG = {"DCD8953": 1800.0, "DCD8954": 1800.0, "DCD8955": 1800.0, "NFX5791": 1000.0}
 
 LOCKED_VEHICLES = {
@@ -140,6 +148,7 @@ def _merge_live(payload: dict) -> dict:
         "fuel_pct": live["fuel_pct"] if live else None,
         "ignition_on": live["ignition_on"] if live else None,
         "zone": live["zone"] if live else None,
+        "gps_time": live.get("gps_time") if live else None,  # the device's own timestamp for this fix (UTC ISO)
         "last_updated": live["last_updated"].isoformat() if live else None,
     })
     return merged
@@ -248,7 +257,8 @@ def list_vehicles(status: str | None = None, date: str | None = None, db: Sessio
         # A selected current or future date is date-scoped by expected delivery date: only that
         # day's assigned orders feed each truck's list, load and fulfillment.
         vehicles = db.execute(select(Vehicle)).scalars().all()
-        snapshot, had_failures = live_sales_order_cache.get_assigned_snapshot_ex()
+        # Assigned SOs only: no 16-day window pull, and no Zoho call for completed/released history.
+        snapshot, had_failures = live_sales_order_cache.get_assigned_snapshot_ex(include_window=False, statuses=ASSIGNED_ONLY)
         selected = [o for o in snapshot if o.assignment_status == "assigned" and _operational_date(o) == requested_date]
         grouped: dict[str, list[SalesOrderCache]] = {}
         for row in selected:
@@ -263,36 +273,77 @@ def list_vehicles(status: str | None = None, date: str | None = None, db: Sessio
         pass
 
     logger.info("[FLEET_REFRESH] Starting refresh")
-    global _fleet_cache, _fleet_cache_built
     if not _fleet_cache_built:
-        vehicles = db.execute(select(Vehicle)).scalars().all()
-        plates = {str(v.plate_no or "").strip().upper() for v in vehicles}
-        snapshot, had_failures = live_sales_order_cache.get_assigned_snapshot_ex()
-        assigned_rows = [o for o in snapshot if o.assignment_status == "assigned" and o.vehicle_id in plates]
-        grouped: dict[str, list[SalesOrderCache]] = {}
-        for row in assigned_rows: grouped.setdefault(str(row.vehicle_id or "").upper(), []).append(row)
-        _fleet_cache = [_vehicle_payload(v, db, assigned_by_vehicle=grouped) for v in vehicles]
-        # Only latch the cache when every assigned SO's Zoho detail came back clean. Right
-        # after a restart, _assigned_zoho starts empty and every assigned SO must be
-        # fetched at once - if any of those fetches failed (Zoho rate limit/blip), latching
-        # here would leave that vehicle's Associated SOs/Load/Fulfillment stuck on "-" until
-        # someone clicks Refresh. Leaving _fleet_cache_built False makes the very next
-        # request retry instead, so it self-heals within one poll cycle.
-        _fleet_cache_built = not had_failures
-        if had_failures:
-            logger.warning("[FLEET_REFRESH] One or more assigned SOs failed to fetch from Zoho this cycle; not latching cache, will retry next request")
-    result = [_merge_live(v) for v in _fleet_cache]
+        generation = _build_generation
+        if _build_lock.acquire(blocking=False):
+            try:
+                if not _fleet_cache_built and generation == _build_generation:
+                    _build_fleet_cache(db)
+            finally:
+                _build_lock.release()
+        elif not _stale_fleet_cache:
+            # Cold start with nothing to serve yet: wait for the in-flight build and reuse its result.
+            with _build_lock:
+                if not _fleet_cache_built and generation == _build_generation:
+                    _build_fleet_cache(db)
+    # Mid-rebuild readers (another thread holds the build lock) get the last good snapshot.
+    serving = _fleet_cache if (_fleet_cache_built or not _stale_fleet_cache or not _build_lock.locked()) else _stale_fleet_cache
+    result = [_merge_live(v) for v in serving]
     if status:
         result = [v for v in result if v["status"] == status]
     logger.info("[FLEET_REFRESH] Vehicles: %s; Associations resolved: %s; Load and fulfillment calculations completed", len(result), sum(len(v["associated_sos"]) for v in result))
     return result
 
 
+def _build_fleet_cache(db: Session) -> None:
+    """Rebuild the Fleet cache from the assigned SOs. Caller holds _build_lock. Only the assigned SOs are fetched from
+    Zoho (one detail call each, none for ones already in memory) - never the whole shipment window."""
+    global _fleet_cache, _fleet_cache_built, _stale_fleet_cache, _build_generation
+    vehicles = db.execute(select(Vehicle)).scalars().all()
+    plates = {str(v.plate_no or "").strip().upper() for v in vehicles}
+    if live_sales_order_cache.local_zoho_warmup_disabled():
+        snapshot, had_failures = live_sales_order_cache.cached_assigned_records(), False  # memory only: no Zoho at all
+    else:
+        snapshot, had_failures = live_sales_order_cache.get_assigned_snapshot_ex(include_window=False, statuses=ASSIGNED_ONLY)
+    assigned_rows = [o for o in snapshot if o.assignment_status == "assigned" and o.vehicle_id in plates]
+    grouped: dict[str, list[SalesOrderCache]] = {}
+    for row in assigned_rows: grouped.setdefault(str(row.vehicle_id or "").upper(), []).append(row)
+    built = [_vehicle_payload(v, db, assigned_by_vehicle=grouped) for v in vehicles]
+    _fleet_cache = built
+    # Only latch the cache when every assigned SO's Zoho detail came back clean. Right
+    # after a restart, _assigned_zoho starts empty and every assigned SO must be
+    # fetched at once - if any of those fetches failed (Zoho rate limit/blip), latching
+    # here would leave that vehicle's Associated SOs/Load/Fulfillment stuck on "-" until
+    # someone clicks Refresh. Leaving _fleet_cache_built False makes the very next
+    # request retry instead, so it self-heals within one poll cycle.
+    _fleet_cache_built = not had_failures
+    if not had_failures:
+        _stale_fleet_cache = built
+    _build_generation += 1
+    if had_failures:
+        logger.warning("[FLEET_REFRESH] One or more assigned SOs failed to fetch from Zoho this cycle; not latching cache, will retry next request")
+
+
+def warm_fleet_cache() -> None:
+    """Build the Fleet cache once at startup, in the background, so the first person to open Fleet gets it instantly.
+    Counted as background fleet_sync usage; shares the single-flight lock with /vehicles."""
+    if live_sales_order_cache.local_zoho_warmup_disabled():
+        logger.info("[FLEET_REFRESH] Startup Fleet cache warm-up skipped: LOCAL_DISABLE_ZOHO_WARMUP")
+        return
+    try:
+        with zoho_usage.labelled("fleet_sync"), SessionLocal() as db, _build_lock:
+            if not _fleet_cache_built:
+                _build_fleet_cache(db)
+        logger.info("[FLEET_REFRESH] Startup Fleet cache build finished (latched=%s)", _fleet_cache_built)
+    except Exception:
+        logger.exception("[FLEET_REFRESH] Startup Fleet cache build failed; the first /vehicles request will build it")
+
+
 @router.post("/vehicles/refresh", dependencies=[WRITE_ROLES])
 @zoho_acquisition.operation("fleet-refresh", reuse_details=True)
 def refresh_vehicles(force: bool = False, db: Session = Depends(get_db)):
     """Recompute Fleet from live Zoho data for currently-assigned SOs only (never a bulk
-    sync of every SO). `force` is accepted for API compatibility (30-min scheduled sync
+    sync of every SO). `force` is accepted for API compatibility (the 60-min scheduled sync
     and the manual Refresh button both call this) but every call already re-fetches Zoho
     for the assigned set and only writes sales_order_history rows that actually changed -
     there is no "skip because still fresh" path to force past.
@@ -348,9 +399,10 @@ def refresh_vehicles(force: bool = False, db: Session = Depends(get_db)):
         db.commit()
         vehicles = db.execute(select(Vehicle)).scalars().all()
         logger.info("[FLEET_SYNC] trucks_processed=%d sos_released=%d unresolved_count=%d duration_ms=%d", len(vehicles), sum(1 for order in assigned if order.assignment_status == "completed"), sum(1 for order in assigned if sales_order_delivery_status(order.raw_json or {}) == "Unresolved"), int((time.monotonic() - started) * 1000))
-        global _fleet_cache, _fleet_cache_built
+        global _fleet_cache, _fleet_cache_built, _stale_fleet_cache
         _fleet_cache = [_vehicle_payload(v, db, sync_errors=sync_errors) for v in vehicles]
         _fleet_cache_built = True
+        _stale_fleet_cache = _fleet_cache
         return [_merge_live(v) for v in _fleet_cache]
     finally:
         _sync_lock.release()
@@ -362,6 +414,9 @@ def scheduled_fleet_sync() -> None:
     Skipped (zero Zoho calls) outside working hours or when no SO is currently assigned:
     there is nothing for the sync to reconcile, and a post-restart run would otherwise
     re-list and re-hydrate the whole shared window for no benefit."""
+    if live_sales_order_cache.local_zoho_warmup_disabled():
+        logger.info("[FLEET_REFRESH] Scheduled sync skipped: LOCAL_DISABLE_ZOHO_WARMUP")
+        return
     if not zoho_usage.is_working_time():
         logger.info("[FLEET_REFRESH] Scheduled sync skipped: outside working hours")
         return

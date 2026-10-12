@@ -265,7 +265,12 @@ def load_assignment_state_from_history(db) -> None:
                 "email_message_id": r.email_message_id,
                 "assignment_batch_id": r.assignment_batch_id,
             }
-    logger.info("[LiveSalesOrderCache] Loaded assignment state for %d SOs from sales_order_history", len(_assignment_state))
+    by_status: dict[str, int] = {}
+    for state in _assignment_state.values():
+        key = state.get("assignment_status") or "unassigned"
+        by_status[key] = by_status.get(key, 0) + 1
+    logger.info("[LiveSalesOrderCache] Loaded assignment state for %d SOs from sales_order_history (by status: %s)",
+                len(_assignment_state), dict(sorted(by_status.items())))
 
 
 def set_assignment(order_id: str, **fields) -> None:
@@ -284,6 +289,14 @@ def ids_for_batch(batch_id: str) -> list[str]:
     with _state_lock:
         return [oid for oid, state in _assignment_state.items()
                 if state.get("assignment_batch_id") == batch_id and (state.get("assignment_status") or "unassigned") != "unassigned"]
+
+
+def local_zoho_warmup_disabled() -> bool:
+    """LOCAL_DISABLE_ZOHO_WARMUP=true (default off): for running the backend on a developer machine with minimal
+    Zoho traffic. Turns off the startup Fleet warm-up and the scheduled fleet sync, and makes the Fleet build use
+    only Zoho data already in memory (so a fresh local process makes ZERO Zoho calls for /vehicles; the map and
+    GPS work, but trucks show no associated Sales Orders). Never set it in production."""
+    return os.environ.get("LOCAL_DISABLE_ZOHO_WARMUP", "").strip().lower() in {"1", "true", "yes"}
 
 
 def has_active_assignments() -> bool:
@@ -367,7 +380,7 @@ def _ensure_or_skip(order_id: str):
         return None, True
 
 
-def get_assigned_snapshot_ex() -> tuple[list[SalesOrderCache], bool]:
+def get_assigned_snapshot_ex(include_window: bool = True, statuses: frozenset[str] | None = None) -> tuple[list[SalesOrderCache], bool]:
     """Same set as get_assigned_snapshot(), but also reports whether any assigned SO's
     Zoho detail fetch failed this call (had_failures). Right after a backend restart,
     _assigned_zoho is empty, so every currently-assigned SO needs fetching at once - a
@@ -375,10 +388,19 @@ def get_assigned_snapshot_ex() -> tuple[list[SalesOrderCache], bool]:
     and Fleet's rebuild-and-latch cache (fleet.py) would then cache that gap until the
     next manual refresh, making a still-assigned truck's SO/load/fulfillment columns show
     "-" indefinitely. Callers that cache their result (Fleet) should check had_failures
-    and avoid latching so the next request retries instead of staying stuck."""
+    and avoid latching so the next request retries instead of staying stuck.
+
+    include_window=False skips the shared 16-day shipment window and fetches just the assigned SOs
+    that are not in memory yet (one detail call each). Fleet uses this: it needs only the assigned
+    set, so a cold start costs ~one call per assigned SO instead of a full window re-pull.
+
+    statuses (e.g. frozenset({"assigned"})) limits the set to SOs in those assignment states. Fleet shows only
+    "assigned" orders, so it passes that and never pays a Zoho call for completed/released/manifested history."""
     with _state_lock:
-        ids = [oid for oid, s in _assignment_state.items() if (s.get("assignment_status") or "unassigned") != "unassigned" and oid not in _excluded_ids]
-    if ids:
+        ids = [oid for oid, s in _assignment_state.items()
+               if (s.get("assignment_status") or "unassigned") != "unassigned" and oid not in _excluded_ids
+               and (statuses is None or s.get("assignment_status") in statuses)]
+    if ids and include_window:
         start, end = _wide_bounds()
         get_window(start, end)
         with _window_lock:

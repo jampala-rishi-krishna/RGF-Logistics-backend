@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import threading
+from datetime import datetime, timezone
 import logging
 import os
 import socket
@@ -134,19 +135,25 @@ async def lifespan(app: FastAPI):
     # so a restart doesn't lose assignment state. Updated in memory from then on.
     with SessionLocal() as db:
         live_sales_order_cache.load_assignment_state_from_history(db)
+    # Build the Fleet cache once in the background (assigned SOs only) so the first Fleet view after a
+    # deploy is instant. /vehicles shares a single-flight lock with this, so it never double-fetches.
+    threading.Thread(target=fleet.warm_fleet_cache, name="fleet-cache-warmup", daemon=True).start()  # no-op under LOCAL_DISABLE_ZOHO_WARMUP
     # Re-enabled 2026-09-24, scoped: this only ever touches sales_order_history rows for
     # SOs that are already assignment_status == "assigned" (see fleet.refresh_vehicles) -
     # it cannot write an unassigned SO, because unassigned SOs are never stored at all.
     fleet_sync_interval = int(os.environ.get("FLEET_ZOHO_SYNC_INTERVAL_SECONDS", "3600"))
-    scheduler.add_job(
-        fleet.scheduled_fleet_sync,
-        trigger="interval",
-        seconds=fleet_sync_interval,
-        id="fleet_zoho_sync",
-        replace_existing=True,
-        max_instances=1,
-        coalesce=True,
-    )
+    if live_sales_order_cache.local_zoho_warmup_disabled():
+        logger.warning("LOCAL_DISABLE_ZOHO_WARMUP is on: no Fleet warm-up, no scheduled Zoho fleet sync, Fleet builds from memory only")
+    else:
+        scheduler.add_job(
+            fleet.scheduled_fleet_sync,
+            trigger="interval",
+            seconds=fleet_sync_interval,
+            id="fleet_zoho_sync",
+            replace_existing=True,
+            max_instances=1,
+            coalesce=True,
+        )
     scheduler.start()
     gmail_sender.log_identity_config_at_startup()
     zoho_so_lock.log_configuration_warning()
@@ -164,7 +171,8 @@ async def lifespan(app: FastAPI):
             coalesce=True,
         )
         logger.info("Logistics email agent enabled - polling Gmail every %ss", os.environ.get("LOGISTICS_AGENT_POLL_SECONDS", "60"))
-    logger.info("Fleet Zoho sync (assigned SOs only) started - syncing every %ss", fleet_sync_interval)
+    if not live_sales_order_cache.local_zoho_warmup_disabled():
+        logger.info("Fleet Zoho sync (assigned SOs only) started - syncing every %ss", fleet_sync_interval)
     if CARTRACK_CONFIGURED:
         poll_interval = int(os.environ.get("CARTRACK_POLL_INTERVAL_SECONDS", "5"))
         scheduler.add_job(
@@ -179,7 +187,12 @@ async def lifespan(app: FastAPI):
         # connection resumes it, and the poller pauses again once the last client
         # disconnects. No Cartrack calls (and no DB egress) happen while idle.
         scheduler.pause_job("cartrack_gps_poll")
-        manager.on_first_connect = lambda: scheduler.resume_job("cartrack_gps_poll")
+        def _start_gps_polling() -> None:
+            # Resume AND poll right now: resuming alone would wait one full interval for the first positions.
+            scheduler.resume_job("cartrack_gps_poll")
+            scheduler.modify_job("cartrack_gps_poll", next_run_time=datetime.now(timezone.utc))
+
+        manager.on_first_connect = _start_gps_polling
         manager.on_last_disconnect = lambda: scheduler.pause_job("cartrack_gps_poll")
         logger.info(f"Cartrack GPS poller registered - polling every {poll_interval}s while >=1 WS client is connected")
         asyncio.create_task(report_unmatched_roster_on_startup())

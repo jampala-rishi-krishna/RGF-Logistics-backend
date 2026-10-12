@@ -41,6 +41,15 @@ def get_zoho_usage():
     }
 
 
+@usage_router.get("/gps-cadence")
+def get_gps_cadence():
+    """How often each device really reports a new GPS fix (device event_ts), measured from the normal
+    poller. In memory, no Cartrack call, no database. Resets on restart."""
+    from services import gps_cadence
+
+    return gps_cadence.snapshot()
+
+
 class SettingBody(BaseModel):
     value: str | int | None = None
 
