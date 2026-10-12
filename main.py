@@ -294,6 +294,11 @@ def health():
         "zoho_usage": zoho_snapshot,
     }
 
+# A ZohoError no route caught (e.g. the budget guard refusing a list call) -> readable 503 that keeps its CORS headers.
+from services import zoho_error_handler  # noqa: E402
+zoho_error_handler.register(app)
+
+
 @app.exception_handler(SQLAlchemyError)
 async def sqlalchemy_error_handler(request: Request, exc: SQLAlchemyError):
     return JSONResponse(status_code=500, content={"error": "Database operation failed", "detail": str(exc)})
