@@ -26,7 +26,7 @@ from models.sales_order_history import SalesOrderHistory  # noqa: E402
 from models.sales_order_lines import SalesOrderLine  # noqa: E402
 from models.user import User, UserInvite  # noqa: E402
 from routers import admin, agent, assignment, auth as auth_router, driver as driver_router, load_planning, pipeline, reports  # noqa: E402
-from services import delivery_details, driver_assignments, live_sales_order_cache, login_rate_limiter, sales_order_history_sync, staff_directory_cache, user_cache, user_invites  # noqa: E402
+from services import delivery_details, driver_assignments, gmail_sender, live_sales_order_cache, login_rate_limiter, sales_order_history_sync, staff_directory_cache, user_cache, user_invites  # noqa: E402
 from services.phone_numbers import ph_phone_digits, ph_phone_lookup_values  # noqa: E402
 from services.staff_roles import helper_ids_of, staff_kind  # noqa: E402
 
@@ -266,6 +266,37 @@ def test_admin_can_create_invite_link_and_disable_but_not_a_driver(env):
     users = env.client.get("/users", headers=bearer(env, admin_id, "admin")).json()
     row = next(u for u in users if u["id"] == driver_id)
     assert row["staff_id"] == 9 and row["invite_state"] == "used" and "password_hash" not in row
+
+
+def test_admin_can_create_driver_with_initial_password_and_email_details(env, monkeypatch):
+    admin_id = make_user(env, name="Admin", email="admin@example.test", phone=639000000001, role="admin", staff_id=None)
+    sent: list[dict] = []
+    monkeypatch.setattr(gmail_sender, "configured", lambda: True)
+    monkeypatch.setattr(gmail_sender, "send_email", lambda **kwargs: sent.append(kwargs) or {"id": "msg-1"})
+
+    response = env.client.post(
+        "/api/admin/users",
+        json={
+            "full_name": "Emert Hirondo",
+            "email": "emert@example.test",
+            "phone": "09482834802",
+            "role": "driver",
+            "staff_id": 9,
+            "password": "driver-pass-123",
+            "send_login_email": True,
+        },
+        headers=bearer(env, admin_id, "admin"),
+    )
+    assert response.status_code == 201, response.text
+    row = response.json()
+    assert row["staff_id"] == 9 and row["role"] == "driver" and "password_hash" not in row
+    assert login(env, "emert@example.test", "driver-pass-123").status_code == 200
+    assert login(env, "09482834802", "driver-pass-123").status_code == 200
+    assert len(sent) == 1
+    assert sent[0]["to"] == "emert@example.test"
+    assert "Your IntelliFleet login details" in sent[0]["subject"]
+    assert "driver-pass-123" in sent[0]["html"] and "09482834802" in sent[0]["html"]
+    assert "MC RIDER" in sent[0]["html"] and "GLACIER" in sent[0]["html"]
 
 
 def test_disabling_a_driver_cuts_off_their_existing_token_immediately(env):

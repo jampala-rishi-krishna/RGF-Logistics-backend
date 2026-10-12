@@ -12,9 +12,10 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from auth.dependencies import CurrentUser, require_role
+from auth.security import hash_password, password_problem, unusable_password_hash
 from database import get_db
 from models.user import User
-from services import memory_tables, staff_directory_cache, user_cache, user_invites, zoho_usage
+from services import gmail_sender, memory_tables, staff_directory_cache, user_cache, user_invites, zoho_usage
 from services.phone_numbers import ph_phone_digits
 from services.staff_roles import staff_kind
 from services.audit import list_audit_log as _list_audit_log
@@ -240,11 +241,80 @@ class CreateUserBody(BaseModel):
     phone: str
     role: str
     staff_id: int | None = None
+    password: str | None = None
+    send_login_email: bool = False
 
 
 def _user_row(u: User) -> dict:
     return {"id": u.id, "full_name": u.full_name, "email": u.email, "phone": u.phone, "role": u.role, "status": u.status,
             "profile_photo_url": u.profile_photo_url, "staff_id": u.staff_id, "must_change_password": u.must_change_password, "invite_state": "none"}
+
+
+def _display_phone(phone) -> str:
+    digits = "".join(ch for ch in str(phone or "") if ch.isdigit())
+    if digits.startswith("63") and len(digits) == 12:
+        return "0" + digits[2:]
+    return digits
+
+
+def _login_details_email(user: User, password: str, staff: dict | None) -> tuple[str, str, str]:
+    name = escape((user.full_name or "").strip() or "there")
+    email = escape(user.email or "")
+    phone = escape(_display_phone(user.phone))
+    role = escape(user.role or "")
+    staff_id = escape(str(user.staff_id or ""))
+    title = escape(str((staff or {}).get("title") or ""))
+    warehouse = escape(str((staff or {}).get("warehouse") or ""))
+    rows = [
+        ("Login email", email),
+        ("Login phone", phone),
+        ("Password", escape(password)),
+        ("Role", role),
+    ]
+    if staff_id:
+        rows.append(("Staff ID", staff_id))
+    if title:
+        rows.append(("Title", title))
+    if warehouse:
+        rows.append(("Warehouse", warehouse))
+    row_html = "".join(
+        "<tr>"
+        f"<td style='padding:10px 12px;border-bottom:1px solid #e5e7eb;color:#6b7280;font-size:13px;'>{label}</td>"
+        f"<td style='padding:10px 12px;border-bottom:1px solid #e5e7eb;font-weight:700;color:#111827;'>{value}</td>"
+        "</tr>"
+        for label, value in rows
+    )
+    subject = "Your IntelliFleet login details"
+    html = (
+        "<div style='font-family:Arial,Helvetica,sans-serif;font-size:15px;line-height:1.5;color:#1f2933;max-width:560px;'>"
+        "<div style='border-bottom:3px solid #111827;padding-bottom:12px;margin-bottom:20px;'>"
+        "<div style='font-size:12px;letter-spacing:.14em;text-transform:uppercase;color:#6b7280;'>Rare Global Food Trading Corp.</div>"
+        "<h1 style='font-size:26px;line-height:1.1;margin:8px 0 0;color:#111827;'>IntelliFleet login</h1>"
+        "</div>"
+        f"<p>Hi {name},</p>"
+        "<p>Your IntelliFleet account is ready. Use the details below to sign in on the driver portal.</p>"
+        "<table role='presentation' cellspacing='0' cellpadding='0' style='width:100%;border:1px solid #e5e7eb;border-collapse:collapse;margin:18px 0;'>"
+        f"{row_html}</table>"
+        "<p style='color:#6b7280;font-size:13px;'>Keep this email private. If you did not expect this login, contact dispatch before signing in.</p>"
+        "</div>"
+    )
+    text = "\n".join(
+        [
+            f"Hi {user.full_name or 'there'},",
+            "",
+            "Your IntelliFleet account is ready. Use these details to sign in:",
+            f"Login email: {user.email}",
+            f"Login phone: {_display_phone(user.phone)}",
+            f"Password: {password}",
+            f"Role: {user.role}",
+            *( [f"Staff ID: {user.staff_id}"] if user.staff_id else [] ),
+            *( [f"Title: {(staff or {}).get('title')}"] if title else [] ),
+            *( [f"Warehouse: {(staff or {}).get('warehouse')}"] if warehouse else [] ),
+            "",
+            "Keep this email private. If you did not expect this login, contact dispatch before signing in.",
+        ]
+    )
+    return subject, html, text
 
 
 @usage_router.post("/users", status_code=201)
@@ -258,10 +328,18 @@ def create_user(body: CreateUserBody, db: Session = Depends(get_db), admin: Curr
         raise HTTPException(400, "full_name is required.")
     if "@" not in email or " " in email or len(email) < 5:
         raise HTTPException(400, "A valid email address is required.")
+    initial_password = body.password or ""
+    if body.send_login_email and not initial_password:
+        raise HTTPException(400, "Enter an initial password before emailing login details.")
+    if initial_password:
+        problem = password_problem(initial_password)
+        if problem:
+            raise HTTPException(400, problem)
     phone = ph_phone_digits(body.phone)
     if phone is None:
         raise HTTPException(400, "phone must be a Philippine mobile number (09XXXXXXXXX or +639XXXXXXXXX).")
     staff_id = body.staff_id
+    staff = None
     if role in ("driver", "helper"):
         if staff_id is None:
             raise HTTPException(400, f"A {role} login must be linked to a staff record (staff_id).")
@@ -278,14 +356,32 @@ def create_user(body: CreateUserBody, db: Session = Depends(get_db), admin: Curr
         raise HTTPException(409, "A user with this email already exists.")
     if db.execute(select(User.id).where(User.phone == phone)).first() is not None:
         raise HTTPException(409, "A user with this phone number already exists.")
-    from auth.security import unusable_password_hash
+    if body.send_login_email:
+        if not gmail_sender.configured():
+            raise HTTPException(503, "Gmail is not configured on the server.")
 
-    user = User(full_name=name, email=email, phone=phone, role=role, status="active", staff_id=staff_id, password_hash=unusable_password_hash(), must_change_password=False)
+    user = User(
+        full_name=name,
+        email=email,
+        phone=phone,
+        role=role,
+        status="active",
+        staff_id=staff_id,
+        password_hash=hash_password(initial_password) if initial_password else unusable_password_hash(),
+        must_change_password=False,
+    )
     db.add(user)
     try:
+        db.flush()
+        if body.send_login_email and initial_password:
+            subject, html, text = _login_details_email(user, initial_password, staff)
+            gmail_sender.send_email(to=user.email, subject=subject, html=html, text=text, purpose="user-login-details", label_logistics=False)
         db.commit()
     except IntegrityError:
         db.rollback()
         raise HTTPException(409, "A user with this email, phone or staff record already exists.") from None
+    except gmail_sender.GmailSendError as exc:
+        db.rollback()
+        raise HTTPException(exc.status_code, f"The login details email could not be sent: {exc}") from exc
     logger.info("[AUTH] user_id=%s created with role=%s by admin_id=%s", user.id, role, admin.id)
     return _user_row(user)
