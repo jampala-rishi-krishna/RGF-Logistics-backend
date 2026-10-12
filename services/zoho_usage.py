@@ -161,10 +161,10 @@ def set_time_override(value: datetime | None) -> None:
 
 
 def budget() -> int:
-    try:
-        return max(1, int(os.environ.get("ZOHO_DAILY_BUDGET", "4500")))
-    except ValueError:
-        return 4500
+    # Admin override (Admin > Settings) > ZOHO_DAILY_BUDGET env > 4500. Memory-only lookup: safe on the per-call guard path.
+    from services import app_settings
+
+    return max(1, app_settings.get_int("ZOHO_DAILY_BUDGET"))
 
 
 def org_limit() -> int:
@@ -175,10 +175,9 @@ def org_limit() -> int:
 
 
 def failsafe_so_detail_cap() -> int:
-    try:
-        return max(0, int(os.environ.get("ZOHO_FAILSAFE_SO_DETAIL_CAP", "50")))
-    except ValueError:
-        return 50
+    from services import app_settings
+
+    return max(0, app_settings.get_int("ZOHO_FAILSAFE_SO_DETAIL_CAP"))
 
 
 def _today(now: datetime) -> str:

@@ -42,7 +42,9 @@ def can_act(user: CurrentUser) -> bool:
 
 
 def _dispatch_phone() -> str | None:
-    return os.environ.get("DISPATCH_PHONE", "").strip() or None
+    from services import app_settings
+
+    return app_settings.get_str("DISPATCH_PHONE").strip() or None
 
 
 @router.get("/me")

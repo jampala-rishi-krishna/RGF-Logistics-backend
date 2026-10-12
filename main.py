@@ -117,6 +117,10 @@ async def lifespan(app: FastAPI):
     agent_tools.log_internal_api_config()
     # Restore today's Zoho call total from Neon BEFORE anything may call Zoho, so the counter and the
     # budget guard survive restarts (fails safe if Neon is unreachable). Flushes every 60s and at lifespan shutdown (uvicorn's own SIGTERM handling is untouched).
+    # Admin-editable settings (budget, dispatch phone, ...): one read of the small app_settings table, BEFORE the
+    # Zoho counter starts so the budget guard uses the saved budget. Env values stay in force if this fails.
+    from services import app_settings
+    app_settings.load()
     zoho_usage.start(INSTANCE_ID)
     if not schema_state["ok"]:
         logger.error("[SCHEMA] Startup stopped before cache queries; run 'python -m alembic upgrade head'.")

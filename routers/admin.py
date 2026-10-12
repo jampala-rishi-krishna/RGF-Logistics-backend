@@ -15,7 +15,7 @@ from auth.dependencies import CurrentUser, require_role
 from auth.security import hash_password, password_problem, unusable_password_hash
 from database import get_db
 from models.user import User
-from services import gmail_sender, memory_tables, staff_directory_cache, user_cache, user_invites, zoho_usage
+from services import app_settings, gmail_sender, memory_tables, staff_directory_cache, user_cache, user_invites, zoho_usage
 from services.phone_numbers import ph_phone_digits
 from services.staff_roles import staff_kind
 from services.audit import list_audit_log as _list_audit_log
@@ -39,6 +39,47 @@ def get_zoho_usage():
         "usage_restored_from_db": snap["usage_restored_from_db"],
         "zoho_usage": snap,
     }
+
+
+class SettingBody(BaseModel):
+    value: str | int | None = None
+
+
+@usage_router.get("/settings")
+def list_settings():
+    """The whitelisted non-secret settings with their effective value and where it comes from. Memory only: no DB read."""
+    return {"settings": app_settings.describe()}
+
+
+@usage_router.put("/settings/{key}")
+def save_setting(key: str, body: SettingBody, user: CurrentUser = Depends(require_role("admin")), db: Session = Depends(get_db)):
+    """The only write path of app_settings: one row, only when an admin presses Save."""
+    from services.audit import write_audit_log
+
+    if key not in app_settings.DEFINITIONS:
+        raise HTTPException(404, "Unknown setting.")
+    before = app_settings.describe_one(key)["value"]
+    try:
+        entry = app_settings.save(db, key, body.value, user.email)
+    except app_settings.SettingError as exc:
+        raise HTTPException(422, str(exc)) from exc
+    write_audit_log(actor_id=user.email, action="setting_changed", target_entity="app_setting", target_id=key,
+                    details={"from": before, "to": entry["value"]})
+    return entry
+
+
+@usage_router.delete("/settings/{key}")
+def reset_setting(key: str, user: CurrentUser = Depends(require_role("admin")), db: Session = Depends(get_db)):
+    """Drop an override so the environment value / built-in default applies again. One DELETE, only on an admin's click."""
+    from services.audit import write_audit_log
+
+    if key not in app_settings.DEFINITIONS:
+        raise HTTPException(404, "Unknown setting.")
+    before = app_settings.describe_one(key)["value"]
+    entry = app_settings.clear(db, key)
+    write_audit_log(actor_id=user.email, action="setting_reset", target_entity="app_setting", target_id=key,
+                    details={"from": before, "to": entry["value"]})
+    return entry
 
 
 class TestAssignmentEmailBody(BaseModel):

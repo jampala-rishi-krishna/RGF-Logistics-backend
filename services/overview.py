@@ -97,10 +97,9 @@ def parse_warehouse(value: str | None) -> str | None:
 
 
 def stale_minutes_default() -> int:
-    try:
-        return max(1, int(os.environ.get("DRIVER_STALE_MINUTES", "15")))
-    except ValueError:
-        return 15
+    from services import app_settings
+
+    return max(1, app_settings.get_int("DRIVER_STALE_MINUTES"))
 
 
 # ---- loading --------------------------------------------------------------------------------------------------------
