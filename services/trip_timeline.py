@@ -14,7 +14,7 @@ from sqlalchemy.orm import Session
 from models.sales_order_history import SalesOrderHistory
 from models.trip import FormTemplateItem, InvoiceHandover, InvoiceHandoverItem, SoAcknowledgement, Trip, TripEvent, TripStop
 from models.user import User
-from services import staff_directory_cache
+from services import staff_directory_cache, trip_state
 from services.staff_roles import helper_ids_of
 
 VISIBLE_STATUSES = ("assigned", "manifested", "completed", "delivered")
@@ -149,12 +149,13 @@ def _stop_payload(stop: TripStop, items: list[FormTemplateItem], users: dict[int
     checkout = None
     if stop.checkout_at is not None:
         checkout = {"at": iso(stop.checkout_at), "received_at": iso(stop.checkout_received_at), "by": _by(users, stop.checkout_by_user_id), "gps": stop.checkout_gps, "outcome": stop.outcome, "reason": stop.reason,
-                    "answers": _checkout_answers(stop, items), "template_version": stop.form_template_version}
-    return {"sequence": stop.sequence, "status": stop.status, "checkin": checkin, "checkout": checkout, "minutes_at_stop": minutes_between(stop.checkin_at, stop.checkout_at)}
+                    "invoice_no": trip_state.invoice_no_of(stop), "answers": _checkout_answers(stop, items), "template_version": stop.form_template_version}
+    return {"sequence": stop.sequence, "status": stop.status, "checkin": checkin, "checkout": checkout, "minutes_at_stop": minutes_between(stop.checkin_at, stop.checkout_at),
+            "address_gps": {"lat": stop.lat, "lng": stop.lng} if stop.lat is not None and stop.lng is not None else None}
 
 
 def _handover_item_payload(item: InvoiceHandoverItem, users: dict[int, dict]) -> dict:
-    return {"item_id": item.id, "handed_over": item.handed_over, "crew_note": item.crew_note, "officer_status": item.officer_status, "officer_note": item.officer_note,
+    return {"item_id": item.id, "invoice_no": item.invoice_no, "handed_over": item.handed_over, "crew_note": item.crew_note, "officer_status": item.officer_status, "officer_note": item.officer_note,
             "checked_at": iso(item.officer_checked_at), "checked_by": _by(users, item.officer_user_id), "resolved_at": iso(item.resolved_at)}
 
 
@@ -237,7 +238,7 @@ def build_timeline(db: Session, batch_id: str) -> dict | None:
         handover_block = {"handover_id": handover.id, "status": handover.status, "submitted_at": iso(handover.submitted_at), "submitted_by": _by(users, handover.submitted_by_user_id),
                           "officer": _by(users, handover.officer_user_id), "officer_acknowledged_at": iso(handover.officer_acknowledged_at), "note": handover.note}
     return {
-        "batch": {"batch_id": batch_id, "delivery_date": delivery_date.isoformat() if delivery_date else None, "vehicle": vehicle, "so_count": len(orders), "warehouse": trip.warehouse if trip else None},
+        "batch": {"batch_id": batch_id, "delivery_date": delivery_date.isoformat() if delivery_date else None, "vehicle": vehicle, "so_count": len(orders), "warehouse": trip.warehouse if trip else None, "assigned_at": iso(first.assigned_at) if first is not None else None},
         "trip": trip_block,
         "crew": crew,
         "orders": orders,

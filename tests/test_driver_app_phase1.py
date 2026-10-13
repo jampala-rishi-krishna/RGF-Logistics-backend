@@ -301,3 +301,46 @@ def test_lines_are_untouched_by_the_phase_one_changes(env):
         db.commit()
     batch = env.client.get("/api/driver/today", headers=env.h["driver"]).json()["batches"][0]
     assert batch["total_packs"] == 2.0 and batch["kg_unknown_lines"] == 1 and batch["kg_complete"] is False
+
+
+# ---- Driver Overview additions (Phase 2) --------------------------------------------------------------------------------------
+
+
+def test_overview_live_trips_hardcopies_and_timeline_for_a_departed_stop(env, monkeypatch):
+    from types import SimpleNamespace
+
+    from services import live_gps_store
+
+    seed_started_trip(env)
+    assert post(env, "driver", "/api/driver/batches/B1/orders/s1/check-in", stamp()).status_code == 200
+    assert post(env, "driver", "/api/driver/batches/B1/orders/s1/check-out", stamp(answers={"invoice_dr_number": "0042", "outcome": "Delivered"})).status_code == 200
+    # memory-only live fix of the truck (the plate of the batch)
+    monkeypatch.setattr(live_gps_store, "get", lambda plate: {"lat": 14.6, "lng": 121.0, "heading": 90, "speed_kph": 31, "ignition_on": True, "status": "Active", "gps_time": "2026-10-13T00:00:00+00:00", "last_updated": datetime.now(timezone.utc)} if plate == "DCD8954" else None)
+    live = env.client.get("/api/driver-overview/live", headers=env.h["dispatcher"]).json()
+    assert [(x["plate"], x["drivers"], x["fix"]["lat"]) for x in live["trucks"]] == [("DCD8954", ["Emert Hirondo"], 14.6)]
+    trips = env.client.get("/api/driver-overview/trips", headers=env.h["dispatcher"]).json()
+    assert trips["total"] == 1 and trips["trips"][0]["stops_done"] == 1 and trips["trips"][0]["delivered"] == 1 and trips["trips"][0]["state"] == "on_trip"
+    copies = env.client.get("/api/driver-overview/hardcopies", headers=env.h["dispatcher"]).json()
+    assert [(r["so_number"], r["invoice_no"], r["state"], r["holder"]) for r in copies["rows"]] == [("SO-s1", "0042", "with_driver", "Emert Hirondo")]
+    timeline = env.client.get("/api/driver-overview/trips/B1", headers=env.h["dispatcher"]).json()
+    first = next(o for o in timeline["orders"] if o["so_id"] == "s1")["stop"]
+    assert first["checkout"]["invoice_no"] == "0042" and first["checkin"]["gps"]["lat"] == 14.5 and first["minutes_at_stop"] is not None
+    board = env.client.get("/api/driver-overview/board", headers=env.h["dispatcher"]).json()["rows"]
+    assert "SO-s1" in next(r for r in board if r["staff_id"] == 9)["so_numbers"]  # search by SO number
+    csv_text = env.client.get("/api/driver-overview/export.csv", headers=env.h["dispatcher"]).content.decode("utf-8-sig")
+    assert "invoice_dr_number" in csv_text.splitlines()[0] and ",0042," in csv_text
+    for who in ("driver", "helper", "officer"):
+        assert env.client.get("/api/driver-overview/hardcopies", headers=env.h[who]).status_code == 403
+        assert env.client.get("/api/driver-overview/live", headers=env.h[who]).status_code == 403
+
+
+def test_hardcopies_after_handover_are_with_the_officer_then_missing(env):
+    seed_started_trip(env)
+    for so, number in (("s1", "11"), ("s2", "12")):
+        post(env, "driver", f"/api/driver/batches/B1/orders/{so}/check-in", stamp())
+        post(env, "driver", f"/api/driver/batches/B1/orders/{so}/check-out", stamp(answers={"invoice_dr_number": number, "outcome": "Delivered"}))
+    post(env, "driver", "/api/driver/batches/B1/end", stamp())
+    post(env, "driver", "/api/driver/batches/B1/handover", stamp(officer_user_id=env.officer, items=[{"so_id": "s1", "handed_over": True}, {"so_id": "s2", "handed_over": False, "note": "customer kept it"}]))
+    rows = {r["so_number"]: r for r in env.client.get("/api/driver-overview/hardcopies", headers=env.h["dispatcher"]).json()["rows"]}
+    assert rows["SO-s1"]["state"] == "with_officer" and rows["SO-s1"]["holder"] == "Olivia Officer" and rows["SO-s1"]["invoice_no"] == "11"
+    assert rows["SO-s2"]["state"] == "not_handed_over" and rows["SO-s2"]["holder"] == "Emert Hirondo"

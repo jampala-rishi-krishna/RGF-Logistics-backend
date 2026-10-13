@@ -218,7 +218,7 @@ def test_csv_export_quoting_bom_and_local_times(env):
     assert response.content.startswith(b"\xef\xbb\xbf")
     rows = list(csv.reader(io.StringIO(response.content.decode("utf-8-sig"))))
     header, body = rows[0], rows[1:]
-    assert header == ["date", "batch", "driver", "helpers", "vehicle", "so_number", "customer", "acknowledged_at", "acknowledged_by", "checkin_at", "distance_m", "checkout_at", "outcome", "reason",
+    assert header == ["date", "batch", "driver", "helpers", "vehicle", "so_number", "customer", "acknowledged_at", "acknowledged_by", "arrived_at", "distance_m", "departed_at", "invoice_dr_number", "outcome", "reason",
                       "minutes_at_stop", "trip_started", "trip_ended", "handover_status", "invoice_status", "officer", "validated_at"]
     assert len(body) == 10 and all(len(r) == len(header) for r in body)
     by_so = {r[5]: dict(zip(header, r)) for r in body}
@@ -226,11 +226,11 @@ def test_csv_export_quoting_bom_and_local_times(env):
     assert by_so["SO-X2"]["customer"].startswith("'=")  # formula injection neutralised
     a1 = by_so["SO-A1"]
     assert a1["driver"] == "Emert Hirondo" and a1["helpers"] == "Raymond Roblo" and a1["acknowledged_by"] == "Emert" and a1["distance_m"] == "120.0" and a1["minutes_at_stop"] == "25.0"
-    assert a1["checkin_at"].endswith("+08:00") and a1["checkin_at"].startswith(f"{day.isoformat()}T09:00:00")
+    assert a1["arrived_at"].endswith("+08:00") and a1["arrived_at"].startswith(f"{day.isoformat()}T09:00:00")
     assert a1["outcome"] == "Delivered" and a1["trip_started"].startswith(f"{day.isoformat()}T08:00:00") and a1["trip_ended"] == ""
     b2 = by_so["SO-B2"]
     assert b2["handover_status"] == "pending" and b2["invoice_status"] == "pending" and b2["officer"] == "" and b2["reason"] == "short"
-    assert by_so["SO-C1"]["checkin_at"] == "" and by_so["SO-C1"]["handover_status"] == ""
+    assert by_so["SO-C1"]["arrived_at"] == "" and by_so["SO-C1"]["handover_status"] == ""
     only_driver = env.client.get("/api/driver-overview/export.csv?driver_id=10", headers=env.h["admin"]).content.decode("utf-8-sig")
     assert len(list(csv.reader(io.StringIO(only_driver)))) == 4
 

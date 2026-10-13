@@ -19,7 +19,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from models.trip import FormTemplate, FormTemplateItem, InvoiceHandover, InvoiceHandoverItem, Trip, TripEvent
-from services import day_model, driver_issues, live_sales_order_cache, staff_directory_cache, trip_events, warehouses
+from services import day_model, driver_issues, live_gps_store, live_sales_order_cache, trip_state, staff_directory_cache, trip_events, warehouses
 from services.staff_roles import staff_kind
 from services.trip_events import fail
 from services.trip_timeline import aware, iso, minutes_between, staff_name, users_by_id
@@ -256,7 +256,7 @@ def board(db: Session, day: date, warehouse: str | None, status: str | None, dri
             f = b["facts"]
             trips.append({"batch_id": f.batch_id, "trip_number": numbers_[f.batch_id][0], "trips_on_date": numbers_[f.batch_id][1], "vehicle": f.vehicle, "state": f.state, "state_label": _batch_label(f.state, f), "so_count": f.so_count,
                           "kg": f.kg, "kg_complete": f.kg_complete, "kg_unknown_lines": f.kg_unknown_lines, "packs": f.packs, "acknowledged": f.acknowledged, "stops_done": f.stops_done, "role": role_of(b, staff_id)})
-        rows.append({"staff_id": staff_id, "name": staff.get("name") or f"Staff #{staff_id}", "role": role, "warehouse": str(staff.get("warehouse") or "").upper() or None, "state": state, "state_label": _batch_label(state, best_facts),
+        rows.append({"so_numbers": [so["so_number"] for _, b in entries for so in b["sos"]], "staff_id": staff_id, "name": staff.get("name") or f"Staff #{staff_id}", "role": role, "warehouse": str(staff.get("warehouse") or "").upper() or None, "state": state, "state_label": _batch_label(state, best_facts),
                      "vehicle": ", ".join(dict.fromkeys(str(f.vehicle) for f in facts_list if f.vehicle)) or None, "batch_id": best["batch_id"], "current_stop": best_facts.stops[current.so_id].customer_name if current else None,
                      "progress": {"done": total["stops_done"], "total": total["sos"]}, "acknowledged": total["acknowledged"], "batch_count": len(entries), "kg": total["kg"], "kg_complete": total["kg_complete"], "kg_unknown_lines": total["kg_unknown_lines"], "packs": total["packs"],
                      "trips": trips, "last_action": action, "last_gps_at": iso(gps_event.client_ts) if gps_event else None,
@@ -264,7 +264,7 @@ def board(db: Session, day: date, warehouse: str | None, status: str | None, dri
     busy = set(per_person)
     for staff in _active_idle_drivers(warehouse, None):
         if staff["id"] not in busy:
-            rows.append({"staff_id": staff["id"], "name": staff.get("name") or f"Staff #{staff['id']}", "role": "driver", "warehouse": str(staff.get("warehouse") or "").upper() or None, "state": "idle", "state_label": "Idle",
+            rows.append({"so_numbers": [], "staff_id": staff["id"], "name": staff.get("name") or f"Staff #{staff['id']}", "role": "driver", "warehouse": str(staff.get("warehouse") or "").upper() or None, "state": "idle", "state_label": "Idle",
                          "vehicle": None, "batch_id": None, "current_stop": None, "progress": {"done": 0, "total": 0}, "acknowledged": 0, "batch_count": 0, "kg": 0.0, "kg_complete": False, "kg_unknown_lines": 0, "packs": None, "trips": [],
                          "last_action": None, "last_gps_at": None, "stale": False})
     if warehouse:
@@ -343,6 +343,8 @@ def map_points(db: Session, start: date, end: date, warehouse: str | None, drive
         if trip is not None:
             add("start", trip.started_gps, trip.started_at, batch)
         for stop in batch["stops"]:
+            if stop.lat is not None and stop.lng is not None:  # the planned stop (the address), so check-in / out points can be judged against it
+                add("stop", {"lat": stop.lat, "lng": stop.lng}, None, batch, stop.so_number, stop.customer_name)
             add("checkin", stop.checkin_gps, stop.checkin_at, batch, stop.so_number, stop.customer_name)
             add("checkout", stop.checkout_gps, stop.checkout_at, batch, stop.so_number, stop.customer_name, stop.outcome)
         if trip is not None:
@@ -353,7 +355,7 @@ def map_points(db: Session, start: date, end: date, warehouse: str | None, drive
 
 # ---- CSV export -----------------------------------------------------------------------------------------------------
 
-CSV_COLUMNS = ["date", "batch", "driver", "helpers", "vehicle", "so_number", "customer", "acknowledged_at", "acknowledged_by", "checkin_at", "distance_m", "checkout_at", "outcome", "reason",
+CSV_COLUMNS = ["date", "batch", "driver", "helpers", "vehicle", "so_number", "customer", "acknowledged_at", "acknowledged_by", "arrived_at", "distance_m", "departed_at", "invoice_dr_number", "outcome", "reason",
                "minutes_at_stop", "trip_started", "trip_ended", "handover_status", "invoice_status", "officer", "validated_at"]
 
 
@@ -388,7 +390,7 @@ def export_csv(db: Session, start: date, end: date, warehouse: str | None, drive
                 batch["date"].isoformat(), batch["batch_id"], staff_name(batch["driver_id"]) or "", helpers, batch["vehicle"] or "", so["so_number"], so["customer_name"] or "",
                 _local(ack.acknowledged_at) if ack else "", users.get(ack.by_user_id, {}).get("name", "") if ack else "",
                 _local(stop.checkin_at) if stop else "", "" if not stop or stop.checkin_distance_m is None else stop.checkin_distance_m, _local(stop.checkout_at) if stop else "",
-                (stop.outcome if stop else "") or "", (stop.reason if stop else "") or "", "" if not stop or minutes_between(stop.checkin_at, stop.checkout_at) is None else minutes_between(stop.checkin_at, stop.checkout_at),
+                (trip_state.invoice_no_of(stop) if stop else "") or "", (stop.outcome if stop else "") or "", (stop.reason if stop else "") or "", "" if not stop or minutes_between(stop.checkin_at, stop.checkout_at) is None else minutes_between(stop.checkin_at, stop.checkout_at),
                 _local(trip.started_at) if trip else "", _local(trip.ended_at) if trip else "", handover.status if handover else "", item.officer_status if item else "", officer or "", validated]])
     return b"\xef\xbb\xbf" + buffer.getvalue().encode("utf-8")
 
@@ -497,3 +499,98 @@ def create_template_version(db: Session, kind: str, user_id: int, name: str, ite
     db.commit()
     trip_events.bump()
     return get_template_version(db, kind, created.version)
+
+
+# ---- live trucks (memory only) ------------------------------------------------------------------------------------------
+
+
+def live_positions(db: Session, day: date, warehouse: str | None) -> dict:
+    """Last known Cartrack fix of every truck that has a batch on `day`, from process memory (`live_gps_store`): no Zoho, no Cartrack call,
+    no Neon read beyond the day's batches. The browser then follows the existing WebSocket feed for movement."""
+    data = Data(db, day, day)
+    trucks: dict[str, dict] = {}
+    for batch in data.filtered(warehouse, None):
+        plate = str(batch["vehicle"] or "").strip().upper()
+        if not plate:
+            continue
+        truck = trucks.setdefault(plate, {"plate": plate, "drivers": [], "batch_ids": [], "states": []})
+        name = staff_name(batch["driver_id"]) if batch["driver_id"] is not None else None
+        if name and name not in truck["drivers"]:
+            truck["drivers"].append(name)
+        truck["batch_ids"].append(batch["batch_id"])
+        truck["states"].append(batch["facts"].state)
+    out = []
+    for plate, truck in sorted(trucks.items()):
+        live = live_gps_store.get(plate) or live_gps_store.get(plate.replace(" ", ""))
+        fix = None
+        if live is not None:
+            fix = {"lat": live["lat"], "lng": live["lng"], "heading": live.get("heading") or 0, "speed_kph": live.get("speed_kph") or 0, "ignition_on": live.get("ignition_on"), "status": live.get("status"),
+                   "gps_time": live.get("gps_time"), "last_updated": iso(live.get("last_updated"))}
+        out.append({**truck, "fix": fix})
+    return {"date": day.isoformat(), "generated_at": trip_events.now_utc().isoformat(), "trucks": out}
+
+
+# ---- trips list -----------------------------------------------------------------------------------------------------------
+
+
+def trips_list(db: Session, start: date, end: date, warehouse: str | None, driver_id: int | None) -> dict:
+    """One row per batch in the range with the numbers every screen shares (day_model) plus trip timings."""
+    data = Data(db, start, end)
+    rows = []
+    numbering: dict[int, dict[str, tuple[int, int]]] = {}
+    for staff_id, items in day_model.by_driver([b["facts"] for b in data.filtered(warehouse, driver_id)]).items():
+        numbering[staff_id] = day_model.trip_numbers(items)
+    for batch in sorted(data.filtered(warehouse, driver_id), key=lambda b: (b["date"], b["batch_id"]), reverse=True):
+        f = batch["facts"]
+        trip = batch["trip"]
+        n, total = numbering.get(batch["driver_id"], {}).get(batch["batch_id"], (1, 1))
+        rows.append({"batch_id": batch["batch_id"], "date": batch["date"].isoformat() if batch["date"] else None, "driver_id": batch["driver_id"], "driver_name": staff_name(batch["driver_id"]),
+                     "helpers": [staff_name(h) for h in batch["helper_ids"]], "vehicle": batch["vehicle"], "trip_number": n, "trips_on_date": total, "state": f.state,
+                     "state_label": _batch_label(f.state, f), "so_count": f.so_count, "kg": f.kg, "kg_complete": f.kg_complete, "kg_unknown_lines": f.kg_unknown_lines, "packs": f.packs,
+                     "acknowledged": f.acknowledged, "stops_done": f.stops_done, "delivered": f.delivered, "partial": f.partial, "failed": f.failed,
+                     "started_at": iso(trip.started_at) if trip else None, "ended_at": iso(trip.ended_at) if trip else None,
+                     "trip_minutes": minutes_between(trip.started_at, trip.ended_at) if trip else None, "handover_status": batch["handover"].status if batch["handover"] else None})
+    return {"from": start.isoformat(), "to": end.isoformat(), "total": len(rows), "trips": rows}
+
+
+# ---- hard copies: who holds each signed carbon-copy invoice, and since when ---------------------------------------------------
+
+
+def hardcopies(db: Session, warehouse: str | None, driver_id: int | None) -> dict:
+    """Every invoice hard copy not yet validated as received, ALL dates:
+    with the driver (checked out of a stop, handover not submitted) / with the officer (handed over, not validated) /
+    missing or discrepancy (validated with a problem, not resolved)."""
+    out: list[dict] = []
+    trips = db.execute(select(Trip).where(Trip.status.in_(("on_trip", "returned")))).scalars().all()
+    if trips:
+        from models.trip import TripStop
+
+        for stop in db.execute(select(TripStop).where(TripStop.trip_id.in_([t.id for t in trips]), TripStop.status == "checked_out")).scalars().all():
+            trip = next(t for t in trips if t.id == stop.trip_id)
+            if driver_id is not None and trip.driver_staff_id != driver_id:
+                continue
+            if warehouse and (_staff_warehouse(trip.driver_staff_id) or str(trip.warehouse or "").upper()) != warehouse:
+                continue
+            out.append({"so_number": stop.so_number, "customer_name": stop.customer_name, "invoice_no": trip_state.invoice_no_of(stop), "state": "with_driver", "state_label": "With the driver",
+                        "holder": staff_name(trip.driver_staff_id), "since": iso(stop.checkout_at), "batch_id": trip.batch_id, "delivery_date": trip.delivery_date.isoformat(), "note": None})
+    found = db.execute(select(InvoiceHandoverItem, InvoiceHandover, Trip).join(InvoiceHandover, InvoiceHandover.id == InvoiceHandoverItem.handover_id).join(Trip, Trip.id == InvoiceHandover.trip_id)
+                       .where(InvoiceHandoverItem.officer_status != "received")).all()
+    officer_ids = {h.officer_user_id for _i, h, _t in found if h.officer_user_id is not None}
+    names = users_by_id(db, officer_ids)
+    for item, handover, trip in found:
+        if driver_id is not None and trip.driver_staff_id != driver_id:
+            continue
+        if warehouse and (_staff_warehouse(trip.driver_staff_id) or str(trip.warehouse or "").upper()) != warehouse:
+            continue
+        if item.officer_status == "pending":
+            officer = names.get(handover.officer_user_id, {}).get("name") if handover.officer_user_id is not None else None
+            state, label, holder, since = ("with_officer", "With the officer: to validate", officer or "Logistics officer", handover.submitted_at) if item.handed_over else ("not_handed_over", "Not handed over by the driver", staff_name(trip.driver_staff_id), handover.submitted_at)
+        else:
+            state, label, holder, since = item.officer_status, "Missing" if item.officer_status == "missing" else "Discrepancy", staff_name(trip.driver_staff_id), item.officer_checked_at
+        out.append({"so_number": item.so_number, "customer_name": item.customer_name, "invoice_no": item.invoice_no, "state": state, "state_label": label, "holder": holder, "since": iso(since),
+                    "batch_id": trip.batch_id, "delivery_date": trip.delivery_date.isoformat(), "note": item.officer_note or item.crew_note})
+    out.sort(key=lambda r: r["since"] or "")
+    counts: dict[str, int] = defaultdict(int)
+    for row in out:
+        counts[row["state"]] += 1
+    return {"generated_at": trip_events.now_utc().isoformat(), "total": len(out), "counts": dict(counts), "rows": out}

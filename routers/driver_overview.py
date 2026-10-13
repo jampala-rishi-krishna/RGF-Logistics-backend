@@ -66,6 +66,26 @@ def export_csv(date: str | None = None, from_: str | None = Query(None, alias="f
     return Response(content=content, media_type="text/csv; charset=utf-8", headers={"Content-Disposition": f'attachment; filename="driver-overview-{start}-{end}.csv"', "Cache-Control": "private, no-store"})
 
 
+@router.get("/live")
+def live(date: str | None = None, warehouse: str | None = None, db: Session = Depends(get_db)):
+    """Last known position of each truck with a batch on the date (process memory; the page then follows /ws/fleet). Not cached: cheap, memory only."""
+    start, _ = overview.parse_range(date, None, None)
+    return overview.live_positions(db, start, overview.parse_warehouse(warehouse))
+
+
+@router.get("/trips")
+def trips(date: str | None = None, from_: str | None = Query(None, alias="from"), to: str | None = None, warehouse: str | None = None, driver_id: int | None = None, db: Session = Depends(get_db)):
+    start, end = overview.parse_range(date, from_, to)
+    wh = overview.parse_warehouse(warehouse)
+    return overview.cached("trips", (start, end, wh, driver_id), lambda: overview.trips_list(db, start, end, wh, driver_id))
+
+
+@router.get("/hardcopies")
+def hardcopies(warehouse: str | None = None, driver_id: int | None = None, db: Session = Depends(get_db)):
+    wh = overview.parse_warehouse(warehouse)
+    return overview.cached("hardcopies", (wh, driver_id), lambda: overview.hardcopies(db, wh, driver_id))
+
+
 @router.get("/issues")
 def issues(status: str | None = "open", priority: str | None = None, db: Session = Depends(get_db)):
     """Issues reported from the driver app (open first, urgent first). Read by admin and dispatcher."""
