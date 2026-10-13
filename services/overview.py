@@ -118,7 +118,7 @@ def _batch_dict(facts: day_model.BatchFacts) -> dict:
     stops = sorted(facts.stops.values(), key=lambda s: s.sequence)
     return {
         "batch_id": facts.batch_id, "date": facts.date, "driver_id": facts.driver_id, "helper_ids": facts.helper_ids, "vehicle": facts.vehicle,
-        "sos": [{"so_id": o.so_id, "so_number": o.so_number, "customer_name": o.customer_name} for o in facts.orders],
+        "sos": [{"so_id": o.so_id, "so_number": o.so_number, "customer_name": o.customer_name, "order_type": "TO" if str(o.so_id).startswith("TO:") else "SO"} for o in facts.orders],
         "trip": facts.trip, "acks": facts.acks, "stops": stops, "handover": facts.handover, "items": facts.items, "facts": facts,
     }
 

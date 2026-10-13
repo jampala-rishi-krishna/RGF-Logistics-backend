@@ -200,10 +200,11 @@ def _parse_datetime(value: Any) -> str | None:
         return None
 
 
-def validate_checkout(template: dict, answers: dict | None, storage_enabled: bool, photo_ok: PhotoCheck | None = None, prefill: dict | None = None) -> tuple[list[dict], list[dict]]:
+def validate_checkout(template: dict, answers: dict | None, storage_enabled: bool, photo_ok: PhotoCheck | None = None, prefill: dict | None = None, skip_keys: frozenset = frozenset()) -> tuple[list[dict], list[dict]]:
     """(normalized [{key,label,type,value}], errors[{key,message}]). answers is keyed by item key. Items with a `prefill`
-    take the server's value (so_number, customer, ...) over whatever the phone sent."""
-    items = template["items"]
+    take the server's value (so_number, customer, ...) over whatever the phone sent. `skip_keys` are items not asked for this
+    stop at all (a transfer order has no invoice / DR number: its TO# is the reference)."""
+    items = [item for item in template["items"] if item["key"] not in skip_keys]
     by_key = {item["key"]: item for item in items}
     errors: list[dict] = []
     raw: dict[str, Any] = dict(answers) if isinstance(answers, dict) else {}

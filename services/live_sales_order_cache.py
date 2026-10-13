@@ -11,9 +11,11 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date, datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
+from fastapi import HTTPException
+
 from models.inventory import SalesOrderCache
 from services.zoho_client import ZohoError, fetch_sales_order_detail, fetch_sales_orders, fetch_sales_orders_by_shipment_date
-from services import branches, text_repair, zoho_acquisition
+from services import branches, text_repair, transfer_orders, zoho_acquisition
 
 logger = logging.getLogger("live_sales_order_cache")
 
@@ -302,6 +304,10 @@ def ensure_zoho_data(order_id: str) -> SalesOrderCache | None:
     """Fetch this SO's Zoho detail if we don't already have it cached. Used for capacity
     checks and Confirmed SO's current/future view, which need the assigned set regardless
     of what date window Inventory happened to have cached."""
+    if transfer_orders.is_to_id(order_id):
+        with _state_lock:
+            known = order_id in _assignment_state  # an already-assigned TO is loaded as it is; a fresh one must still be a Draft Mets<->Glacier TO
+        return _ensure_transfer_order(order_id, validate=not known)
     if order_id in _excluded_ids:
         raise branches.BranchNotAllowed(_excluded_ids[order_id])  # no Zoho call for a known excluded order
     epoch = zoho_acquisition.generation()
@@ -313,6 +319,33 @@ def ensure_zoho_data(order_id: str) -> SalesOrderCache | None:
     except ZohoError:
         return None
     return publish_zoho_data(order_id, detail, epoch)
+
+
+def _ensure_transfer_order(order_id: str, *, validate: bool = False) -> SalesOrderCache | None:
+    """A transfer order (id "TO:<zoho id>"): lines come from the TO cache, or one Zoho detail call. Held with the assigned rows so
+    capacity checks, Fleet and the driver app see it exactly like an SO. `validate` is for assigning: Draft + Mets<->Glacier only."""
+    existing = _assigned_zoho.get(order_id)
+    if existing is not None:
+        return existing
+    epoch = zoho_acquisition.generation()
+    try:
+        row = transfer_orders.ensure_row(order_id, validate=validate)
+    except ZohoError:
+        return None
+    except transfer_orders.NotAssignable as exc:
+        raise HTTPException(409, str(exc)) from exc
+    with zoho_acquisition.publication(epoch) as current:
+        if current:
+            _apply_assignment(row)
+            _assigned_zoho[order_id] = row
+    return _apply_assignment(row)
+
+
+def transfer_order_rows(start: date, end: date, *, force: bool = False):
+    """Draft Mets<->Glacier TOs dated in [start, end] with the assignment state applied: (rows, last refreshed, details still loading).
+    force=True is the Hard refresh button - the only way to bypass the TTL."""
+    rows, refreshed, pending = transfer_orders.list_rows(start, end, force=force)
+    return [_apply_assignment(row) for row in rows], refreshed, pending
 
 
 def publish_zoho_data(order_id: str, detail: dict, epoch: int) -> SalesOrderCache:
@@ -864,6 +897,8 @@ def find_cached(order_id: str) -> SalesOrderCache | None:
     row = _assigned_zoho.get(order_id)
     if row is not None:
         return row
+    if transfer_orders.is_to_id(order_id):
+        return None  # a TO is only ever held (with its lines) in _assigned_zoho; ensure_zoho_data loads it
     with _window_lock:
         for _, records in _windows.values():
             if order_id in records:

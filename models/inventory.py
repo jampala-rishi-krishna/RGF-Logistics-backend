@@ -40,3 +40,8 @@ class SalesOrderCache(TimestampedBase):
     assigned_by: Mapped[int | None] = mapped_column(Integer)
     assignment_status: Mapped[str] = mapped_column(String(24), nullable=False, default="unassigned", index=True)
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
+
+    # Plain (unmapped) in-memory defaults: a transfer order is built as one of these rows with order_type "TO" (services/transfer_orders.py).
+    order_type = "SO"
+    source_warehouse = None
+    destination_warehouse = None

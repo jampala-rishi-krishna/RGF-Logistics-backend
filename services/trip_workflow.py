@@ -21,7 +21,7 @@ from sqlalchemy.orm import Session
 from auth.dependencies import CurrentUser
 from models.trip import (KIND_ACKNOWLEDGE, KIND_CHECKOUT, InvoiceHandover, InvoiceHandoverItem, SoAcknowledgement, Trip, TripPhoto, TripStop)
 from models.user import User
-from services import driver_assignments, form_templates, media_storage, stop_order, trip_events, trip_state, warehouses
+from services import day_model, driver_assignments, form_templates, live_sales_order_cache, media_storage, stop_order, transfer_orders, trip_events, trip_state, warehouses
 from services.sales_order_location import address_lines
 from services.trip_events import Actor, fail
 
@@ -313,15 +313,23 @@ def _check_out(ctx: Ctx):
         fail(422, "That delivery form version does not exist.", "validation", [{"key": "template_id", "message": "Unknown form version."}])
     crew = trip_state.crew_of(ctx.rows)
     prefill = driver_assignments._checkout_prefill(template, row, ", ".join(address_lines(row.shipping_address)), crew)
-    answers, errors = form_templates.validate_checkout(template, body.answers, media_storage.is_enabled(), _photo_checker(ctx.db, ctx.batch_id), prefill)
+    is_transfer = transfer_orders.order_type_of(row) == "TO"
+    answers, errors = form_templates.validate_checkout(template, body.answers, media_storage.is_enabled(), _photo_checker(ctx.db, ctx.batch_id), prefill, skip_keys=frozenset({"invoice_dr_number"}) if is_transfer else frozenset())
     if errors:
         fail(422, "Please complete the delivery form.", "validation", errors)
+    if is_transfer and any(item["key"] == "invoice_dr_number" for item in template["items"]):
+        # No invoice for a transfer order: its TO# is stored as the reference, so the timeline, hard copies and CSV show it.
+        answers.append({"key": "invoice_dr_number", "label": "Reference (TO#)", "type": "text", "value": row.salesorder_number or row.id})
     values = {a["key"]: a["value"] for a in answers}
     stop.status = "checked_out"
     stop.checkout_at, stop.checkout_received_at, stop.checkout_by_user_id, stop.checkout_gps = ctx.client_ts, ctx.received_at, ctx.user.id, ctx.gps
     stop.outcome = values.get("outcome") or "Delivered"  # a template without an outcome question records every stop as delivered
     stop.reason = values.get("reason")
     stop.form_template_id, stop.form_template_version, stop.form_answers = template["id"], template["version"], answers
+    if is_transfer and day_model.outcome_bucket(stop.outcome) in ("delivered", "partial") and row.assignment_status == "assigned":
+        # Zoho never reports a transfer order "delivered" (Fleet's sync does that for sales orders), so the crew's check-out completes it.
+        row.assignment_status, row.completed_at = "completed", ctx.received_at
+        live_sales_order_cache.set_assignment(row.id, assignment_status="completed", completed_at=ctx.received_at)
     return Done("checked_out", ctx.so_id, {"template_id": template["id"], "template_version": template["version"], "outcome": stop.outcome, "reason": stop.reason})
 
 

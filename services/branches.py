@@ -112,11 +112,19 @@ def _number_of(row_or_record) -> str:
 def is_allowed(row_or_record) -> bool:
     """True when the order belongs to an allowed branch. A record without a branch id is allowed only
     if its number is RGF/MSSI numbered. Unknown branches are excluded."""
+    if _is_transfer_order(row_or_record):
+        return True  # a transfer order has no branch; it is gated by its own Draft + Mets<->Glacier rule (services/transfer_orders.py)
     record = _record_of(row_or_record)
     branch_id = str(record.get("branch_id") or record.get("location_id") or "").strip()
     if branch_id:
         return branch_id in ALLOWED_BRANCH_IDS
     return _number_is_allowed(_number_of(row_or_record))
+
+
+def _is_transfer_order(row_or_record) -> bool:
+    if isinstance(row_or_record, dict):
+        return str(row_or_record.get("order_type") or "").upper() == "TO"
+    return str(getattr(row_or_record, "order_type", None) or "").upper() == "TO" or str(getattr(row_or_record, "id", "") or "").startswith("TO:")
 
 
 def filter_allowed(records: list) -> list:

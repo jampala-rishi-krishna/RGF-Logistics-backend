@@ -24,6 +24,17 @@ WAREHOUSES = {
 }
 
 
+def warehouse_key(name: str | None) -> str | None:
+    """'mets' / 'glacier' for a warehouse or location NAME (display grouping and per-line SO warehouses only).
+    Transfer orders are matched by Zoho warehouse ID instead - see services/transfer_orders.py."""
+    text = str(name or "").casefold()
+    if "mets" in text:
+        return "mets"
+    if "glacier" in text:
+        return "glacier"
+    return None
+
+
 def list_warehouses() -> list[dict]:
     return [dict(warehouse) for warehouse in WAREHOUSES.values()]
 

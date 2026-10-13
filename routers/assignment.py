@@ -31,6 +31,7 @@ from services.sales_order_location import address_lines
 from services.item_weight import calculate_line_weight_kg, calculate_order_weight_kg
 from services.delivery_status import is_delivered
 from services.staff_roles import helper_ids_of, staff_kind
+from services import transfer_orders
 from services import staff_directory_cache, live_sales_order_cache, memory_tables, vapi_client, vehicle_flags, voice_calls, voice_control, whatsapp_control
 from services.sales_order_history_sync import sync_history_row
 from routers.fleet import invalidate_fleet_cache
@@ -374,6 +375,61 @@ def create_new_driver(body: NewDriverBody, current_user: CurrentUser = Depends(r
     return {"id": staff.get("id"), "name": staff.get("name"), "title": staff.get("title"), "email": staff.get("email"), "phone": staff.get("phone"), "warehouse": staff.get("warehouse")}
 
 
+class BulkUnassignBody(BaseModel):
+    order_ids: list[str]
+
+
+MAX_BULK_UNASSIGN = 200
+
+
+# Registered before "/{salesorder_id}" (like "new-driver") so "bulk-unassign" is not taken for an order id.
+@router.post("/bulk-unassign")
+def bulk_unassign(body: BulkUnassignBody, current_user: CurrentUser = Depends(require_role("admin", "dispatcher")), db: Session = Depends(get_db)):
+    """Confirmed Orders > "Unassign selected": returns every selected SO/TO to its source tab (Inventory / Load Planning). Orders that cannot be
+    unassigned (delivered, completed, on a manifest, not assigned) are skipped and listed with the reason; the rest are done. The email status of
+    the touched batches is cleared: the unassigned orders lose it, and any order left on the same batch goes back to not_sent (its email no longer
+    matches the load)."""
+    ids = list(dict.fromkeys(str(value).strip() for value in body.order_ids if str(value).strip()))
+    if not ids:
+        raise HTTPException(400, "Select at least one order.")
+    if len(ids) > MAX_BULK_UNASSIGN:
+        raise HTTPException(400, f"Select at most {MAX_BULK_UNASSIGN} orders at a time.")
+    unassigned: list[str] = []
+    skipped: list[dict] = []
+    batches: set[str] = set()
+    for order_id in ids:
+        try:
+            order = live_sales_order_cache.find_cached(order_id) or live_sales_order_cache.ensure_zoho_data(order_id)
+        except HTTPException as exc:
+            skipped.append({"id": order_id, "reason": str(exc.detail)})
+            continue
+        if order is None:
+            skipped.append({"id": order_id, "reason": "Order was not found."})
+            continue
+        blocker = _unassign_blocker(order, require_assigned=True)
+        if blocker:
+            skipped.append({"id": order_id, "reason": blocker})
+            continue
+        batch = (live_sales_order_cache.get_assignment(order_id) or {}).get("assignment_batch_id")
+        if batch:
+            batches.add(batch)
+        _apply_unassign(order, db)
+        unassigned.append(order_id)
+    if unassigned:
+        db.commit()
+        _after_unassign()
+        assignment_email_status.clear(unassigned)
+        for batch in batches:
+            left = live_sales_order_cache.ids_for_batch(batch)
+            if left:
+                assignment_email_status.record(left, "not_sent")
+        logger.info("[BULK_UNASSIGN] user=%s unassigned=%d skipped=%d", current_user.email, len(unassigned), len(skipped))
+    count_by_type = {"SO": 0, "TO": 0}
+    for order_id in unassigned:
+        count_by_type[transfer_orders.order_type_of(order_id)] += 1
+    return {"success": True, "unassigned": unassigned, "count": len(unassigned), "count_by_type": count_by_type, "skipped": skipped}
+
+
 @router.get("/email-status")
 def assignment_email_status_route(ids: str = Query(..., description="Comma-separated sales order ids of one assignment")):
     """In-memory status of the assignment email (queued/sent/failed/skipped). No database access."""
@@ -507,10 +563,27 @@ def unassign_order(salesorder_id: str, current_user: CurrentUser = Depends(requi
     order = live_sales_order_cache.find_cached(salesorder_id) or live_sales_order_cache.ensure_zoho_data(salesorder_id)
     if order is None:
         raise HTTPException(404, "Sales order was not found.")
+    blocker = _unassign_blocker(order)
+    if blocker:
+        raise HTTPException(409, blocker)
+    _apply_unassign(order, db)
+    db.commit()
+    _after_unassign()
+    return {"success": True, "salesorder_id": order.id, "assignment_status": "unassigned"}
+
+
+def _unassign_blocker(order, *, require_assigned: bool = False) -> str | None:
+    """Why this order cannot be unassigned (None = it can). Same rule for one order and for a bulk selection, for SO and TO."""
     if order.assignment_status in {"completed", "delivered"} or is_delivered(order.raw_json or {}):
-        raise HTTPException(409, "Delivered or completed sales orders cannot be unassigned.")
+        return "Delivered or completed sales orders cannot be unassigned."
     if order.manifest_id is not None or order.assignment_status == "manifested":
-        raise HTTPException(409, "Sales orders on a confirmed manifest cannot be unassigned.")
+        return "Sales orders on a confirmed manifest cannot be unassigned."
+    if require_assigned and order.assignment_status != "assigned":
+        return "This order is not assigned."
+    return None
+
+
+def _apply_unassign(order, db: Session) -> None:
     order.vehicle_id = None
     order.driver_id = None
     order.route_id = None
@@ -529,13 +602,16 @@ def unassign_order(salesorder_id: str, current_user: CurrentUser = Depends(requi
         assignment_status="unassigned",
     )
     sync_history_row(db, order)
-    db.commit()
+
+
+def _after_unassign() -> None:
     live_sales_order_cache.bump_assignment_generation()
     invalidate_fleet_cache()
     live_sales_order_cache.invalidate_assigned_zoho()
     live_sales_order_cache.invalidate_windows()
     _invalidate_assignment_options_cache()
-    return {"success": True, "salesorder_id": order.id, "assignment_status": "unassigned"}
+
+
 
 
 @optimize_router.post("/vehicle/{vehicle_id}/optimize-stops")

@@ -389,6 +389,17 @@ def fetch_transfer_orders(page: int = 1, per_page: int = 200, sort_column: str |
     return _request_with_feature("GET", "transferorders", params, "reports")
 
 
+def fetch_transfer_orders_page(page: int = 1, per_page: int = 200) -> dict:
+    """One page of the transfer-order list, newest date first (Load Planning's TO tab). Counted as an inventory list call, so
+    the budget guard pauses it like every other list."""
+    return _request_with_feature("GET", "transferorders", {"page": page, "per_page": min(per_page, 200), "sort_column": "date", "sort_order": "D"}, "inventory_list")
+
+
+def fetch_transfer_order_detail(transfer_order_id: str) -> dict:
+    """One transfer order with its line items (quantity_transfer, unit, item_id). Only called for orders being shown/assigned."""
+    return _request_with_feature("GET", f"transferorders/{transfer_order_id}", {}, "inventory_list")
+
+
 def fetch_inventory_adjustments(page: int = 1, per_page: int = 200, sort_column: str | None = None) -> dict:
     params: dict = {"page": page, "per_page": min(per_page, 200)}
     if sort_column:

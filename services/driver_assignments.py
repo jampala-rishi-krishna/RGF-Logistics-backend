@@ -21,7 +21,7 @@ from sqlalchemy.orm import Session
 
 from models.sales_order_history import SalesOrderHistory
 from models.trip import KIND_CHECKOUT
-from services import day_model, delivery_details, form_templates, live_sales_order_cache, staff_directory_cache, stop_order, trip_events, trip_state
+from services import day_model, delivery_details, form_templates, live_sales_order_cache, staff_directory_cache, stop_order, transfer_orders, trip_events, trip_state
 from services.pack_units import is_pack_unit
 from services.text_repair import repair_deep
 from services.sales_order_location import address_lines, address_object, find_city
@@ -123,9 +123,14 @@ def _order_payload(row, lines: list) -> dict:
         {"name": line.name or "-", "quantity": _num(line.quantity), "unit": line.unit, "packs": _num(line.quantity) if is_pack_unit(line.unit) else None, "kg": None if line.weight_kg is None else round(_num(line.weight_kg), 2)}
         for line in lines
     ]
+    order_type = transfer_orders.order_type_of(row)
     return repair_deep({
         "id": row.id,
-        "so_number": row.salesorder_number or row.id,
+        "order_type": order_type,  # "SO" | "TO": a TO is delivered TO its destination warehouse (customer_name / address below)
+        "so_number": row.salesorder_number or row.id,  # the TO# for a TO: its reference (no invoice / DR number is asked for)
+        "order_reference": (row.salesorder_number or row.id) if order_type == "TO" else None,
+        "source_warehouse": getattr(row, "source_warehouse", None) if order_type == "TO" else None,
+        "destination_warehouse": getattr(row, "destination_warehouse", None) if order_type == "TO" else None,
         "customer_name": row.customer_name,
         "contact": None if contact is None else {"person": contact.get("person"), "phone": contact.get("phone"), "attention": contact.get("attention")},
         "address_lines": address,

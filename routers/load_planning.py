@@ -21,7 +21,7 @@ from models.inventory import SalesOrderCache
 from models.sales_order_history import SalesOrderHistory
 from models.sales_order_lines import SalesOrderLine
 from services import branches as branch_service, staff_directory_cache, live_sales_order_cache
-from services import zoho_acquisition
+from services import transfer_orders, zoho_acquisition
 from services.serialize import row_to_dict
 from services.zoho_client import (
     ZohoError,
@@ -215,7 +215,11 @@ _normalized_order_status = live_sales_order_cache._normalized_order_status
 
 
 def _summary(row, db: Session | None = None, *, allow_fetch: bool = True) -> dict:
+    is_transfer = transfer_orders.order_type_of(row) == "TO"
+    if is_transfer and not isinstance(row, SalesOrderHistory):
+        return transfer_orders.summary(row, allow_fetch=allow_fetch)  # a live TO: its own shape (no branch / stock / Zoho SO fields)
     result = row_to_dict(row)
+    result["order_type"] = "TO" if is_transfer else "SO"
     result["id"] = row.id
     if result.get("total") is not None:
         result["total"] = float(result["total"])
@@ -269,7 +273,7 @@ def _summary(row, db: Session | None = None, *, allow_fetch: bool = True) -> dic
             normalized = unit.casefold()
             # The order-level stock saved at assignment time is a point-in-time snapshot that may
             # be wrong; show Zoho's own per-item "Available for Sale" instead.
-            saved_item_stock = ((fetch_item_stock(str(line.item_id), stock_branch) if allow_fetch else cached_item_stock(str(line.item_id), stock_branch)) if line.item_id else None) or {}
+            saved_item_stock = ((fetch_item_stock(str(line.item_id), stock_branch) if allow_fetch else cached_item_stock(str(line.item_id), stock_branch)) if line.item_id and not is_transfer else None) or {}
             if is_pack_unit(normalized): total_packs += quantity
             elif "case" in normalized or "carton" in normalized: total_cases += quantity
             else: total_units += quantity
@@ -297,6 +301,8 @@ def _summary(row, db: Session | None = None, *, allow_fetch: bool = True) -> dic
             products.append({"mets_qty_available_for_sale": item_stock.get("mets"), "glacier_qty_available_for_sale": item_stock.get("glacier"), "line_item_id": item.get("line_item_id"), "item_id": stock_item_id, "name": item.get("name") or item.get("item_description") or item.get("description"), "sku": item.get("sku") or item.get("item_order") or stock_item_id, "quantity": quantity, "unit": unit or None, "total_weight_kg": line_total_weight_kg, "packaging_type": "pack" if is_pack_unit(normalized) else "case" if "case" in normalized or "carton" in normalized else None, "pack_quantity": quantity if is_pack_unit(normalized) else 0, "case_quantity": quantity if "case" in normalized or "carton" in normalized else 0, "quantity_packed": number(item, "quantity_packed"), "quantity_shipped": number(item, "quantity_shipped")})
         total_item_quantity = sum(number(item, "quantity") for item in items)
 
+    if is_transfer:  # a saved (past-dated) TO: the TO fields come from its own columns
+        result.update(transfer_order_number=row.salesorder_number, reason=None, source_warehouse=row.source_warehouse, destination_warehouse=row.destination_warehouse, created_by=None, last_modified_by=None)
     result["product_count"] = len([p for p in products if p["name"]])
     result["products"] = products
     result["pack_count"] = total_packs
@@ -313,6 +319,9 @@ def _total_weight_kg(rows, db: Session) -> tuple[float, bool]:
     complete = True
     for row in rows:
         if isinstance(row, SalesOrderHistory):
+            continue
+        if transfer_orders.order_type_of(row) == "TO" and not (row.raw_json or {}).get("lines_loaded"):
+            complete = False  # a TO whose lines have not loaded yet has an unknown weight, not zero
             continue
         for item in (row.raw_json or {}).get("line_items") or []:
             if not isinstance(item, dict) or item.get("quantity") in (None, ""):
@@ -345,11 +354,12 @@ def list_sales_orders(
     customer: str | None = Query(None),
     delivery_status: str | None = Query(None),
     branches: str | None = Query(None, description="Comma-separated Zoho branch ids; empty = all branches"),
+    order_types: str | None = Query(None, description="Confirmed Orders only (assignment=assigned): comma-separated SO,TO. Absent = SO only."),
     page: int = Query(1, ge=1),
     per_page: int = Query(25, ge=1, le=100),
     db: Session = Depends(get_db),
 ):
-    all_branch_rows = _rows_any_branch(db, date_from, date_to, status, search, assignment, cities, vehicle, customer, delivery_status)
+    all_branch_rows = _rows_any_branch(db, date_from, date_to, status, search, assignment, cities, vehicle, customer, delivery_status, order_types=order_types)
     wanted_branches = branch_service.parse_ids(branches)
     # Per-branch counts of everything the other filters leave, so the Branch filter can show how many
     # orders each option would give. Rows with no branch info (Neon history) are not counted.
@@ -365,12 +375,12 @@ def list_sales_orders(
     page_rows = rows[start_index : start_index + per_page]
     # Never block the list on per-item Zoho calls: serve cached stock/weights (stale is fine),
     # fill only the visible page in the background, and tell the UI to poll while it settles.
-    live_rows = [row for row in page_rows if not isinstance(row, SalesOrderHistory)]
+    live_rows = [row for row in page_rows if not isinstance(row, SalesOrderHistory) and transfer_orders.order_type_of(row) != "TO"]  # a TO has no branch stock
     stock, waiting = stock_for_orders_cached(live_rows) if live_rows else ({}, 0)
     for row in page_rows:
         setattr(row, "_mets_qty_available_for_sale", stock.get(f"{row.id}:mets"))
         setattr(row, "_glacier_qty_available_for_sale", stock.get(f"{row.id}:glacier"))
-    saved_page = [row.id for row in page_rows if isinstance(row, SalesOrderHistory)]
+    saved_page = [row.id for row in page_rows if isinstance(row, SalesOrderHistory) and transfer_orders.order_type_of(row) != "TO"]
     if saved_page:
         # Past-dated orders: queue a background fetch of each line's item so its stock fills in.
         waiting += item_detail_cache.request_refresh(db.execute(select(SalesOrderLine.item_id).where(SalesOrderLine.sales_order_id.in_(saved_page))).scalars().all())
@@ -387,6 +397,71 @@ def list_sales_orders(
         "total_weight_kg": total_weight,
         "weight_complete": weight_complete and waiting == 0,
     }
+
+
+def _to_search_match(row, needle: str) -> bool:
+    raw = row.raw_json or {}
+    text = " ".join(str(x or "") for x in (row.salesorder_number, raw.get("reason"), raw.get("from_warehouse_name"), raw.get("to_warehouse_name"), raw.get("created_by"), raw.get("last_modified_by"), row.vehicle_id)).lower()
+    return needle in text or (len(branch_service.squash_number(needle)) >= 3 and branch_service.squash_number(needle) in branch_service.squash_number(row.salesorder_number))
+
+
+@router.get("/inventory/transfer-orders")
+def list_transfer_orders(
+    date_from: str | None = Query(None),
+    date_to: str | None = Query(None),
+    search: str | None = Query(None),
+    assignment: str | None = Query(None, pattern="^(assigned|unassigned)$"),
+    page: int = Query(1, ge=1),
+    per_page: int = Query(25, ge=1, le=100),
+    db: Session = Depends(get_db),
+):
+    """Draft Mets <-> Glacier transfer orders (Zoho Inventory), dated (= expected delivery) in [date_from, date_to], default today like the SO list.
+    Unassigned (default) comes from the live TO list in memory (Zoho is read on first load / date change after the TTL / Hard refresh only);
+    assignment=assigned lists the TOs already on a truck. Line items (and so kg) load in the background: poll while details_pending."""
+    start = _date(date_from) or datetime.now(PHT).date()
+    end = _date(date_to) or start
+    if end < start:
+        raise HTTPException(400, "date_to must be on or after date_from.")
+    needle = (search or "").strip().lower()
+    waiting = 0
+    if assignment == "assigned":
+        rows = _rows_any_branch(db, date_from, date_to, None, search, "assigned", order_types="TO")
+        refreshed, pending = transfer_orders.last_refreshed_at(), 0
+        total_weight, weight_complete = _total_weight_kg(rows, db)
+    else:
+        try:
+            all_rows, refreshed, pending = live_sales_order_cache.transfer_order_rows(start, end)
+        except ZohoError as exc:
+            raise HTTPException(502, str(exc)) from exc
+        rows = [row for row in all_rows if (row.assignment_status or "unassigned") == "unassigned" and (not needle or _to_search_match(row, needle))]
+        total_weight, weight_complete, missing_items = transfer_orders.total_weight_kg(rows)
+        if missing_items:
+            waiting = item_detail_cache.request_refresh(missing_items)  # package weights still unknown: filled in the background
+    start_index = (page - 1) * per_page
+    page_rows = rows[start_index : start_index + per_page]
+    return {
+        "items": [_summary(row, db, allow_fetch=False) for row in page_rows],
+        "page": page,
+        "per_page": per_page,
+        "total": len(rows),
+        "has_more": start_index + per_page < len(rows),
+        "total_weight_kg": total_weight,
+        "weight_complete": weight_complete and pending == 0,
+        "details_pending": pending > 0 or waiting > 0,
+        "last_refreshed_at": refreshed.isoformat() if refreshed else None,
+        "source": "zoho",
+    }
+
+
+@router.post("/inventory/transfer-orders/refresh")
+def hard_refresh_transfer_orders():
+    """The TO tab's "Hard refresh": re-reads the Draft Mets<->Glacier list from Zoho now, bypassing the cache (it counts toward the Zoho
+    budget; the guard still applies). Line items already known are kept until Zoho reports a newer last_modified_time."""
+    try:
+        records, refreshed = transfer_orders.get_records(force=True)
+    except ZohoError as exc:
+        raise HTTPException(502, str(exc)) from exc
+    return {"refreshed_at": refreshed.isoformat(), "count": len(records)}
 
 
 _address_object = address_object
@@ -422,30 +497,32 @@ def list_sales_order_cities(date_from: str | None = Query(None), date_to: str | 
 def _row_in_branches(row, wanted: set[str]) -> bool:
     """Branch filter. Rows with no branch info (past-dated Neon rows keep no raw_json) are kept only
     when no branch filter is active - they cannot be attributed to a branch."""
-    return not wanted or (branch_service.branch_id_of(row) in wanted)
+    return not wanted or transfer_orders.order_type_of(row) == "TO" or (branch_service.branch_id_of(row) in wanted)  # a TO has no branch: the filter never hides it
 
 
-def _filtered_rows(db: Session, date_from: str | None, date_to: str | None, status: str | None, search: str | None, assignment: str | None = None, cities: str | None = None, vehicle: str | None = None, customer: str | None = None, delivery_status: str | None = None, branches: str | None = None):
+def _filtered_rows(db: Session, date_from: str | None, date_to: str | None, status: str | None, search: str | None, assignment: str | None = None, cities: str | None = None, vehicle: str | None = None, customer: str | None = None, delivery_status: str | None = None, branches: str | None = None, order_types: str | None = None):
     wanted = branch_service.parse_ids(branches)
-    rows = _rows_any_branch(db, date_from, date_to, status, search, assignment, cities, vehicle, customer, delivery_status)
+    rows = _rows_any_branch(db, date_from, date_to, status, search, assignment, cities, vehicle, customer, delivery_status, order_types=order_types)
     return [row for row in rows if _row_in_branches(row, wanted)] if wanted else rows
 
 
-def _rows_any_branch(db: Session, date_from: str | None, date_to: str | None, status: str | None, search: str | None, assignment: str | None = None, cities: str | None = None, vehicle: str | None = None, customer: str | None = None, delivery_status: str | None = None):
+def _rows_any_branch(db: Session, date_from: str | None, date_to: str | None, status: str | None, search: str | None, assignment: str | None = None, cities: str | None = None, vehicle: str | None = None, customer: str | None = None, delivery_status: str | None = None, order_types: str | None = None):
     start = _date(date_from) or datetime.now(PHT).date(); end = _date(date_to) or start
     if end < start: raise HTTPException(400, "date_to must be on or after date_from.")
     today = datetime.now(PHT).date()
+    # Confirmed Orders can show SO and TO together; everything else (and an absent order_types) is sales orders only.
+    types = {part.strip().upper() for part in (order_types if isinstance(order_types, str) else "").split(",") if part.strip()} & {"SO", "TO"} or {"SO"}
     if assignment == "assigned" and end < today:
         # Earlier calendar dates for Confirmed SO: Neon (sales_order_history) only - no
         # Zoho call, no live-cache, no sales_orders_cache read at all.
-        rows = db.execute(select(SalesOrderHistory).where(SalesOrderHistory.expected_shipment_date >= start, SalesOrderHistory.expected_shipment_date <= end).order_by(SalesOrderHistory.expected_shipment_date.desc(), SalesOrderHistory.salesorder_number.desc())).scalars().all()
+        rows = db.execute(select(SalesOrderHistory).where(SalesOrderHistory.expected_shipment_date >= start, SalesOrderHistory.expected_shipment_date <= end, SalesOrderHistory.order_type.in_(sorted(types))).order_by(SalesOrderHistory.expected_shipment_date.desc(), SalesOrderHistory.salesorder_number.desc())).scalars().all()
         # Saved rows keep no branch: hide any that are not RGF/MSSI-numbered (nothing to hide today - checked 2026-10-08).
         rows = branch_service.filter_allowed(rows)
     elif assignment == "assigned":
         # Current/future range for Confirmed SO: the in-memory assigned snapshot (Zoho data,
         # kept warm live; assignment state kept warm from sales_order_history at startup and
         # updated on every mutation). Zero Neon reads.
-        rows = [r for r in live_sales_order_cache.get_assigned_snapshot_ex(block=False)[0] if r.expected_shipment_date is not None and start <= r.expected_shipment_date <= end]
+        rows = [r for r in live_sales_order_cache.get_assigned_snapshot_ex(block=False)[0] if r.expected_shipment_date is not None and start <= r.expected_shipment_date <= end and transfer_orders.order_type_of(r) in types]
     else:
         # Unassigned / no assignment filter, any date: live Zoho window cache (5-min TTL).
         # No sales_orders_cache read/write at all any more.
@@ -466,7 +543,7 @@ def _rows_any_branch(db: Session, date_from: str | None, date_to: str | None, st
             if wanted and wanted != "all" and wanted_label not in {"confirmed", "all except acknowledged"}:
                 return False
             return _is_inventory_acknowledge_candidate(row, acknowledged_ids or set(), ack_overrides)
-        if not wanted or wanted == "all":
+        if not wanted or wanted == "all" or transfer_orders.order_type_of(row) == "TO":  # a TO has no Zoho SO status / acknowledgement to filter on
             return True
         actual_status = _normalized_order_status(getattr(row, "raw_json", None) or {}) or str(row.order_status or "")
         if wanted_label == "all except acknowledged":
@@ -624,7 +701,15 @@ def _confirmed_export_rows(rows: list) -> list[list]:
     return [line for order in rows for line in flatten_confirmed_order(order, lambda item_id, _b=branch_service.branch_id_of(order): stock.get((item_id, _b)), truck_driver)]
 
 
-def _export_payload(db: Session, rows: list, assignment: str | None) -> tuple[list[list], str]:
+def _wanted_order_types(order_types: str | None) -> set[str] | None:
+    wanted = {part.strip().upper() for part in (order_types or "").split(",") if part.strip()}
+    return wanted or None
+
+
+def _export_payload(db: Session, rows: list, assignment: str | None, order_types: str | None = None) -> tuple[list[list], str]:
+    wanted = _wanted_order_types(order_types)
+    if wanted:
+        rows = [row for row in rows if str(getattr(row, "order_type", None) or "SO").upper() in wanted]
     rows = _hydrate_export_rows(db, rows)
     if assignment == "assigned":
         return _confirmed_export_rows(rows), "confirmed"
@@ -632,14 +717,14 @@ def _export_payload(db: Session, rows: list, assignment: str | None) -> tuple[li
 
 
 @router.get("/inventory/export/excel")
-def export_excel(date_from: str | None = Query(None), date_to: str | None = Query(None), status: str | None = Query(None), search: str | None = Query(None), assignment: str | None = Query(None), branches: str | None = Query(None), db: Session = Depends(get_db)):
-    export_rows, layout = _export_payload(db, _filtered_rows(db, date_from, date_to, status, search, assignment, branches=branches), assignment); start = date_from or datetime.now(PHT).date().isoformat(); end = date_to or start; downloaded = _download_stamp(); caption = f"{start} to {end} - {status or 'All'} statuses - Downloaded {downloaded.replace('_', ' ')} PHT"
+def export_excel(date_from: str | None = Query(None), date_to: str | None = Query(None), status: str | None = Query(None), search: str | None = Query(None), assignment: str | None = Query(None), branches: str | None = Query(None), order_types: str | None = Query(None), db: Session = Depends(get_db)):
+    export_rows, layout = _export_payload(db, _filtered_rows(db, date_from, date_to, status, search, assignment, branches=branches, order_types=order_types), assignment, order_types); start = date_from or datetime.now(PHT).date().isoformat(); end = date_to or start; downloaded = _download_stamp(); caption = f"{start} to {end} - {status or 'All'} statuses - Downloaded {downloaded.replace('_', ' ')} PHT"
     return StreamingResponse(make_excel(export_rows, caption, layout), media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", headers={"Content-Disposition": f'attachment; filename="RGF_SalesOrders_{start}_to_{end}_downloaded_{downloaded}.xlsx"'})
 
 
 @router.get("/inventory/export/pdf")
-def export_pdf(date_from: str | None = Query(None), date_to: str | None = Query(None), status: str | None = Query(None), search: str | None = Query(None), assignment: str | None = Query(None), branches: str | None = Query(None), db: Session = Depends(get_db)):
-    export_rows, layout = _export_payload(db, _filtered_rows(db, date_from, date_to, status, search, assignment, branches=branches), assignment); start = date_from or datetime.now(PHT).date().isoformat(); end = date_to or start; downloaded = _download_stamp(); caption = f"{start} to {end} - {status or 'All'} statuses - Downloaded {downloaded.replace('_', ' ')} PHT"
+def export_pdf(date_from: str | None = Query(None), date_to: str | None = Query(None), status: str | None = Query(None), search: str | None = Query(None), assignment: str | None = Query(None), branches: str | None = Query(None), order_types: str | None = Query(None), db: Session = Depends(get_db)):
+    export_rows, layout = _export_payload(db, _filtered_rows(db, date_from, date_to, status, search, assignment, branches=branches, order_types=order_types), assignment, order_types); start = date_from or datetime.now(PHT).date().isoformat(); end = date_to or start; downloaded = _download_stamp(); caption = f"{start} to {end} - {status or 'All'} statuses - Downloaded {downloaded.replace('_', ' ')} PHT"
     return StreamingResponse(make_pdf(export_rows, caption, layout), media_type="application/pdf", headers={"Content-Disposition": f'attachment; filename="RGF_SalesOrders_{start}_to_{end}_downloaded_{downloaded}.pdf"'})
 
 

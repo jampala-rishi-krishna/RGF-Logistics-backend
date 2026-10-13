@@ -504,7 +504,7 @@ def test_alembic_has_a_single_head():
 
     config_obj = Config(os.path.join(os.path.dirname(os.path.dirname(__file__)), "alembic.ini"))
     config_obj.set_main_option("script_location", os.path.join(os.path.dirname(os.path.dirname(__file__)), "migrations"))
-    assert ScriptDirectory.from_config(config_obj).get_heads() == ["r8d9e0f1a2b3"]
+    assert ScriptDirectory.from_config(config_obj).get_heads() == ["s9e0f1a2b3c4"]
 
 
 # ---- roles --------------------------------------------------------------------------------------------------

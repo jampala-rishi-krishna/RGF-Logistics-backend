@@ -48,6 +48,24 @@ def record(ids, status: str, *, error: str | None = None, message_id: str | None
         logger.exception("[ASSIGN_EMAIL] could not persist email status %s for %s", status, ids)
 
 
+def clear(ids) -> None:
+    """Forget the email status (and the batch id) of orders that were just unassigned (bulk unassign): no status, no error, no batch.
+    In memory at once, persisted in one UPDATE like record()."""
+    ids = [str(i) for i in dict.fromkeys(ids) if i]
+    if not ids:
+        return
+    fields = {"email_status": None, "email_error": None, "email_sent_at": None, "email_message_id": None, "assignment_batch_id": None}
+    for order_id in ids:
+        live_sales_order_cache.set_assignment(order_id, **fields)
+    try:
+        from models.sales_order_history import SalesOrderHistory
+        with _open_session() as db:
+            db.execute(update(SalesOrderHistory).where(SalesOrderHistory.id.in_(ids)).values(**fields))
+            db.commit()
+    except Exception:
+        logger.exception("[ASSIGN_EMAIL] could not clear email status for %s", ids)
+
+
 def summarize(ids) -> dict:
     """Aggregate the in-memory status of a batch (no database access)."""
     states = [live_sales_order_cache.get_assignment(str(i)) or {} for i in ids]

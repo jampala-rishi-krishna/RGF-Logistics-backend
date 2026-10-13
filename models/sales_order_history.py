@@ -66,3 +66,8 @@ class SalesOrderHistory(TimestampedBase):
     # assignment, only when that detail was already cached. NULL = not cached at assign time. Never fetched from Zoho for this.
     delivery_notes: Mapped[str | None] = mapped_column(Text)
     delivery_contact: Mapped[dict | None] = mapped_column(JSONB)  # {"person", "phone", "attention"}
+    # Transfer orders (migration s9e0f1a2b3c4): 'SO' (default, every older row) or 'TO'. A TO row has id 'TO:<zoho id>', the TO# in
+    # salesorder_number and the destination warehouse as customer_name.
+    order_type: Mapped[str] = mapped_column(String(4), nullable=False, default="SO", server_default="SO")
+    source_warehouse: Mapped[str | None] = mapped_column(Text)
+    destination_warehouse: Mapped[str | None] = mapped_column(Text)
