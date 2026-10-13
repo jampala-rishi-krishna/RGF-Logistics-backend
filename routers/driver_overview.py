@@ -11,7 +11,7 @@ from sqlalchemy.orm import Session
 
 from auth.dependencies import CurrentUser, require_role
 from database import get_db
-from services import overview
+from services import overview, reconcile
 from services.trip_events import fail
 from services.trip_timeline import build_timeline
 
@@ -64,6 +64,14 @@ def export_csv(date: str | None = None, from_: str | None = Query(None, alias="f
     wh = overview.parse_warehouse(warehouse)
     content = overview.cached("csv", (start, end, wh, driver_id), lambda: overview.export_csv(db, start, end, wh, driver_id))
     return Response(content=content, media_type="text/csv; charset=utf-8", headers={"Content-Disposition": f'attachment; filename="driver-overview-{start}-{end}.csv"', "Cache-Control": "private, no-store"})
+
+
+@router.get("/reconcile")
+def reconcile_day(date: str | None = None, source: str = Query("auto", pattern="^(auto|memory|neon)$"), user: CurrentUser = Depends(require_role("admin")), db: Session = Depends(get_db)):
+    """Admin only. For one date: Load Planning Confirmed SO vs the Driver App vs Driver Overview, per person (SOs, kg, packs, batches).
+    Never cached, never calls Zoho."""
+    day, _ = overview.parse_range(date, None, None)
+    return reconcile.reconcile(db, day, source)
 
 
 # ---- templates (dispatcher reads, admin edits) -------------------------------------------------------------------------

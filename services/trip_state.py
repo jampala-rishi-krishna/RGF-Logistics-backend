@@ -13,7 +13,7 @@ from sqlalchemy.orm import Session
 
 from models.trip import InvoiceHandover, SoAcknowledgement, Trip, TripStop
 from models.user import User
-from services import staff_directory_cache
+from services import day_model, staff_directory_cache
 from services.staff_roles import helper_ids_of
 
 
@@ -113,8 +113,8 @@ def summarize(batch_id: str, rows: list, data: TripData, *, can_act: bool, order
     status = trip.status if trip else "pending"
     acks = data.acks.get(trip.id, {}) if trip else {}
     stops = data.stops.get(trip.id, {}) if trip else {}
-    acknowledged = sum(1 for row in rows if row.id in acks)
-    stops_done = sum(1 for stop in stops.values() if stop.status == "checked_out")
+    prog = day_model.progress([row.id for row in rows], trip, acks, stops)  # the ONE counting implementation
+    acknowledged, stops_done = prog["acknowledged"], prog["stops_done"]
     current = next((stop for stop in stops.values() if stop.status == "checked_in"), None)
     handover = data.handovers.get(batch_id)
 

@@ -8,6 +8,8 @@ import time
 
 import httpx
 
+from services import text_repair
+
 logger = logging.getLogger("staff_directory_cache")
 
 STAFF_DIRECTORY_FEED_URL = "https://rareglobalfood.app.n8n.cloud/webhook/logistics-staff-directory"
@@ -44,8 +46,8 @@ def _n8n_api_key() -> str:
 
 
 def _to_staff(row: dict) -> dict:
-    """Same mapping as the '[LOGISTICS] Get Staff Directory' Format Staff Feed node."""
-    return {
+    """Same mapping as the '[LOGISTICS] Get Staff Directory' Format Staff Feed node (text repaired if it arrived mis-decoded)."""
+    return text_repair.repair_deep({
         "id": row.get("id"),
         "name": row.get("staffName") or row.get("name"),
         "title": row.get("title"),
@@ -54,7 +56,7 @@ def _to_staff(row: dict) -> dict:
         "phone": row.get("contactNumber") or row.get("phone"),
         "role": row.get("role"),
         "active": True,
-    }
+    })
 
 
 def _rest_rows(table_id: str) -> list[dict]:

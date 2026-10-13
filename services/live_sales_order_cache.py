@@ -13,7 +13,7 @@ from zoneinfo import ZoneInfo
 
 from models.inventory import SalesOrderCache
 from services.zoho_client import ZohoError, fetch_sales_order_detail, fetch_sales_orders, fetch_sales_orders_by_shipment_date
-from services import branches, zoho_acquisition
+from services import branches, text_repair, zoho_acquisition
 
 logger = logging.getLogger("live_sales_order_cache")
 
@@ -135,32 +135,10 @@ def is_on_hold(row_or_record) -> bool:
     return _squash(_normalized_order_status(record) or getattr(row_or_record, "order_status", "")) == "onhold"
 
 
-# Zoho sometimes hands back text whose UTF-8 bytes were decoded as Windows-1252 ("Denny’s" arrives
-# as "Dennyâ€™s"). Undo that at ingestion so every screen, export and email reads correctly.
-_MOJIBAKE = re.compile("[\u00c2\u00c3\u00e2][\u0080-\u00bf\u0152\u0153\u0160\u0161\u0178\u017d\u017e\u0192\u02c6\u02dc\u2013-\u203a\u20ac\u2122]")
-
-
-def repair_text(value: str) -> str:
-    if not _MOJIBAKE.search(value):
-        return value
-    for codec in ("cp1252", "latin-1"):
-        try:
-            fixed = value.encode(codec).decode("utf-8")
-        except (UnicodeEncodeError, UnicodeDecodeError):
-            continue
-        if fixed != value:
-            return fixed
-    return value
-
-
-def repair_deep(value):
-    if isinstance(value, str):
-        return repair_text(value)
-    if isinstance(value, list):
-        return [repair_deep(item) for item in value]
-    if isinstance(value, dict):
-        return {key: repair_deep(item) for key, item in value.items()}
-    return value
+# Zoho sometimes hands back text whose UTF-8 bytes were decoded as Windows-1252; undone at ingestion (services/text_repair.py).
+_MOJIBAKE = text_repair._MOJIBAKE
+repair_text = text_repair.repair_text
+repair_deep = text_repair.repair_deep
 
 
 def record_payload(record: dict) -> dict:

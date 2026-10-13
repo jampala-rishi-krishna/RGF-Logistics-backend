@@ -10,28 +10,27 @@ counter) or after TTL_SECONDS, so a phone polling every 60 seconds does not hit 
 """
 from __future__ import annotations
 
-import hashlib
 import threading
 import time
 from collections import defaultdict
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, datetime, timedelta
 from zoneinfo import ZoneInfo
 
-from sqlalchemy import String, cast, or_, select
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from models.sales_order_history import SalesOrderHistory
-from models.sales_order_lines import SalesOrderLine
 from models.trip import KIND_CHECKOUT
-from services import delivery_details, form_templates, live_sales_order_cache, staff_directory_cache, stop_order, trip_events, trip_state
+from services import day_model, delivery_details, form_templates, live_sales_order_cache, staff_directory_cache, stop_order, trip_events, trip_state
+from services.pack_units import is_pack_unit
+from services.text_repair import repair_deep
 from services.sales_order_location import address_lines, address_object, find_city
 from services.staff_roles import helper_ids_of
 
 MANILA = ZoneInfo("Asia/Manila")
 TTL_SECONDS = 300
 MAX_RANGE_DAYS = 366
-# Everything except never-assigned / unassigned / released orders is part of a driver's day or history.
-VISIBLE_STATUSES = ("assigned", "manifested", "completed", "delivered")
+VISIBLE_STATUSES = day_model.VISIBLE_STATUSES
 _EMAIL_PRIORITY = ("failed", "queued", "sent", "skipped")
 _STATUS_PRIORITY = ("assigned", "manifested", "completed", "delivered")  # least -> most advanced
 
@@ -57,42 +56,15 @@ def _num(value) -> float:
         return 0.0
 
 
-def _is_pack(unit: str | None) -> bool:
-    return "pack" in str(unit or "").casefold()
-
-
-def _aware(value: datetime | None) -> datetime | None:
-    if value is None:
-        return None
-    return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
-
-
-def legacy_batch_key(row) -> str:
-    """Stable id for an assignment saved before assignment_batch_id existed: same truck + same assigned_at."""
-    stamp = int(_aware(row.assigned_at).timestamp()) if row.assigned_at else 0
-    return f"legacy-{stamp}-{hashlib.sha1(str(row.vehicle_id or '').encode('utf-8')).hexdigest()[:8]}"
-
-
-def batch_key(row) -> str:
-    return row.assignment_batch_id or legacy_batch_key(row)
-
-
-def _sort_key(row):
-    assigned = _aware(row.assigned_at)
-    return (assigned.timestamp() if assigned else 0.0, str(row.salesorder_number or row.id))
+# One implementation of batch identity / crew membership, shared with Driver Overview (services/day_model.py).
+legacy_batch_key = day_model.legacy_batch_key
+batch_key = day_model.batch_key
+_sort_key = day_model.sort_key
+is_crew = day_model.is_crew
+_crew_clause = day_model.crew_clause
 
 
 # ---- queries (all scoped by driver id) ---------------------------------------------------------------------
-
-
-def is_crew(row, staff_id: int) -> bool:
-    """Exact membership: the row's driver or one of its helpers (never a substring match: id 1 is not id 17)."""
-    return staff_id == row.driver_id or staff_id in (row.helper_ids or [])
-
-
-def _crew_clause(staff_id: int):
-    # Cheap SQL prefilter (substring of the JSON text); the exact test is is_crew() in Python.
-    return or_(SalesOrderHistory.driver_id == staff_id, cast(SalesOrderHistory.helper_ids, String).contains(str(staff_id)))
 
 
 def rows_for_driver(db: Session, driver_id: int, start: date, end: date) -> list:
@@ -123,12 +95,7 @@ def rows_for_batch(db: Session, driver_id: int, batch_id: str) -> list:
     return [row for row in rows if is_crew(row, driver_id)]
 
 
-def _lines_by_order(db: Session, order_ids: list[str]) -> dict[str, list]:
-    grouped: dict[str, list] = defaultdict(list)
-    if order_ids:
-        for line in db.execute(select(SalesOrderLine).where(SalesOrderLine.sales_order_id.in_(order_ids)).order_by(SalesOrderLine.id)).scalars().all():
-            grouped[line.sales_order_id].append(line)
-    return grouped
+_lines_by_order = day_model.lines_by_order
 
 
 # ---- shaping ------------------------------------------------------------------------------------------------
@@ -150,11 +117,12 @@ def _order_payload(row, lines: list) -> dict:
                 notes = notes if notes is not None else live_notes
     address = address_lines(row.shipping_address)
     shipping = address_object(row.shipping_address)
+    totals_ = day_model.order_totals(lines)
     out_lines = [
-        {"name": line.name or "-", "quantity": _num(line.quantity), "unit": line.unit, "packs": _num(line.quantity) if _is_pack(line.unit) else 0.0, "kg": None if line.weight_kg is None else round(_num(line.weight_kg), 2)}
+        {"name": line.name or "-", "quantity": _num(line.quantity), "unit": line.unit, "packs": _num(line.quantity) if is_pack_unit(line.unit) else None, "kg": None if line.weight_kg is None else round(_num(line.weight_kg), 2)}
         for line in lines
     ]
-    return {
+    return repair_deep({
         "id": row.id,
         "so_number": row.salesorder_number or row.id,
         "customer_name": row.customer_name,
@@ -164,14 +132,15 @@ def _order_payload(row, lines: list) -> dict:
         "area": find_city(shipping),
         "shipment_date": row.expected_shipment_date.isoformat() if row.expected_shipment_date else None,
         "lines": out_lines,
-        "total_kg": round(sum(line["kg"] or 0.0 for line in out_lines), 2),
-        "total_packs": round(sum(line["packs"] for line in out_lines), 2),
+        "total_kg": totals_["kg"],
+        "kg_complete": totals_["kg_complete"],
+        "total_packs": totals_["packs"],  # None = no pack-unit line on this order (unknown, shown as "-"), never 0
         "notes": notes,
         "order_status": row.order_status,
         "shipment_status": row.shipment_status,
         "delivery_status": row.delivery_status,
         "details_loading": contact is None,
-    }
+    })
 
 
 def _checkout_prefill(template: dict | None, row, address_text: str, crew: list[dict]) -> dict:
@@ -201,6 +170,7 @@ def _batch_payload(rows: list, lines: dict[str, list], driver_id: int, *, with_o
     orders = [_order_payload(row, lines.get(row.id, [])) for row in rows]
     crew = trip_state.crew_of(rows)
     trip_summary, facts = trip_state.summarize(batch_id, rows, data, can_act=can_act, order_source_optimized=source == "optimized")
+    shared = day_model.facts_for_rows(batch_id, rows, lines, data)  # THE numbers (same function Driver Overview uses)
     helpers = [_person(hid) for hid in helper_ids_of(first.driver_id if first.driver_id is not None else driver_id, first.helper_ids)]
     emails = [row.email_status for row in rows if row.email_status]
     statuses = {row.assignment_status for row in rows}
@@ -208,9 +178,12 @@ def _batch_payload(rows: list, lines: dict[str, list], driver_id: int, *, with_o
         "batch_id": batch_id,
         "delivery_date": first.expected_shipment_date.isoformat() if first.expected_shipment_date else None,
         "vehicle": first.vehicle_id,
-        "so_count": len(rows),
-        "total_kg": round(sum(order["total_kg"] for order in orders), 2),
-        "total_packs": round(sum(order["total_packs"] for order in orders), 2),
+        "so_count": shared.so_count,
+        "total_kg": shared.kg,
+        "kg_complete": shared.kg_complete,
+        "total_packs": shared.packs,  # None = unknown (no pack-unit line), shown as "-"
+        "assigned_at": trip_state.iso(first.assigned_at),
+        "progress": {"acknowledged": shared.acknowledged, "stops_done": shared.stops_done, "delivered": shared.delivered, "partial": shared.partial, "failed": shared.failed},
         "first_area": orders[0]["area"],
         "last_area": orders[-1]["area"],
         "departure_time": None,  # not recorded anywhere yet
@@ -239,7 +212,13 @@ def build_batches(db: Session, rows: list, driver_id: int, *, with_orders: bool 
     data = trip_state.load(db, list(grouped), names=with_orders)
     template = form_templates.load_active(db, KIND_CHECKOUT) if with_orders else None
     batches = [_batch_payload(group, lines, driver_id, with_orders=with_orders, data=data, can_act=can_act, checkout_template=template) for group in grouped.values()]
-    return sorted(batches, key=lambda b: (b["delivery_date"] or "", b["batch_id"]), reverse=True)
+    # Two Assign clicks to the same truck on the same day are two real trips: numbered in assignment order, never merged.
+    facts_by_batch = {batch_id: day_model.facts_for_rows(batch_id, group, lines, data) for batch_id, group in grouped.items()}
+    numbering = day_model.trip_numbers(list(facts_by_batch.values()))
+    for batch in batches:
+        batch["trip_number"], batch["trips_on_date"] = numbering[batch["batch_id"]]
+    batches.sort(key=lambda b: (b["trip_number"], b["batch_id"]))
+    return sorted(batches, key=lambda b: b["delivery_date"] or "", reverse=True)  # newest day first, Trip 1 before Trip 2 (stable)
 
 
 # ---- public API used by the router --------------------------------------------------------------------------

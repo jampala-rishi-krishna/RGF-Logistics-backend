@@ -34,6 +34,7 @@ from services.zoho_so_lock import lock_salesorder, lock_status_from_record
 from services.inventory_exports import confirmed_item_ids, flatten_confirmed_order, flatten_order, make_excel, make_pdf
 from services.openai_client import generate_sales_order_email_draft
 from services.item_weight import calculate_line_weight_kg
+from services.pack_units import is_pack_unit
 from services.delivery_status import is_delivered, sales_order_delivery_status
 from services import item_detail_cache
 from services.warehouse_stock import cached_item_stock, fetch_item_stock, stock_branch_id, stock_for_orders_cached
@@ -269,10 +270,10 @@ def _summary(row, db: Session | None = None, *, allow_fetch: bool = True) -> dic
             # The order-level stock saved at assignment time is a point-in-time snapshot that may
             # be wrong; show Zoho's own per-item "Available for Sale" instead.
             saved_item_stock = ((fetch_item_stock(str(line.item_id), stock_branch) if allow_fetch else cached_item_stock(str(line.item_id), stock_branch)) if line.item_id else None) or {}
-            if "pack" in normalized: total_packs += quantity
+            if is_pack_unit(normalized): total_packs += quantity
             elif "case" in normalized or "carton" in normalized: total_cases += quantity
             else: total_units += quantity
-            products.append({"mets_qty_available_for_sale": saved_item_stock.get("mets"), "glacier_qty_available_for_sale": saved_item_stock.get("glacier"), "line_item_id": None, "item_id": line.item_id, "name": line.name, "sku": line.sku, "quantity": quantity, "unit": unit or None, "total_weight_kg": line.weight_kg, "packaging_type": "pack" if "pack" in normalized else "case" if "case" in normalized or "carton" in normalized else None, "pack_quantity": quantity if "pack" in normalized else 0, "case_quantity": quantity if "case" in normalized or "carton" in normalized else 0, "quantity_packed": 0.0, "quantity_shipped": float(line.quantity_shipped or 0)})
+            products.append({"mets_qty_available_for_sale": saved_item_stock.get("mets"), "glacier_qty_available_for_sale": saved_item_stock.get("glacier"), "line_item_id": None, "item_id": line.item_id, "name": line.name, "sku": line.sku, "quantity": quantity, "unit": unit or None, "total_weight_kg": line.weight_kg, "packaging_type": "pack" if is_pack_unit(normalized) else "case" if "case" in normalized or "carton" in normalized else None, "pack_quantity": quantity if is_pack_unit(normalized) else 0, "case_quantity": quantity if "case" in normalized or "carton" in normalized else 0, "quantity_packed": 0.0, "quantity_shipped": float(line.quantity_shipped or 0)})
         total_item_quantity = sum(float(line.quantity or 0) for line in lines)
     else:
         items = (row.raw_json or {}).get("line_items") or []
@@ -287,13 +288,13 @@ def _summary(row, db: Session | None = None, *, allow_fetch: bool = True) -> dic
             quantity = number(item, "quantity")
             unit = str(item.get("unit") or item.get("unit_name") or item.get("usage_unit") or "").strip()
             normalized = unit.casefold()
-            if "pack" in normalized: total_packs += quantity
+            if is_pack_unit(normalized): total_packs += quantity
             elif "case" in normalized or "carton" in normalized: total_cases += quantity
             else: total_units += quantity
             line_total_weight_kg = item_weight_kg(item, row.salesorder_number or row.id)
             stock_item_id = _line_item_id(item)
             item_stock = ((fetch_item_stock(stock_item_id, stock_branch) if allow_fetch else cached_item_stock(stock_item_id, stock_branch)) if stock_item_id else None) or {}
-            products.append({"mets_qty_available_for_sale": item_stock.get("mets"), "glacier_qty_available_for_sale": item_stock.get("glacier"), "line_item_id": item.get("line_item_id"), "item_id": stock_item_id, "name": item.get("name") or item.get("item_description") or item.get("description"), "sku": item.get("sku") or item.get("item_order") or stock_item_id, "quantity": quantity, "unit": unit or None, "total_weight_kg": line_total_weight_kg, "packaging_type": "pack" if "pack" in normalized else "case" if "case" in normalized or "carton" in normalized else None, "pack_quantity": quantity if "pack" in normalized else 0, "case_quantity": quantity if "case" in normalized or "carton" in normalized else 0, "quantity_packed": number(item, "quantity_packed"), "quantity_shipped": number(item, "quantity_shipped")})
+            products.append({"mets_qty_available_for_sale": item_stock.get("mets"), "glacier_qty_available_for_sale": item_stock.get("glacier"), "line_item_id": item.get("line_item_id"), "item_id": stock_item_id, "name": item.get("name") or item.get("item_description") or item.get("description"), "sku": item.get("sku") or item.get("item_order") or stock_item_id, "quantity": quantity, "unit": unit or None, "total_weight_kg": line_total_weight_kg, "packaging_type": "pack" if is_pack_unit(normalized) else "case" if "case" in normalized or "carton" in normalized else None, "pack_quantity": quantity if is_pack_unit(normalized) else 0, "case_quantity": quantity if "case" in normalized or "carton" in normalized else 0, "quantity_packed": number(item, "quantity_packed"), "quantity_shipped": number(item, "quantity_shipped")})
         total_item_quantity = sum(number(item, "quantity") for item in items)
 
     result["product_count"] = len([p for p in products if p["name"]])
