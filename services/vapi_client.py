@@ -91,10 +91,12 @@ def is_valid_ph_phone(formatted: str) -> bool:
 def so_details_text(sales_orders: list[dict]) -> str:
     if not sales_orders:
         return "No sales order detail available."
-    return ". ".join(
-        f"{s.get('soNumber') or ''} for {s.get('clientName') or ''}, {s.get('totalKgs') or ''} kilograms, {s.get('totalPacks') or ''} packs"
-        for s in sales_orders
-    )
+    def one(s: dict) -> str:
+        kg = f"{'at least ' if s.get('totalKgsIncomplete') else ''}{s.get('totalKgs') or ''} kilograms"
+        packs = f", {s.get('totalPacks')} packs" if s.get("totalPacks") is not None else ""  # no pack lines: say nothing, never "0 packs"
+        return f"{s.get('soNumber') or ''} for {s.get('clientName') or ''}, {kg}{packs}"
+
+    return ". ".join(one(s) for s in sales_orders)
 
 
 def build_driver_call(*, driver_name: str, driver_phone: str, truck_plate: str, warehouse: str, sales_orders: list[dict], metadata: dict) -> dict:

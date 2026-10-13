@@ -134,6 +134,7 @@ def _order_payload(row, lines: list) -> dict:
         "lines": out_lines,
         "total_kg": totals_["kg"],
         "kg_complete": totals_["kg_complete"],
+        "kg_unknown_lines": totals_["kg_unknown_lines"],
         "total_packs": totals_["packs"],  # None = no pack-unit line on this order (unknown, shown as "-"), never 0
         "notes": notes,
         "order_status": row.order_status,
@@ -181,6 +182,7 @@ def _batch_payload(rows: list, lines: dict[str, list], driver_id: int, *, with_o
         "so_count": shared.so_count,
         "total_kg": shared.kg,
         "kg_complete": shared.kg_complete,
+        "kg_unknown_lines": shared.kg_unknown_lines,
         "total_packs": shared.packs,  # None = unknown (no pack-unit line), shown as "-"
         "assigned_at": trip_state.iso(first.assigned_at),
         "progress": {"acknowledged": shared.acknowledged, "stops_done": shared.stops_done, "delivered": shared.delivered, "partial": shared.partial, "failed": shared.failed},

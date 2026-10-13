@@ -80,6 +80,7 @@ def order_totals(lines: list) -> dict:
     return {
         "kg": round(sum(_num(line.weight_kg) for line in known), 2),
         "kg_complete": bool(lines) and len(known) == len(lines),
+        "kg_unknown_lines": len(lines) - len(known),
         "packs": pack_total(lines),
     }
 
@@ -95,6 +96,7 @@ class OrderFacts:
     kg: float
     kg_complete: bool
     packs: float | None
+    kg_unknown_lines: int = 0
 
 
 @dataclass
@@ -133,6 +135,10 @@ class BatchFacts:
     @property
     def kg_complete(self) -> bool:
         return bool(self.orders) and all(order.kg_complete for order in self.orders)
+
+    @property
+    def kg_unknown_lines(self) -> int:
+        return sum(order.kg_unknown_lines for order in self.orders)
 
     @property
     def packs(self) -> float | None:
@@ -175,7 +181,7 @@ def facts_for_rows(batch_id: str, rows: list, lines_by_order: dict[str, list], d
         orders = []
         for row in rows:
             totals_ = order_totals(lines_by_order.get(row.id, []))
-            orders.append(OrderFacts(row.id, row.salesorder_number or row.id, row.customer_name, totals_["kg"], totals_["kg_complete"], totals_["packs"]))
+            orders.append(OrderFacts(row.id, row.salesorder_number or row.id, row.customer_name, totals_["kg"], totals_["kg_complete"], totals_["packs"], totals_["kg_unknown_lines"]))
         driver_id = trip.driver_staff_id if trip is not None else first.driver_id
         helpers = helper_ids_of(driver_id, trip.helper_staff_ids if trip is not None else first.helper_ids)
         vehicle = trip.vehicle if trip is not None else first.vehicle_id
@@ -259,6 +265,7 @@ def totals(batches: list[BatchFacts]) -> dict:
         "sos": sum(b.so_count for b in batches),
         "kg": round(sum(b.kg for b in batches), 2),
         "kg_complete": bool(batches) and all(b.kg_complete for b in batches),
+        "kg_unknown_lines": sum(b.kg_unknown_lines for b in batches),
         "packs": round(sum(packs), 2) if packs else None,
         "acknowledged": sum(b.acknowledged for b in batches),
         "stops_done": sum(b.stops_done for b in batches),

@@ -25,7 +25,8 @@ from models.vehicle import Vehicle
 from models.inventory import SalesOrderCache
 from services import optimizer
 from services.rarechain_email_template import render_rarechain_email
-from services import gmail_sender, assignment_email_status
+from services import gmail_sender, assignment_email_status, weight_display
+from services.pack_units import pack_total
 from services.sales_order_location import address_lines
 from services.item_weight import calculate_line_weight_kg, calculate_order_weight_kg
 from services.delivery_status import is_delivered
@@ -205,15 +206,45 @@ class AssignmentEmailBody(AssignmentBody):
 ASSIGNMENT_TABLE_COLUMNS = ("SO number", "Client", "Total kg", "Total Packs", "Shipping Address")
 
 
+def _line_items(order) -> list[dict]:
+    return [item for item in (order.raw_json or {}).get("line_items", []) if isinstance(item, dict)]
+
+
+def _order_packs(order) -> float | None:
+    """Packs of an order = pack-unit lines only (pck / pack / packs). None when it has none: shown as a dash, never 0."""
+    return pack_total([{"unit": item.get("unit") or item.get("unit_name"), "quantity": item.get("quantity")} for item in _line_items(order)])
+
+
+def _packs_text(order) -> str:
+    packs = _order_packs(order)
+    return weight_display.DASH if packs is None else f"{packs:,.0f}"
+
+
+def _unknown_weight_lines(order) -> int:
+    """Lines whose weight cannot be worked out from item data ALREADY in memory (never calls Zoho)."""
+    unknown = 0
+    for item in _line_items(order):
+        nested = item.get("item") if isinstance(item.get("item"), dict) else {}
+        item_id = item.get("item_id") or item.get("itemid") or nested.get("item_id") or nested.get("id")
+        if calculate_line_weight_kg(item.get("quantity"), item.get("unit") or item.get("unit_name"), item_id, item=item, context="email-note", allow_fetch=False) is None:
+            unknown += 1
+    return unknown
+
+
+def _kg_text(order, kg: float, unknown_fn) -> tuple[str, str | None]:
+    return weight_display.format_kg(kg, unknown_fn(order), unit=False)
+
+
 def _helper_line(helpers) -> str:
     """'Helper: Name · 09xx' (several helpers are separated with '; '). Empty when there is none."""
     parts = [f"{h.name}{' · ' + str(h.phone) if getattr(h, 'phone', None) else ''}" for h in helpers or [] if getattr(h, "name", None)]
     return f"Helper: {'; '.join(parts)}" if parts else ""
 
 
-def _assignment_email_text(profile, orders, weight_fn=None, helpers=()) -> str:
+def _assignment_email_text(profile, orders, weight_fn=None, helpers=(), unknown_fn=None) -> str:
     """Plain-text alternative of the driver email (same facts as the HTML table)."""
     weight_fn = weight_fn or _weight
+    unknown_fn = unknown_fn or _unknown_weight_lines
     lines = ["Route details for the assigned driver.", "Please review the assigned sales orders below before dispatch and reply to confirm receipt.", "", f"Truck: {profile.plate_no or '-'}"]
     if _helper_line(helpers):
         lines.append(_helper_line(helpers))
@@ -221,13 +252,14 @@ def _assignment_email_text(profile, orders, weight_fn=None, helpers=()) -> str:
     for order in orders:
         raw = order.raw_json or {}
         address_text = ", ".join(address_lines(raw.get("shipping_address") or order.shipping_address))
-        packs = sum(float(item.get("quantity") or 0) for item in raw.get("line_items", []))
-        lines += [f"SO number: {order.salesorder_number or order.id}", f"Client: {order.customer_name or '-'}", f"Total kg: {weight_fn(order):,.1f}", f"Total Packs: {packs:,.0f}", f"Shipping Address: {address_text or '-'}", ""]
+        kg_text, kg_note = _kg_text(order, weight_fn(order), unknown_fn)
+        lines += [f"SO number: {order.salesorder_number or order.id}", f"Client: {order.customer_name or '-'}", f"Total kg: {kg_text}" + (f" ({kg_note})" if kg_note else ""), f"Total Packs: {_packs_text(order)}", f"Shipping Address: {address_text or '-'}", ""]
     return "\n".join(lines).strip()
 
 
-def _assignment_email_html(drivers: list, profile, orders, assigned_by: str, assigned_at: str, weight_fn=None, helpers=()) -> tuple[str, str, str]:
+def _assignment_email_html(drivers: list, profile, orders, assigned_by: str, assigned_at: str, weight_fn=None, helpers=(), unknown_fn=None) -> tuple[str, str, str]:
     weight_fn = weight_fn or _weight
+    unknown_fn = unknown_fn or _unknown_weight_lines
     primary = drivers[0]
     driver_names = ", ".join(d.name for d in drivers if d.name) or "Driver"
     warehouse = {"METS": "Mets Cold Storage", "GLACIER": "Glacier Cold Storage"}.get(str(primary.warehouse or "").upper(), primary.warehouse or profile.capacity_note or "-")
@@ -240,8 +272,9 @@ def _assignment_email_html(drivers: list, profile, orders, assigned_by: str, ass
     for order in orders:
         raw = order.raw_json or {}
         address_text = ", ".join(address_lines(raw.get("shipping_address") or order.shipping_address))
-        packs = sum(float(item.get("quantity") or 0) for item in raw.get("line_items", []))
-        rows.append(f"<tr><td style='{cell}'>{escape(str(order.salesorder_number or order.id))}</td><td style='{cell}'>{escape(str(order.customer_name or '-'))}</td><td style='{cell}'>{weight_fn(order):,.1f}</td><td style='{cell}'>{packs:,.0f}</td><td style='{cell}'>{escape(address_text or '-')}</td></tr>")
+        kg_text, kg_note = _kg_text(order, weight_fn(order), unknown_fn)
+        kg_cell = escape(kg_text) + (f"<br><span style='font-size:11px;color:#6b7280;'>{escape(kg_note)}</span>" if kg_note else "")
+        rows.append(f"<tr><td style='{cell}'>{escape(str(order.salesorder_number or order.id))}</td><td style='{cell}'>{escape(str(order.customer_name or '-'))}</td><td style='{cell}'>{kg_cell}</td><td style='{cell}'>{_packs_text(order)}</td><td style='{cell}'>{escape(address_text or '-')}</td></tr>")
     headers = "".join(f"<th style='{head}'>{heading}</th>" for heading in ASSIGNMENT_TABLE_COLUMNS)
     helper_html = f"<p style='margin:0 0 16px;font-size:14px;line-height:1.5;font-weight:700;'>{escape(_helper_line(helpers))}</p>" if _helper_line(helpers) else ""
     body_html = (
@@ -581,7 +614,6 @@ def send_assignment_email(body: AssignmentEmailBody, current_user: CurrentUser =
         raise HTTPException(404, "Sales order or vehicle was not found.")
     def address(order):
         return ", ".join(address_lines((order.raw_json or {}).get("shipping_address") or order.shipping_address))
-    def packs(order): return sum(float(item.get("quantity") or 0) for item in (order.raw_json or {}).get("line_items", []))
     assigned_by = body.assigned_by or current_user.full_name or current_user.email
     assigned_at = datetime.now(timezone.utc).isoformat()
     driver_subject, generated_driver_html, body_html = _assignment_email_html(drivers, profile, orders, assigned_by, assigned_at, helpers=helpers)
@@ -596,7 +628,7 @@ def send_assignment_email(body: AssignmentEmailBody, current_user: CurrentUser =
     driver_text = None if body.html_body else _assignment_email_text(profile, orders, helpers=helpers)  # edited HTML: the text part is derived from it
     email_only = body.resend or body.email_only  # Resend / Retry: email only, never re-notify by WhatsApp/SMS/voice
     email_jobs: list = []
-    sales_orders_payload = [{"soNumber": order.salesorder_number, "clientName": order.customer_name, "totalKgs": _weight(order), "totalPacks": packs(order), "shippingAddress": address(order)} for order in orders]
+    sales_orders_payload = [{"soNumber": order.salesorder_number, "clientName": order.customer_name, "totalKgs": _weight(order), "totalKgsIncomplete": _unknown_weight_lines(order) > 0, "totalPacks": _order_packs(order), "shippingAddress": address(order)} for order in orders]
     # Every selected driver gets their own notification pass across all four
     # channels (email/whatsapp/sms/voice), each addressed to that driver's own
     # name/email/phone — never a mix-up with another selected driver's details.

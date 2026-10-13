@@ -119,6 +119,9 @@ def test_pck_lines_count_as_packs_and_unknown_kg_is_flagged(env):
     batch = env.client.get("/api/driver/today", headers=t.bearer(driver10, "driver")).json()["batches"][0]
     assert batch["total_packs"] == 66.0  # 36 + 30 (the `pc` line is pieces, the kg line is a weight)
     assert batch["total_kg"] == 45.0 and batch["kg_complete"] is False  # the 36-pack line has no known weight: a partial total is flagged
+    assert batch["kg_unknown_lines"] == 1  # "45 kg+  - 1 line without weight" in every screen
+    row = {r["staff_id"]: r for r in env.client.get("/api/driver-overview/board", headers=env.h["dispatcher"]).json()["rows"]}[10]
+    assert row["kg_complete"] is False and row["kg_unknown_lines"] == 1
 
 
 # ---- overview == app ---------------------------------------------------------------------------------------------------------

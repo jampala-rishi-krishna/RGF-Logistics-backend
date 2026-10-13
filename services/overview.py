@@ -182,7 +182,7 @@ def summary(db: Session, start: date, end: date, warehouse: str | None, driver_i
     sos = {"assigned": totals["sos"], "acknowledged": totals["acknowledged"], "delivered": totals["delivered"], "partial": totals["partial"], "failed": totals["failed"]}
     pending_handover = sum(1 for b in batches if b["trip"] is not None and b["trip"].status in ("returned", "handover_submitted"))
     return {"from": start.isoformat(), "to": end.isoformat(), "generated_at": trip_events.now_utc().isoformat(),
-            "kpis": {"drivers": {"active": len(by_driver), "on_trip": on_trip, "returned": returned, "idle": len(idle)}, "sos": sos, "batches": totals["batches"], "kg": totals["kg"], "packs": totals["packs"],
+            "kpis": {"drivers": {"active": len(by_driver), "on_trip": on_trip, "returned": returned, "idle": len(idle)}, "sos": sos, "batches": totals["batches"], "kg": totals["kg"], "kg_complete": totals["kg_complete"], "kg_unknown_lines": totals["kg_unknown_lines"], "packs": totals["packs"],
                      "trips_pending_handover": pending_handover, "invoices_outstanding": outstanding_invoices(db, warehouse, driver_id)}}
 
 
@@ -254,17 +254,17 @@ def board(db: Session, day: date, warehouse: str | None, status: str | None, dri
         for _, b in sorted(entries, key=lambda e: (numbers_[e[1]["batch_id"]][0], e[1]["batch_id"])):
             f = b["facts"]
             trips.append({"batch_id": f.batch_id, "trip_number": numbers_[f.batch_id][0], "trips_on_date": numbers_[f.batch_id][1], "vehicle": f.vehicle, "state": f.state, "state_label": _batch_label(f.state, f), "so_count": f.so_count,
-                          "kg": f.kg, "kg_complete": f.kg_complete, "packs": f.packs, "acknowledged": f.acknowledged, "stops_done": f.stops_done, "role": role_of(b, staff_id)})
+                          "kg": f.kg, "kg_complete": f.kg_complete, "kg_unknown_lines": f.kg_unknown_lines, "packs": f.packs, "acknowledged": f.acknowledged, "stops_done": f.stops_done, "role": role_of(b, staff_id)})
         rows.append({"staff_id": staff_id, "name": staff.get("name") or f"Staff #{staff_id}", "role": role, "warehouse": str(staff.get("warehouse") or "").upper() or None, "state": state, "state_label": _batch_label(state, best_facts),
                      "vehicle": ", ".join(dict.fromkeys(str(f.vehicle) for f in facts_list if f.vehicle)) or None, "batch_id": best["batch_id"], "current_stop": best_facts.stops[current.so_id].customer_name if current else None,
-                     "progress": {"done": total["stops_done"], "total": total["sos"]}, "acknowledged": total["acknowledged"], "batch_count": len(entries), "kg": total["kg"], "kg_complete": total["kg_complete"], "packs": total["packs"],
+                     "progress": {"done": total["stops_done"], "total": total["sos"]}, "acknowledged": total["acknowledged"], "batch_count": len(entries), "kg": total["kg"], "kg_complete": total["kg_complete"], "kg_unknown_lines": total["kg_unknown_lines"], "packs": total["packs"],
                      "trips": trips, "last_action": action, "last_gps_at": iso(gps_event.client_ts) if gps_event else None,
                      "stale": state == "on_trip" and last_at is not None and (now - last_at) > timedelta(minutes=stale_minutes)})
     busy = set(per_person)
     for staff in _active_idle_drivers(warehouse, None):
         if staff["id"] not in busy:
             rows.append({"staff_id": staff["id"], "name": staff.get("name") or f"Staff #{staff['id']}", "role": "driver", "warehouse": str(staff.get("warehouse") or "").upper() or None, "state": "idle", "state_label": "Idle",
-                         "vehicle": None, "batch_id": None, "current_stop": None, "progress": {"done": 0, "total": 0}, "acknowledged": 0, "batch_count": 0, "kg": 0.0, "kg_complete": False, "packs": None, "trips": [],
+                         "vehicle": None, "batch_id": None, "current_stop": None, "progress": {"done": 0, "total": 0}, "acknowledged": 0, "batch_count": 0, "kg": 0.0, "kg_complete": False, "kg_unknown_lines": 0, "packs": None, "trips": [],
                          "last_action": None, "last_gps_at": None, "stale": False})
     if warehouse:
         rows = [r for r in rows if r["warehouse"] == warehouse]
