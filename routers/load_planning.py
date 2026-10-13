@@ -609,7 +609,7 @@ class EmailSendRequest(EmailFilterContext):
 
 
 def _email_rows(db: Session, context: EmailFilterContext) -> list[SalesOrderCache]:
-    rows = _filtered_rows(db, context.date_from, context.date_to, context.status, context.search, context.assignment, branches=context.branches)
+    rows = _filtered_rows(db, context.date_from, context.date_to, context.status, context.search, context.assignment, branches=context.branches, order_types="SO,TO" if context.assignment == "assigned" else None)
     if context.order_ids:
         wanted = {str(value) for value in context.order_ids}
         rows = [row for row in rows if str(row.id) in wanted]
