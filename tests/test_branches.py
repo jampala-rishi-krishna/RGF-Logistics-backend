@@ -444,14 +444,14 @@ class StockMappingTests(unittest.TestCase):
 class ExportColumnsTests(unittest.TestCase):
     def test_no_branch_warehouse_column_and_negative_kept(self):
         from openpyxl import load_workbook
-        from services.inventory_exports import CONFIRMED_HEADERS, CONFIRMED_WIDTHS, flatten_confirmed_order, make_excel, make_pdf
+        from services.inventory_exports import CONFIRMED_HEADERS, CONFIRMED_STOCK_COLUMNS, CONFIRMED_WIDTHS, flatten_confirmed_order, make_excel, make_pdf
         self.assertFalse([h for h in CONFIRMED_HEADERS if "Branch" in h])
         order_row = SimpleNamespace(expected_shipment_date=None, salesorder_number="MS-SO-1", customer_name="C", shipping_address=None, raw_json={"branch_id": MSSI, "line_items": [{"item_id": "i1", "name": "Egg", "quantity": 1, "unit": "case"}]})
         rows = flatten_confirmed_order(order_row, lambda item_id: {"mets": -3.0, "glacier": -2000.0}, lambda order: ("", ""))
         self.assertEqual(len(rows[0]), len(CONFIRMED_HEADERS))
         self.assertEqual(len(CONFIRMED_WIDTHS), len(CONFIRMED_HEADERS))
         sheet = load_workbook(make_excel(rows, "cap", "confirmed")).active
-        self.assertEqual((sheet.cell(2, 11).value, sheet.cell(2, 12).value), (-3.0, -2000.0))
+        self.assertEqual((sheet.cell(2, CONFIRMED_STOCK_COLUMNS[0] + 1).value, sheet.cell(2, CONFIRMED_STOCK_COLUMNS[1] + 1).value), (-3.0, -2000.0))
         self.assertTrue(make_pdf(rows, "cap", "confirmed").getvalue().startswith(b"%PDF"))
 
 

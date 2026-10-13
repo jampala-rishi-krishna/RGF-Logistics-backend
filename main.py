@@ -32,7 +32,7 @@ logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.getLogger("httpcore").setLevel(logging.WARNING)
 logger = logging.getLogger("main")
 
-from routers import admin, agent, alerts, assignment, auth, comms, communications, dispatch, driver, driver_extra, driver_overview, driver_trip, fleet, fleet_health, gmail, load_planning, media, officer, optimization, orders, reports, routes, voice, warehouse, pipeline, zoho_webhooks
+from routers import admin, agent, alerts, assignment, auth, comms, communications, confirmed_email, dispatch, driver, driver_extra, driver_overview, driver_trip, fleet, fleet_health, gmail, load_planning, media, officer, optimization, orders, reports, routes, voice, warehouse, pipeline, zoho_webhooks
 from services.fleet_health import sampler as fleet_health_sampler
 from services import fleet_static_cache, gmail_sender, staff_directory_cache, live_sales_order_cache, voice_control, whatsapp_control, zoho_so_lock, zoho_usage
 from services.cartrack_poller import poll_cartrack_and_update, report_unmatched_roster_on_startup
@@ -259,6 +259,7 @@ app.include_router(admin.usage_router)
 app.include_router(agent.router)
 app.include_router(optimization.router)
 app.include_router(load_planning.router)
+app.include_router(confirmed_email.router)
 app.include_router(assignment.optimize_router)
 app.include_router(assignment.router)
 app.include_router(pipeline.router)
