@@ -415,7 +415,7 @@ def list_sales_order_cities(date_from: str | None = Query(None), date_to: str | 
     # skips the expensive per-order Zoho detail fetch.
     start = _date(date_from) or (datetime.now(PHT).date() - timedelta(days=7))
     end = _date(date_to) or (datetime.now(PHT).date() + timedelta(days=7))
-    rows = live_sales_order_cache.get_window(start, end, hydrate=False)
+    rows = live_sales_order_cache.get_window(start, end, hydrate=False, block=False)
     return {"cities": sorted({_shipping_city(row) for row in rows if _shipping_city(row)}, key=str.casefold)}
 
 
@@ -445,11 +445,11 @@ def _rows_any_branch(db: Session, date_from: str | None, date_to: str | None, st
         # Current/future range for Confirmed SO: the in-memory assigned snapshot (Zoho data,
         # kept warm live; assignment state kept warm from sales_order_history at startup and
         # updated on every mutation). Zero Neon reads.
-        rows = [r for r in live_sales_order_cache.get_assigned_snapshot() if r.expected_shipment_date is not None and start <= r.expected_shipment_date <= end]
+        rows = [r for r in live_sales_order_cache.get_assigned_snapshot_ex(block=False)[0] if r.expected_shipment_date is not None and start <= r.expected_shipment_date <= end]
     else:
         # Unassigned / no assignment filter, any date: live Zoho window cache (5-min TTL).
         # No sales_orders_cache read/write at all any more.
-        rows = live_sales_order_cache.get_window(start, end)
+        rows = live_sales_order_cache.get_window(start, end, block=False)
     needle = (search or "").lower(); wanted = (status or "").lower()
     needle_squashed = branch_service.squash_number(search)
     def search_match(row) -> bool:

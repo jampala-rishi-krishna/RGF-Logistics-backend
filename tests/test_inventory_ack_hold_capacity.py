@@ -3,6 +3,7 @@
 No live Zoho call anywhere: a small in-memory fake stands in for the Zoho client functions, and
 the real cache code (live_sales_order_cache / load_planning ack cache) runs against it.
 """
+import pytest
 import asyncio
 import os
 import unittest
@@ -495,3 +496,11 @@ class CapacityWarningTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+@pytest.fixture(autouse=True)
+def _blocking_cold_reads(monkeypatch):
+    """These tests pre-date the non-blocking Load Planning reads and assert on a synchronous cold fill; tests/test_cold_window_and_cors.py covers the new behaviour."""
+    from services import live_sales_order_cache
+
+    monkeypatch.setattr(live_sales_order_cache, "FORCE_BLOCKING_READS", True)

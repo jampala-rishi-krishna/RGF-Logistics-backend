@@ -306,18 +306,10 @@ def test_lines_are_untouched_by_the_phase_one_changes(env):
 # ---- Driver Overview additions (Phase 2) --------------------------------------------------------------------------------------
 
 
-def test_overview_live_trips_hardcopies_and_timeline_for_a_departed_stop(env, monkeypatch):
-    from types import SimpleNamespace
-
-    from services import live_gps_store
-
+def test_overview_trips_hardcopies_and_timeline_for_a_departed_stop(env):
     seed_started_trip(env)
     assert post(env, "driver", "/api/driver/batches/B1/orders/s1/check-in", stamp()).status_code == 200
     assert post(env, "driver", "/api/driver/batches/B1/orders/s1/check-out", stamp(answers={"invoice_dr_number": "0042", "outcome": "Delivered"})).status_code == 200
-    # memory-only live fix of the truck (the plate of the batch)
-    monkeypatch.setattr(live_gps_store, "get", lambda plate: {"lat": 14.6, "lng": 121.0, "heading": 90, "speed_kph": 31, "ignition_on": True, "status": "Active", "gps_time": "2026-10-13T00:00:00+00:00", "last_updated": datetime.now(timezone.utc)} if plate == "DCD8954" else None)
-    live = env.client.get("/api/driver-overview/live", headers=env.h["dispatcher"]).json()
-    assert [(x["plate"], x["drivers"], x["fix"]["lat"]) for x in live["trucks"]] == [("DCD8954", ["Emert Hirondo"], 14.6)]
     trips = env.client.get("/api/driver-overview/trips", headers=env.h["dispatcher"]).json()
     assert trips["total"] == 1 and trips["trips"][0]["stops_done"] == 1 and trips["trips"][0]["delivered"] == 1 and trips["trips"][0]["state"] == "on_trip"
     copies = env.client.get("/api/driver-overview/hardcopies", headers=env.h["dispatcher"]).json()
@@ -331,7 +323,6 @@ def test_overview_live_trips_hardcopies_and_timeline_for_a_departed_stop(env, mo
     assert "invoice_dr_number" in csv_text.splitlines()[0] and ",0042," in csv_text
     for who in ("driver", "helper", "officer"):
         assert env.client.get("/api/driver-overview/hardcopies", headers=env.h[who]).status_code == 403
-        assert env.client.get("/api/driver-overview/live", headers=env.h[who]).status_code == 403
 
 
 def test_hardcopies_after_handover_are_with_the_officer_then_missing(env):

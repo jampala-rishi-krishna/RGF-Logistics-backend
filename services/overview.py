@@ -19,7 +19,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from models.trip import FormTemplate, FormTemplateItem, InvoiceHandover, InvoiceHandoverItem, Trip, TripEvent
-from services import day_model, driver_issues, live_gps_store, live_sales_order_cache, trip_state, staff_directory_cache, trip_events, warehouses
+from services import day_model, driver_issues, live_sales_order_cache, trip_state, staff_directory_cache, trip_events, warehouses
 from services.staff_roles import staff_kind
 from services.trip_events import fail
 from services.trip_timeline import aware, iso, minutes_between, staff_name, users_by_id
@@ -499,35 +499,6 @@ def create_template_version(db: Session, kind: str, user_id: int, name: str, ite
     db.commit()
     trip_events.bump()
     return get_template_version(db, kind, created.version)
-
-
-# ---- live trucks (memory only) ------------------------------------------------------------------------------------------
-
-
-def live_positions(db: Session, day: date, warehouse: str | None) -> dict:
-    """Last known Cartrack fix of every truck that has a batch on `day`, from process memory (`live_gps_store`): no Zoho, no Cartrack call,
-    no Neon read beyond the day's batches. The browser then follows the existing WebSocket feed for movement."""
-    data = Data(db, day, day)
-    trucks: dict[str, dict] = {}
-    for batch in data.filtered(warehouse, None):
-        plate = str(batch["vehicle"] or "").strip().upper()
-        if not plate:
-            continue
-        truck = trucks.setdefault(plate, {"plate": plate, "drivers": [], "batch_ids": [], "states": []})
-        name = staff_name(batch["driver_id"]) if batch["driver_id"] is not None else None
-        if name and name not in truck["drivers"]:
-            truck["drivers"].append(name)
-        truck["batch_ids"].append(batch["batch_id"])
-        truck["states"].append(batch["facts"].state)
-    out = []
-    for plate, truck in sorted(trucks.items()):
-        live = live_gps_store.get(plate) or live_gps_store.get(plate.replace(" ", ""))
-        fix = None
-        if live is not None:
-            fix = {"lat": live["lat"], "lng": live["lng"], "heading": live.get("heading") or 0, "speed_kph": live.get("speed_kph") or 0, "ignition_on": live.get("ignition_on"), "status": live.get("status"),
-                   "gps_time": live.get("gps_time"), "last_updated": iso(live.get("last_updated"))}
-        out.append({**truck, "fix": fix})
-    return {"date": day.isoformat(), "generated_at": trip_events.now_utc().isoformat(), "trucks": out}
 
 
 # ---- trips list -----------------------------------------------------------------------------------------------------------

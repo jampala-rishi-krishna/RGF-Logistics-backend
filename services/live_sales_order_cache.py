@@ -390,7 +390,7 @@ def _log_skipped_stale(count: int, cutoff: date) -> None:
         _stale_log["count"], _stale_log["at"] = count, now
 
 
-def get_assigned_snapshot_ex(include_window: bool = True, statuses: frozenset[str] | None = None) -> tuple[list[SalesOrderCache], bool]:
+def get_assigned_snapshot_ex(include_window: bool = True, statuses: frozenset[str] | None = None, block: bool = True) -> tuple[list[SalesOrderCache], bool]:
     """Same set as get_assigned_snapshot(), but also reports whether any assigned SO's
     Zoho detail fetch failed this call (had_failures). Right after a backend restart,
     _assigned_zoho is empty, so every currently-assigned SO needs fetching at once - a
@@ -406,6 +406,7 @@ def get_assigned_snapshot_ex(include_window: bool = True, statuses: frozenset[st
 
     statuses (e.g. frozenset({"assigned"})) limits the set to SOs in those assignment states. Fleet shows only
     "assigned" orders, so it passes that and never pays a Zoho call for completed/released/manifested history."""
+    block = block or _blocking_reads_forced()
     cutoff = _stale_cutoff()
     with _state_lock:
         candidates = [(oid, s) for oid, s in _assignment_state.items()
@@ -416,7 +417,7 @@ def get_assigned_snapshot_ex(include_window: bool = True, statuses: frozenset[st
     _log_skipped_stale(len(candidates) - len(ids), cutoff)
     if ids and include_window:
         start, end = _wide_bounds()
-        get_window(start, end)
+        get_window(start, end, block=block)
         with _window_lock:
             for _, records in _windows.values():
                 for oid in ids:
@@ -425,6 +426,9 @@ def get_assigned_snapshot_ex(include_window: bool = True, statuses: frozenset[st
                         _assigned_zoho[oid] = _apply_assignment(row)
     to_fetch = [oid for oid in ids if oid not in _assigned_zoho]
     had_failures = False
+    if to_fetch and not block:
+        _start_background_warm(("assigned", include_window, tuple(sorted(statuses or ()))), lambda: get_assigned_snapshot_ex(include_window=include_window, statuses=statuses))
+        raise WindowWarming("Assigned sales orders are loading from Zoho. Try again in a few seconds.")
     if to_fetch:
         # Fan out like _hydrate_details, bounded well under Zoho's ~100 req/min ceiling,
         # so a cold cache with many assigned SOs doesn't fetch them one at a time.
@@ -628,9 +632,59 @@ def _hydrate_details(records: dict[str, dict]) -> None:
                 continue
 
 
-def get_window(start: date, end: date, *, hydrate: bool = False) -> list[SalesOrderCache]:
+class WindowWarming(Exception):
+    """The shared Zoho window (or the assigned SOs) is not in memory yet. A background fill is running: answer 503 and let the caller retry."""
+
+
+WARM_FAILURE_TTL_SECONDS = 60
+_warm_lock = threading.Lock()
+_warming: dict[tuple, threading.Thread] = {}
+_warm_failed: dict[tuple, tuple[float, Exception]] = {}
+
+
+FORCE_BLOCKING_READS = False  # test hook; the environment variable below does the same in production
+
+
+def _blocking_reads_forced() -> bool:
+    """Kill switch: LOAD_PLANNING_BLOCKING_READS=true makes Load Planning wait for a cold Zoho fill again (the pre-2026-10-13 behaviour)."""
+    return FORCE_BLOCKING_READS or os.environ.get("LOAD_PLANNING_BLOCKING_READS", "").strip().lower() in {"1", "true", "yes"}
+
+
+def _start_background_warm(token: tuple, work) -> None:
+    """Single-flight: run `work` on a daemon thread unless the same fill is already running. A recent failure is raised to the next caller
+    (a ZohoError becomes a readable 503, e.g. the budget guard) instead of retrying a failing fill on every request."""
+    with _warm_lock:
+        failed = _warm_failed.get(token)
+        if failed is not None and time.monotonic() - failed[0] < WARM_FAILURE_TTL_SECONDS:
+            raise failed[1]
+        _warm_failed.pop(token, None)
+        if token in _warming and _warming[token].is_alive():
+            return
+
+        def run():
+            try:
+                work()
+            except Exception as exc:  # noqa: BLE001 - remembered for the next caller
+                with _warm_lock:
+                    _warm_failed[token] = (time.monotonic(), exc)
+                logger.warning("[LiveSalesOrderCache] background fill %s failed: %s", token[0], exc)
+            finally:
+                with _warm_lock:
+                    _warming.pop(token, None)
+
+        thread = threading.Thread(target=contextvars.copy_context().run, args=(run,), name=f"warm-{token[0]}", daemon=True)
+        _warming[token] = thread
+        thread.start()
+    logger.info("[LiveSalesOrderCache] %s not in memory: filling it in the background, this request answers 503 'loading'", token[0])
+
+
+def get_window(start: date, end: date, *, hydrate: bool = False, block: bool = True) -> list[SalesOrderCache]:
     """Shared live window. The list pull hydrates SO details only for records whose
-    last_modified_time is new or changed, then serves unchanged records from memory."""
+    last_modified_time is new or changed, then serves unchanged records from memory.
+
+    block=False (Load Planning's list endpoints): when the window is not in memory yet, start ONE background fill and raise WindowWarming
+    instead of holding the request through a long cold Zoho pull (which the browser reports as a bare CORS / network error)."""
+    block = block or _blocking_reads_forced()
     epoch = zoho_acquisition.generation()
     wide_start, wide_end = _wide_bounds()
     key = (wide_start.isoformat(), wide_end.isoformat()) if _within_wide_window(start, end) else (start.isoformat(), end.isoformat())
@@ -640,6 +694,9 @@ def get_window(start: date, end: date, *, hydrate: bool = False) -> list[SalesOr
         if entry is not None:
             rows = [row for row in entry[1].values() if row.expected_shipment_date is not None and start <= row.expected_shipment_date <= end]
             return [_apply_assignment(row) for row in rows]
+    if not block:
+        _start_background_warm(("window", *key), lambda: get_window(start, end, hydrate=hydrate))
+        raise WindowWarming("Sales orders are loading from Zoho. Try again in a few seconds.")
     raw = _pull_window(wide_start, wide_end) if key == (wide_start.isoformat(), wide_end.isoformat()) else _pull_window(start, end)
     _hydrate_details(raw)
     rows = {rid: _build_transient(record) for rid, record in raw.items()}

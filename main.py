@@ -218,6 +218,11 @@ async def zoho_request_context(request, call_next):
     with request_context(request.url.path):
         return await call_next(request)
 
+# Any uncaught exception -> JSON 500 that still passes through CORS (this must be registered BEFORE CORSMiddleware so it sits inside it).
+from services import safe_errors  # noqa: E402
+safe_errors.install_catch_all(app)
+safe_errors.register(app)
+
 # Single CORS configuration point for the whole app - every former Catalyst function had its
 # own (no-op) CORS handling; this is the one place it happens now.
 allowed_origins = [o.strip() for o in os.environ.get("ALLOWED_ORIGINS", "").split(",") if o.strip()]

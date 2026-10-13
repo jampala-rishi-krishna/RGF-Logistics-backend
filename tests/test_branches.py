@@ -4,6 +4,7 @@ Orders of any other branch (SariSuki, Rare Cuts, Rare Food Shop, never-seen bran
 counted, cached, hydrated, listed, exported or acted on. Zoho is faked in memory; the fake deliberately
 IGNORES the branch_ids parameter, so these tests also prove the local drop works on its own.
 """
+import pytest
 import os
 import unittest
 from types import SimpleNamespace
@@ -456,3 +457,11 @@ class ExportColumnsTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+@pytest.fixture(autouse=True)
+def _blocking_cold_reads(monkeypatch):
+    """These tests pre-date the non-blocking Load Planning reads and assert on a synchronous cold fill; tests/test_cold_window_and_cors.py covers the new behaviour."""
+    from services import live_sales_order_cache
+
+    monkeypatch.setattr(live_sales_order_cache, "FORCE_BLOCKING_READS", True)
