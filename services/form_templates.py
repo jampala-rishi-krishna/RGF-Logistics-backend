@@ -24,7 +24,7 @@ PhotoCheck = Callable[[int], bool]
 def _item_payload(item: FormTemplateItem) -> dict:
     return {
         "id": item.id, "key": item.key, "label": item.label, "item_type": item.item_type, "required": bool(item.required),
-        "options": item.options, "prefill": item.prefill, "show_when": item.show_when, "position": item.position,
+        "options": item.options, "prefill": item.prefill, "show_when": item.show_when, "position": item.position, "app_only": bool(item.app_only),
     }
 
 
@@ -247,6 +247,12 @@ def validate_checkout(template: dict, answers: dict | None, storage_enabled: boo
                 errors.append({"key": key, "message": f"{label}: choose one of {', '.join(options)}."})
                 continue
             result = str(value)
+        elif kind == "numeric_text":  # digits only, kept as text so leading zeros survive (Invoice / DR numbers)
+            text = str(value).strip()
+            if not (text.isascii() and text.isdigit() and len(text) <= 30):
+                errors.append({"key": key, "message": f"{label} must be a number (digits only)."})
+                continue
+            result = text
         elif kind == "number":
             result = _number(value)
             if result is None:

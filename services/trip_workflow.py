@@ -319,7 +319,7 @@ def _check_out(ctx: Ctx):
     values = {a["key"]: a["value"] for a in answers}
     stop.status = "checked_out"
     stop.checkout_at, stop.checkout_received_at, stop.checkout_by_user_id, stop.checkout_gps = ctx.client_ts, ctx.received_at, ctx.user.id, ctx.gps
-    stop.outcome = values.get("outcome")
+    stop.outcome = values.get("outcome") or "Delivered"  # a template without an outcome question records every stop as delivered
     stop.reason = values.get("reason")
     stop.form_template_id, stop.form_template_version, stop.form_answers = template["id"], template["version"], answers
     return Done("checked_out", ctx.so_id, {"template_id": template["id"], "template_version": template["version"], "outcome": stop.outcome, "reason": stop.reason})
@@ -376,7 +376,7 @@ def _handover(ctx: Ctx):
     for so_id, item in seen.items():
         row = by_id[so_id]
         ctx.db.add(InvoiceHandoverItem(handover_id=handover.id, so_id=so_id, so_number=row.salesorder_number or row.id, customer_name=row.customer_name,
-                                       handed_over=item.handed_over, crew_note=(item.note or "").strip() or None, officer_status="pending"))
+                                       handed_over=item.handed_over, crew_note=(item.note or "").strip() or None, officer_status="pending", invoice_no=trip_state.invoice_no_of(ctx.stops.get(so_id))))
     trip.status = "handover_submitted"
     return Done("handover_submitted", None, {"officer_user_id": body.officer_user_id, "items": [{"so_id": i.so_id, "handed_over": i.handed_over, "note": i.note} for i in body.items], "note": body.note})
 

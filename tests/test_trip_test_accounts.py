@@ -169,7 +169,7 @@ def _engine_with_version(version):
 
 
 def test_schema_at_head_passes_and_behind_or_missing_is_refused_with_the_upgrade_hint():
-    head = "p6b7c8d9e0f1"
+    head = "q7c8d9e0f1a2"
     assert script.assert_schema_at_head(_engine_with_version(head), head=head) == head
     for engine in (_engine_with_version("o5a6b7c8d9e0"), _engine_with_version(None)):
         with pytest.raises(SystemExit) as caught:

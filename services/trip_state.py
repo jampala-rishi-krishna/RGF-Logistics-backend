@@ -87,6 +87,14 @@ def load(db: Session, batch_ids: list[str], *, names: bool) -> TripData:
     return data
 
 
+def invoice_no_of(stop) -> str | None:
+    """The Invoice / DR number typed at check-out (form item `invoice_dr_number`), from the stop's stored answers."""
+    for answer in (stop.form_answers if stop is not None else None) or []:
+        if isinstance(answer, dict) and answer.get("key") == "invoice_dr_number" and answer.get("value") not in (None, ""):
+            return str(answer["value"])
+    return None
+
+
 # ---- crew ---------------------------------------------------------------------------------------------------------------
 
 
@@ -192,7 +200,7 @@ def order_workflow(row, facts: dict, trip_summary: dict, data: TripData, *, can_
         "stop": None if stop is None else {
             "sequence": stop.sequence, "status": stop.status, "checkin_at": iso(stop.checkin_at), "checkin_by": data.user(stop.checkin_by_user_id),
             "checkin_distance_m": stop.checkin_distance_m, "checkin_far": stop.checkin_far, "checkout_at": iso(stop.checkout_at),
-            "checkout_by": data.user(stop.checkout_by_user_id), "outcome": stop.outcome, "reason": stop.reason,
+            "checkout_by": data.user(stop.checkout_by_user_id), "outcome": stop.outcome, "reason": stop.reason, "invoice_no": invoice_no_of(stop),
         },
         "can_acknowledge": can_ack, "can_check_in": can_in, "can_check_out": can_out, "blocker": blocker,
     }

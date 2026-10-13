@@ -279,7 +279,6 @@ def test_template_post_roles_and_validation(env):
         "show_when unknown key": ("delivery_checkout", ok_items + [good_item("a", show_when={"key": "ghost", "in": ["x"]})]),
         "bad key characters": ("delivery_checkout", ok_items + [good_item("has space")]),
         "no items": ("delivery_checkout", []),
-        "no outcome on checkout": ("delivery_checkout", [good_item("a")]),
         "bad prefill": ("delivery_checkout", ok_items + [good_item("a", prefill="shoe_size")]),
     }
     for label, (kind, items) in bad_cases.items():

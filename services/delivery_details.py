@@ -49,3 +49,19 @@ def from_order(order) -> tuple[str | None, dict | None]:
     if detail:
         raw = {**detail, **raw}
     return extract(raw)
+
+
+def invoice_hint(order) -> str | None:
+    """The Invoice / DR number to PRE-FILL at check-out, only when the SO detail already in memory lists exactly one invoice with digits in
+    its number. Never a Zoho call; the crew still confirms or corrects it."""
+    raw = dict(getattr(order, "raw_json", None) or {})
+    detail = live_sales_order_cache.cached_detail(getattr(order, "id", ""))
+    if detail:
+        raw = {**detail, **raw}
+    numbers = []
+    for invoice in raw.get("invoices") or []:
+        number = str((invoice or {}).get("invoice_number") or "") if isinstance(invoice, dict) else ""
+        digits = "".join(ch for ch in number if ch.isdigit())
+        if digits:
+            numbers.append(digits)
+    return numbers[0] if len(set(numbers)) == 1 else None

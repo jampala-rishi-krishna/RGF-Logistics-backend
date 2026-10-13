@@ -11,7 +11,7 @@ from sqlalchemy.orm import Session
 
 from auth.dependencies import CurrentUser, require_role
 from database import get_db
-from services import overview, reconcile
+from services import driver_issues, overview, reconcile
 from services.trip_events import fail
 from services.trip_timeline import build_timeline
 
@@ -66,6 +66,17 @@ def export_csv(date: str | None = None, from_: str | None = Query(None, alias="f
     return Response(content=content, media_type="text/csv; charset=utf-8", headers={"Content-Disposition": f'attachment; filename="driver-overview-{start}-{end}.csv"', "Cache-Control": "private, no-store"})
 
 
+@router.get("/issues")
+def issues(status: str | None = "open", priority: str | None = None, db: Session = Depends(get_db)):
+    """Issues reported from the driver app (open first, urgent first). Read by admin and dispatcher."""
+    return {"issues": driver_issues.list_all(db, status, priority), **driver_issues.meta(), "statuses": list(driver_issues.STATUS_LABELS)}
+
+
+@router.post("/issues/{issue_id}/respond")
+def respond_to_issue(issue_id: int, body: driver_issues.RespondBody, user: CurrentUser = Depends(require_role("admin", "dispatcher")), db: Session = Depends(get_db)):
+    return driver_issues.respond(db, user, issue_id, body)
+
+
 @router.get("/reconcile")
 def reconcile_day(date: str | None = None, source: str = Query("auto", pattern="^(auto|memory|neon)$"), user: CurrentUser = Depends(require_role("admin")), db: Session = Depends(get_db)):
     """Admin only. For one date: Load Planning Confirmed SO vs the Driver App vs Driver Overview, per person (SOs, kg, packs, batches).
@@ -86,6 +97,7 @@ class TemplateItemBody(BaseModel):
     prefill: str | None = None
     show_when: dict | None = None
     active: bool = True
+    app_only: bool = False
 
 
 class TemplateBody(BaseModel):

@@ -113,6 +113,11 @@ class BatchFacts:
     handover: object | None
     items: list = field(default_factory=list)  # InvoiceHandoverItem
     assigned_at: datetime | None = None  # first assignment click of the batch: orders "Trip 1", "Trip 2" of a day
+    # What the assignment rows say NOW (the trip row freezes vehicle / crew when the crew first acts): used to detect "assignment changed".
+    current_vehicle: str | None = None
+    current_crew_ids: tuple = ()
+    current_so_ids: tuple = ()
+    current_updated_at: datetime | None = None
     acknowledged: int = 0
     stops_done: int = 0
     delivered: int = 0
@@ -199,6 +204,12 @@ def facts_for_rows(batch_id: str, rows: list, lines_by_order: dict[str, list], d
     facts = BatchFacts(batch_id=batch_id, date=day, driver_id=driver_id, helper_ids=list(helpers), vehicle=vehicle, orders=orders, trip=trip, acks=acks, stops=stops, handover=handover,
                        items=(items_by_handover or {}).get(handover.id, []) if handover is not None else [], **prog)
     facts.assigned_at = _aware(rows[0].assigned_at) if rows else None
+    if rows:
+        facts.current_vehicle = rows[0].vehicle_id
+        facts.current_crew_ids = tuple(sorted({rows[0].driver_id, *helper_ids_of(rows[0].driver_id, rows[0].helper_ids)} - {None}))
+        facts.current_so_ids = tuple(sorted(row.id for row in rows))
+        stamps = [_aware(row.updated_at) for row in rows if getattr(row, "updated_at", None) is not None]
+        facts.current_updated_at = max(stamps) if stamps else facts.assigned_at
     facts.state = chip_for(trip.status if trip is not None else None, facts.acknowledged, facts.so_count)
     return facts
 

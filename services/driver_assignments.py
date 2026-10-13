@@ -108,8 +108,9 @@ def _person(staff_id: int) -> dict:
 
 def _order_payload(row, lines: list) -> dict:
     contact, notes = row.delivery_contact, row.delivery_notes
+    live = live_sales_order_cache.find_cached(row.id)
+    invoice_hint = delivery_details.invoice_hint(live) if live is not None else None
     if contact is None:  # detail was not cached when the order was assigned: use whatever is in memory now (never Zoho)
-        live = live_sales_order_cache.find_cached(row.id)
         if live is not None:
             live_notes, live_contact = delivery_details.from_order(live)
             if live_contact is not None:
@@ -141,6 +142,7 @@ def _order_payload(row, lines: list) -> dict:
         "shipment_status": row.shipment_status,
         "delivery_status": row.delivery_status,
         "details_loading": contact is None,
+        "invoice_hint": invoice_hint,  # pre-fill for the check-out Invoice / DR number; null = the crew types it
     })
 
 
@@ -245,6 +247,43 @@ def today_batches(db: Session, driver_id: int, can_act: bool = True) -> list[dic
 
 def history_batches(db: Session, driver_id: int, start: date, end: date, can_act: bool = True) -> list[dict]:
     return build_batches(db, rows_for_driver(db, driver_id, start, end), driver_id, can_act=can_act)
+
+
+HISTORY_FILTERS = ("all", "completed", "failed")
+MAX_PAGE_SIZE = 50
+DONE_TRIP_STATUSES = ("returned", "handover_submitted", "closed")
+
+
+def history_page(db: Session, driver_id: int, start: date, end: date, *, status: str = "all", page: int = 1, page_size: int = 10, can_act: bool = True) -> dict:
+    """Server-side filtered + paginated history. Filtering uses the shared batch facts (trip data only); the heavy payload
+    (lines, contacts, crew) is built for the requested page alone.  completed = trip returned / handed over / closed;
+    failed = at least one SO checked out as failed / returned."""
+    rows = rows_for_driver(db, driver_id, start, end)
+    grouped = day_model.group_by_batch(rows)
+    data = trip_state.load(db, list(grouped), names=False)
+    facts = {batch_id: day_model.facts_for_rows(batch_id, group, {}, data) for batch_id, group in grouped.items()}
+    if status == "completed":
+        facts = {b: f for b, f in facts.items() if f.trip is not None and f.trip.status in DONE_TRIP_STATUSES}
+    elif status == "failed":
+        facts = {b: f for b, f in facts.items() if f.failed > 0}
+    ordered = sorted(facts.values(), key=lambda f: (f.date.isoformat() if f.date else "", f.assigned_at.timestamp() if f.assigned_at else 0.0, f.batch_id), reverse=True)
+    page_size = max(1, min(page_size, MAX_PAGE_SIZE))
+    page = max(1, page)
+    window = ordered[(page - 1) * page_size: page * page_size]
+    wanted = {f.batch_id for f in window}
+    batches = build_batches(db, [row for row in rows if batch_key(row) in wanted], driver_id, can_act=can_act) if wanted else []
+    position = {f.batch_id: index for index, f in enumerate(window)}
+    batches.sort(key=lambda b: position.get(b["batch_id"], 10 ** 6))
+    return {"from": start.isoformat(), "to": end.isoformat(), "status": status, "page": page, "page_size": page_size, "total": len(ordered), "has_more": page * page_size < len(ordered), "batches": batches}
+
+
+def day_summary(batches: list[dict], open_issues: int = 0) -> dict:
+    """The four KPI tiles of the Today screen, from the SAME per-batch progress the cards show."""
+    assigned = sum(b["so_count"] for b in batches)
+    completed = sum(b["progress"]["stops_done"] for b in batches)
+    attention = sum(b["progress"]["failed"] + b["progress"]["partial"] for b in batches)
+    return {"assigned": assigned, "completed": completed, "remaining": max(assigned - completed, 0), "needs_attention": attention + open_issues, "open_issues": open_issues,
+            "trips": len(batches)}
 
 
 def batch_detail(db: Session, driver_id: int, batch_id: str, can_act: bool = True) -> dict | None:

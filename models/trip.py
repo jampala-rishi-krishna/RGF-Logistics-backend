@@ -52,6 +52,8 @@ class FormTemplateItem(TimestampedBase):
     prefill: Mapped[str | None] = mapped_column(Text)  # so_number | customer | address | driver | vehicle | helper | date
     show_when: Mapped[dict | None] = mapped_column(JSONB)  # {"key": "outcome", "in": ["Partially delivered", ...]}; required only while visible
     active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    # True = a field the app asks for that is NOT in the Zoho form (Settings shows "added in app, not in Zoho form"; Logistics may turn it off).
+    app_only: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
 
 
 class Trip(TimestampedBase):
@@ -199,3 +201,47 @@ class InvoiceHandoverItem(TimestampedBase):
     officer_user_id: Mapped[int | None] = mapped_column(BigInteger)
     officer_checked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     resolved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))  # set when a missing / discrepancy item is later marked received
+    invoice_no: Mapped[str | None] = mapped_column(Text)  # the Invoice / DR number typed at check-out: the officer's carbon-copy line is "SO number + this"
+
+
+ISSUE_CATEGORIES = (
+    "Delivery delay", "Customer unavailable", "Incorrect address", "Damaged goods", "Missing goods", "Partial delivery", "Vehicle breakdown", "Traffic or route issue",
+    "Incorrect assignment", "Vehicle mismatch", "Helper unavailable", "Refrigeration or cargo handling", "Application or technical issue", "Other",
+)
+ISSUE_PRIORITIES = ("normal", "high", "urgent")
+ISSUE_STATUSES = ("submitted", "acknowledged", "in_progress", "resolved", "closed")
+
+
+class DriverIssue(TimestampedBase):
+    """An issue a driver / helper reports from a trip, an order or their profile. Visible to dispatch in Driver Overview > Issues."""
+
+    __tablename__ = "driver_issues"
+
+    reference: Mapped[str | None] = mapped_column(Text, unique=True)  # IS-YYYYMMDD-0007, set right after the insert
+    reporter_user_id: Mapped[int] = mapped_column(BigInteger, nullable=False, index=True)
+    reporter_staff_id: Mapped[int | None] = mapped_column(Integer, index=True)
+    reporter_role: Mapped[str] = mapped_column(Text, nullable=False)
+    batch_id: Mapped[str | None] = mapped_column(Text, index=True)
+    so_id: Mapped[str | None] = mapped_column(Text)
+    so_number: Mapped[str | None] = mapped_column(Text)
+    vehicle: Mapped[str | None] = mapped_column(Text)
+    category: Mapped[str] = mapped_column(Text, nullable=False)
+    priority: Mapped[str] = mapped_column(Text, nullable=False, default="normal")
+    description: Mapped[str] = mapped_column(Text, nullable=False)
+    photo_ids: Mapped[list | None] = mapped_column(JSONB)  # trip_photos ids (the bytes live in R2)
+    status: Mapped[str] = mapped_column(Text, nullable=False, default="submitted", index=True)
+    response: Mapped[str | None] = mapped_column(Text)  # dispatch's reply, shown to the driver
+    responded_by_user_id: Mapped[int | None] = mapped_column(BigInteger)
+    responded_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    client_ts: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    idempotency_key: Mapped[str | None] = mapped_column(Text, unique=True)
+
+
+class DriverAlertRead(TimestampedBase):
+    """Read marker of one derived alert (the alerts are computed from assignments / trip events / issues, never stored)."""
+
+    __tablename__ = "driver_alert_reads"
+    __table_args__ = (UniqueConstraint("user_id", "alert_key", name="uq_driver_alert_reads_user_key"),)
+
+    user_id: Mapped[int] = mapped_column(BigInteger, nullable=False, index=True)
+    alert_key: Mapped[str] = mapped_column(Text, nullable=False)

@@ -61,7 +61,7 @@ def _rows(db: Session, handovers: list[InvoiceHandover], viewer_user_id: int | N
 
 
 def _item_payload(item: InvoiceHandoverItem, users: dict[int, dict]) -> dict:
-    return {"item_id": item.id, "so_id": item.so_id, "so_number": item.so_number, "customer_name": item.customer_name, "handed_over": item.handed_over, "crew_note": item.crew_note,
+    return {"item_id": item.id, "so_id": item.so_id, "so_number": item.so_number, "invoice_no": item.invoice_no, "customer_name": item.customer_name, "handed_over": item.handed_over, "crew_note": item.crew_note,
             "officer_status": item.officer_status, "officer_note": item.officer_note, "checked_at": iso(item.officer_checked_at), "checked_by": users.get(item.officer_user_id) if item.officer_user_id is not None else None,
             "resolved_at": iso(item.resolved_at)}
 
@@ -148,7 +148,7 @@ def outstanding(db: Session, now: datetime | None = None) -> list[dict]:
     out = []
     for item, handover, trip in found:
         out.append({
-            "item_id": item.id, "handover_id": handover.id, "batch_id": handover.batch_id, "so_number": item.so_number, "customer_name": item.customer_name, "officer_status": item.officer_status,
+            "item_id": item.id, "handover_id": handover.id, "batch_id": handover.batch_id, "so_number": item.so_number, "invoice_no": item.invoice_no, "customer_name": item.customer_name, "officer_status": item.officer_status,
             "officer_note": item.officer_note, "crew_note": item.crew_note, "handed_over": item.handed_over, "delivery_date": trip.delivery_date.isoformat() if trip.delivery_date else None,
             "driver": {"id": trip.driver_staff_id, "name": staff_name(trip.driver_staff_id)}, "submitted_at": iso(handover.submitted_at),
             "age_hours": round(max((now - aware(handover.submitted_at)).total_seconds(), 0) / 3600.0, 1),

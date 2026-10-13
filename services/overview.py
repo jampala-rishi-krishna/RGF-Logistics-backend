@@ -19,7 +19,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from models.trip import FormTemplate, FormTemplateItem, InvoiceHandover, InvoiceHandoverItem, Trip, TripEvent
-from services import day_model, live_sales_order_cache, staff_directory_cache, trip_events, warehouses
+from services import day_model, driver_issues, live_sales_order_cache, staff_directory_cache, trip_events, warehouses
 from services.staff_roles import staff_kind
 from services.trip_events import fail
 from services.trip_timeline import aware, iso, minutes_between, staff_name, users_by_id
@@ -183,7 +183,8 @@ def summary(db: Session, start: date, end: date, warehouse: str | None, driver_i
     pending_handover = sum(1 for b in batches if b["trip"] is not None and b["trip"].status in ("returned", "handover_submitted"))
     return {"from": start.isoformat(), "to": end.isoformat(), "generated_at": trip_events.now_utc().isoformat(),
             "kpis": {"drivers": {"active": len(by_driver), "on_trip": on_trip, "returned": returned, "idle": len(idle)}, "sos": sos, "batches": totals["batches"], "kg": totals["kg"], "kg_complete": totals["kg_complete"], "kg_unknown_lines": totals["kg_unknown_lines"], "packs": totals["packs"],
-                     "trips_pending_handover": pending_handover, "invoices_outstanding": outstanding_invoices(db, warehouse, driver_id)}}
+                     "trips_pending_handover": pending_handover, "invoices_outstanding": outstanding_invoices(db, warehouse, driver_id),
+                     "issues_open": driver_issues.count_open(db)}}
 
 
 def outstanding_invoices(db: Session, warehouse: str | None, driver_id: int | None) -> int:
@@ -396,14 +397,14 @@ def export_csv(db: Session, start: date, end: date, warehouse: str | None, drive
 
 KINDS = ("acknowledge_checklist", "delivery_checkout")
 ITEM_TYPES = {"acknowledge_checklist": ("checkbox", "count", "photo", "note"),
-              "delivery_checkout": ("text", "textarea", "dropdown", "radio", "number", "date", "datetime", "photo", "signature", "checkbox")}
+              "delivery_checkout": ("text", "textarea", "dropdown", "radio", "number", "numeric_text", "date", "datetime", "photo", "signature", "checkbox")}
 PREFILLS = ("so_number", "customer", "address", "driver", "vehicle", "helper", "date")
 
 
 def _template_payload(template: FormTemplate, items: list[FormTemplateItem], *, only_active_items: bool) -> dict:
     shown = [i for i in items if i.active] if only_active_items else items
     return {"id": template.id, "kind": template.kind, "version": template.version, "name": template.name, "is_draft": template.is_draft, "active": template.active, "source_note": template.source_note,
-            "items": [{"id": i.id, "key": i.key, "label": i.label, "item_type": i.item_type, "required": i.required, "options": i.options, "prefill": i.prefill, "show_when": i.show_when, "position": i.position, "active": i.active}
+            "items": [{"id": i.id, "key": i.key, "label": i.label, "item_type": i.item_type, "required": i.required, "options": i.options, "prefill": i.prefill, "show_when": i.show_when, "position": i.position, "active": i.active, "app_only": bool(i.app_only)}
                       for i in sorted(shown, key=lambda x: x.position)]}
 
 
@@ -466,8 +467,11 @@ def validate_template_items(kind: str, items: list[dict]) -> list[dict]:
                 errors.append({"key": where, "message": "show_when must reference an item that appears earlier in the template."})
         if key and key not in seen:
             seen[key] = position
-    if kind == "delivery_checkout" and not any(i.get("key") == "outcome" and i.get("item_type") in ("dropdown", "radio") for i in items):
-        errors.append({"key": "outcome", "message": 'The checkout form needs an "outcome" dropdown or radio item (the trip logic reads it).'})
+    outcome = next((i for i in items if i.get("key") == "outcome"), None)
+    if kind == "delivery_checkout" and outcome is not None and outcome.get("item_type") not in ("dropdown", "radio"):
+        errors.append({"key": "outcome", "message": 'The "outcome" item must be a dropdown or radio item (the trip logic reads it). Switch it off to record every stop as Delivered.'})
+    if kind == "delivery_checkout" and (outcome is None or outcome.get("active") is False):
+        pass  # no outcome question: every checked-out stop is recorded as "Delivered" (services/trip_workflow.py)
     return errors
 
 
@@ -488,7 +492,8 @@ def create_template_version(db: Session, kind: str, user_id: int, name: str, ite
     for position, item in enumerate(items, 1):
         prefill = item.get("prefill") or None
         db.add(FormTemplateItem(template_id=created.id, position=position, key=str(item["key"]).strip(), label=str(item["label"]).strip(), item_type=item["item_type"], required=bool(item.get("required")),
-                                options=item.get("options") or None, prefill=prefill, show_when=item.get("show_when") or None, active=item.get("active", True) is not False))
+                                options=item.get("options") or None, prefill=prefill, show_when=item.get("show_when") or None, active=item.get("active", True) is not False,
+                                app_only=bool(item.get("app_only"))))
     db.commit()
     trip_events.bump()
     return get_template_version(db, kind, created.version)

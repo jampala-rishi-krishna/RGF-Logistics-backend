@@ -8,7 +8,7 @@ from sqlalchemy.orm import Session
 
 from auth.dependencies import CurrentUser, require_role
 from database import get_db
-from services import driver_assignments, staff_directory_cache
+from services import driver_assignments, driver_issues, staff_directory_cache
 from services.staff_roles import staff_kind
 
 # Driver app API (drivers AND helpers). Reads Neon (history rows written at assignment, trip workflow rows) and memory only -
@@ -48,12 +48,22 @@ def _dispatch_phone() -> str | None:
 
 
 @router.get("/me")
-def me(driver_id: int | None = Query(None), user: CurrentUser = Depends(require_role("driver", "helper", "admin"))):
+def me(driver_id: int | None = Query(None), user: CurrentUser = Depends(require_role("driver", "helper", "admin")), db: Session = Depends(get_db)):
     who = resolve_driver_id(user, driver_id)
     staff = staff_directory_cache.get_by_id(who) or {}
     now = driver_assignments.manila_now()
     own = user.role in CREW_ROLES
+    batches = driver_assignments.today_batches(db, who, can_act(user))
+    crew: dict[int, dict] = {}
+    for batch in batches:
+        for person in batch.get("crew") or []:
+            if person["id"] != who:
+                crew.setdefault(person["id"], person)
     return {
+        "staff_id": who,
+        "email": user.email if own else None,
+        "vehicles_today": list(dict.fromkeys(b["vehicle"] for b in batches if b["vehicle"])),
+        "crew_today": list(crew.values()),
         "driver_id": who,
         "role": user.role if own else staff_kind(staff),
         "name": staff.get("name") or (user.full_name if own else f"Staff #{who}"),
@@ -70,10 +80,12 @@ def me(driver_id: int | None = Query(None), user: CurrentUser = Depends(require_
 def today(driver_id: int | None = Query(None), user: CurrentUser = Depends(require_role("driver", "helper", "admin")), db: Session = Depends(get_db)):
     who = resolve_driver_id(user, driver_id)
     staff = staff_directory_cache.get_by_id(who) or {}
+    batches = driver_assignments.today_batches(db, who, can_act(user))
     return {
         "date": driver_assignments.manila_today().isoformat(),
         "driver": {"id": who, "name": staff.get("name")},
-        "batches": driver_assignments.today_batches(db, who, can_act(user)),
+        "summary": driver_assignments.day_summary(batches, driver_issues.count_open(db, user_id=user.id) if user.role in CREW_ROLES else 0),
+        "batches": batches,
     }
 
 
@@ -90,6 +102,9 @@ def history(
     days: int | None = Query(None, ge=1, le=driver_assignments.MAX_RANGE_DAYS),
     from_: str | None = Query(None, alias="from"),
     to: str | None = Query(None),
+    status: str | None = Query(None, pattern="^(all|completed|failed)$"),
+    page: int | None = Query(None, ge=1),
+    page_size: int | None = Query(None, ge=1, le=driver_assignments.MAX_PAGE_SIZE),
     user: CurrentUser = Depends(require_role("driver", "helper", "admin")),
     db: Session = Depends(get_db),
 ):
@@ -110,6 +125,8 @@ def history(
     end = min(end, yesterday)  # today's work lives on the Today page
     if start > end:
         return {"from": start.isoformat(), "to": end.isoformat(), "batches": []}
+    if status is not None or page is not None or page_size is not None:  # paginated + filtered (the Trips screen)
+        return driver_assignments.history_page(db, who, start, end, status=status or "all", page=page or 1, page_size=page_size or 10, can_act=can_act(user))
     return {"from": start.isoformat(), "to": end.isoformat(), "batches": driver_assignments.history_batches(db, who, start, end, can_act(user))}
 
 

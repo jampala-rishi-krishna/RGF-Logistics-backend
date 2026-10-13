@@ -23,6 +23,7 @@ from services.trip_timeline import batch_crew, batch_rows, is_crew
 router = APIRouter(tags=["media"])
 
 MAX_BYTES = 5 * 1024 * 1024
+ISSUE_BATCH = "issue"  # trip_photos.batch_id of a photo attached to a reported issue that is not tied to a trip
 EXTENSIONS = {"image/jpeg": "jpg", "image/png": "png", "image/webp": "webp"}
 _SAFE = re.compile(r"[^A-Za-z0-9._-]")
 
@@ -57,9 +58,12 @@ async def upload_photo(
     upload_key = (upload_key or "").strip()
     if not upload_key or len(upload_key) > 100:
         fail(422, "upload_key is required.", "validation", [{"key": "upload_key", "message": "A client-generated id is required."}])
-    crew = batch_crew(db, batch_id)
-    if crew is None or not is_crew(crew, user.staff_id):
-        fail(404, "Assignment not found.", "not_found")
+    if field_key == "issue_photo" and batch_id in ("", ISSUE_BATCH, "profile"):
+        batch_id = ISSUE_BATCH  # an issue photo from the profile: not tied to a trip, only its uploader and dispatch may open it
+    else:
+        crew = batch_crew(db, batch_id)
+        if crew is None or not is_crew(crew, user.staff_id):
+            fail(404, "Assignment not found.", "not_found")
 
     existing = db.execute(select(TripPhoto).where(TripPhoto.upload_key == upload_key)).scalar_one_or_none()
     if existing is not None:
@@ -103,9 +107,14 @@ def get_media(photo_id: int, user: CurrentUser = Depends(require_role("driver", 
     if photo is None:
         fail(404, "Photo not found.", "not_found")
     if ROLE_ALIASES.get(user.role, user.role) in ("driver", "helper"):
-        crew = batch_crew(db, photo.batch_id)
-        if crew is None or not is_crew(crew, user.staff_id):
-            fail(404, "Photo not found.", "not_found")  # same answer as "does not exist"
+        if photo.batch_id == ISSUE_BATCH:
+            if photo.uploaded_by_user_id != user.id:
+                fail(404, "Photo not found.", "not_found")
+        else:
+            crew = batch_crew(db, photo.batch_id)
+            if crew is None or not is_crew(crew, user.staff_id):
+                if photo.uploaded_by_user_id != user.id:
+                    fail(404, "Photo not found.", "not_found")  # same answer as "does not exist"
     if not media_storage.is_enabled():
         fail(503, "Photo storage is not set up yet.", "storage_disabled")
     return RedirectResponse(media_storage.presign_get(photo.storage_key, 600), status_code=302, headers={"Cache-Control": "private, no-store"})

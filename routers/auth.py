@@ -147,6 +147,15 @@ def set_password(body: SetPasswordBody, request: Request, db: Session = Depends(
     return {"ok": True}
 
 
+@router.get("/support")
+def support():
+    """Public (no login): how a locked-out driver reaches dispatch. Password resets are admin-issued links (Admin > Users), so the login
+    screen's "Forgot password" shows this number. Only the non-secret DISPATCH_PHONE setting is exposed."""
+    from services import app_settings
+
+    return {"dispatch_phone": app_settings.get_str("DISPATCH_PHONE").strip() or None}
+
+
 @router.post("/logout")
 def logout():
     # JWTs are stateless: the client discards its token. (A disabled account is cut off by the status check.)

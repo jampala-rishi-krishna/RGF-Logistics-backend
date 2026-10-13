@@ -18,7 +18,7 @@ import database  # noqa: E402
 from auth import dependencies, security  # noqa: E402
 from models.sales_order_history import SalesOrderHistory  # noqa: E402
 from models.sales_order_lines import SalesOrderLine  # noqa: E402
-from models.trip import (FormTemplate, FormTemplateItem, InvoiceHandover, InvoiceHandoverItem, SoAcknowledgement, Trip, TripEvent, TripPhoto, TripStop)  # noqa: E402
+from models.trip import (DriverAlertRead, DriverIssue, FormTemplate, FormTemplateItem, InvoiceHandover, InvoiceHandoverItem, SoAcknowledgement, Trip, TripEvent, TripPhoto, TripStop)  # noqa: E402
 from models.user import User, UserInvite  # noqa: E402
 from routers import driver as driver_router, driver_trip  # noqa: E402
 from services import driver_assignments, live_sales_order_cache, media_storage, memory_tables, staff_directory_cache, trip_events, trip_workflow, user_cache  # noqa: E402
@@ -30,7 +30,7 @@ STAFF = {
     1: {"id": 1, "name": "Helper One", "title": "DELIVERY HELPER", "warehouse": "METS", "phone": "01", "role": "HELPER"},
     17: {"id": 17, "name": "Raymond", "title": "DELIVERY HELPER", "warehouse": "METS", "phone": "017", "role": "HELPER"},
 }
-TABLES = (User, UserInvite, SalesOrderHistory, SalesOrderLine, FormTemplate, FormTemplateItem, Trip, SoAcknowledgement, TripStop, TripEvent, TripPhoto, InvoiceHandover, InvoiceHandoverItem)
+TABLES = (User, UserInvite, SalesOrderHistory, SalesOrderLine, FormTemplate, FormTemplateItem, Trip, SoAcknowledgement, TripStop, TripEvent, TripPhoto, InvoiceHandover, InvoiceHandoverItem, DriverIssue, DriverAlertRead)
 TODAY = None
 
 

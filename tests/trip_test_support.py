@@ -17,13 +17,13 @@ import database  # noqa: E402
 from auth import dependencies, security  # noqa: E402
 from models.sales_order_history import SalesOrderHistory  # noqa: E402
 from models.sales_order_lines import SalesOrderLine  # noqa: E402
-from models.trip import FormTemplate, FormTemplateItem, InvoiceHandover, InvoiceHandoverItem, SoAcknowledgement, Trip, TripEvent, TripPhoto, TripStop  # noqa: E402
+from models.trip import DriverAlertRead, DriverIssue, FormTemplate, FormTemplateItem, InvoiceHandover, InvoiceHandoverItem, SoAcknowledgement, Trip, TripEvent, TripPhoto, TripStop  # noqa: E402
 from models.user import User, UserInvite  # noqa: E402
 from services import driver_assignments, live_sales_order_cache, overview, staff_directory_cache, trip_events, user_cache  # noqa: E402
 from tests import sqlite_helpers  # noqa: E402
 
 TABLES = (User.__table__, UserInvite.__table__, SalesOrderHistory.__table__, SalesOrderLine.__table__, FormTemplate.__table__, FormTemplateItem.__table__, Trip.__table__,
-          SoAcknowledgement.__table__, TripStop.__table__, TripEvent.__table__, TripPhoto.__table__, InvoiceHandover.__table__, InvoiceHandoverItem.__table__)
+          SoAcknowledgement.__table__, TripStop.__table__, TripEvent.__table__, TripPhoto.__table__, InvoiceHandover.__table__, InvoiceHandoverItem.__table__, DriverIssue.__table__, DriverAlertRead.__table__)
 
 STAFF = {
     9: {"id": 9, "name": "Emert Hirondo", "title": "MC RIDER", "warehouse": "GLACIER", "email": "emert@example.test", "phone": "09482834802", "role": "DRIVER", "active": True},
