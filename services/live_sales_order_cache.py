@@ -242,6 +242,7 @@ def load_assignment_state_from_history(db) -> None:
                 "email_sent_at": r.email_sent_at,
                 "email_message_id": r.email_message_id,
                 "assignment_batch_id": r.assignment_batch_id,
+                "expected_shipment_date": r.expected_shipment_date,
             }
     by_status: dict[str, int] = {}
     for state in _assignment_state.values():
@@ -358,6 +359,37 @@ def _ensure_or_skip(order_id: str):
         return None, True
 
 
+STALE_ASSIGNED_GRACE_DAYS = 1  # an assigned SO is still hydrated when it shipped yesterday or later (Manila)
+_stale_log = {"count": None, "at": 0.0}
+
+
+def _stale_cutoff(today: date | None = None) -> date:
+    return (today or datetime.now(PHT).date()) - timedelta(days=STALE_ASSIGNED_GRACE_DAYS)
+
+
+def _is_stale_assigned(state: dict, cutoff: date) -> bool:
+    """True for an assigned SO whose expected shipment date is before `cutoff`. An unknown date is never called stale."""
+    shipped = state.get("expected_shipment_date")
+    if isinstance(shipped, datetime):
+        shipped = shipped.date()
+    return isinstance(shipped, date) and shipped < cutoff
+
+
+def stale_assigned_count(today: date | None = None) -> int:
+    """How many SOs are still in an assigned/manifested/completed state although they shipped before yesterday. Memory only."""
+    cutoff = _stale_cutoff(today)
+    with _state_lock:
+        return sum(1 for s in _assignment_state.values() if (s.get("assignment_status") or "unassigned") not in ("unassigned", "released") and _is_stale_assigned(s, cutoff))
+
+
+def _log_skipped_stale(count: int, cutoff: date) -> None:
+    """One INFO line when the count changes (and at most hourly otherwise), never one per request."""
+    now = time.monotonic()
+    if count and (_stale_log["count"] != count or now - _stale_log["at"] > 3600):
+        logger.info("[LiveSalesOrderCache] skipped %d assigned SO(s) that shipped before %s: no Zoho call is made for them (see docs/DATABASE.md, stale assignments)", count, cutoff.isoformat())
+        _stale_log["count"], _stale_log["at"] = count, now
+
+
 def get_assigned_snapshot_ex(include_window: bool = True, statuses: frozenset[str] | None = None) -> tuple[list[SalesOrderCache], bool]:
     """Same set as get_assigned_snapshot(), but also reports whether any assigned SO's
     Zoho detail fetch failed this call (had_failures). Right after a backend restart,
@@ -374,10 +406,14 @@ def get_assigned_snapshot_ex(include_window: bool = True, statuses: frozenset[st
 
     statuses (e.g. frozenset({"assigned"})) limits the set to SOs in those assignment states. Fleet shows only
     "assigned" orders, so it passes that and never pays a Zoho call for completed/released/manifested history."""
+    cutoff = _stale_cutoff()
     with _state_lock:
-        ids = [oid for oid, s in _assignment_state.items()
-               if (s.get("assignment_status") or "unassigned") != "unassigned" and oid not in _excluded_ids
-               and (statuses is None or s.get("assignment_status") in statuses)]
+        candidates = [(oid, s) for oid, s in _assignment_state.items()
+                      if (s.get("assignment_status") or "unassigned") != "unassigned" and oid not in _excluded_ids
+                      and (statuses is None or s.get("assignment_status") in statuses)]
+    # Old "assigned" rows (the shipment date is long past) must not cost a Zoho detail call at startup or on a Fleet rebuild.
+    ids = [oid for oid, s in candidates if not _is_stale_assigned(s, cutoff)]
+    _log_skipped_stale(len(candidates) - len(ids), cutoff)
     if ids and include_window:
         start, end = _wide_bounds()
         get_window(start, end)

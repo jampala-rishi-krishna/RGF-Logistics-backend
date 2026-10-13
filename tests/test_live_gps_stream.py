@@ -328,7 +328,7 @@ def test_date_scoped_view_still_filters_to_the_requested_delivery_date():
 def test_startup_log_breaks_the_loaded_history_down_by_status(caplog):
     rows = [SimpleNamespace(id=f"so{i}", vehicle_id=PLATE, driver_id=None, assignment_status=status, assigned_at=None, assigned_by=None,
                             completed_at=None, route_id=None, manifest_id=None, helper_ids=[], email_status=None, email_error=None,
-                            email_sent_at=None, email_message_id=None, assignment_batch_id=None)
+                            email_sent_at=None, email_message_id=None, assignment_batch_id=None, expected_shipment_date=None)
             for i, status in enumerate(["assigned", "assigned", "completed", "released"])]
     db = MagicMock()
     db.execute.return_value.scalars.return_value.all.return_value = rows

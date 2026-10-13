@@ -1,12 +1,29 @@
 from __future__ import annotations
 
 import logging
+import time
 from threading import Lock
 
 from services import item_detail_cache
 from services.zoho_client import ZohoError
 
 logger = logging.getLogger("item_weight")
+WARN_EVERY_SECONDS = 3600  # "Weight unavailable" is logged once per item per hour, not once per order line
+_warned_at: dict[str, float] = {}
+_clock = time.monotonic  # test hook
+
+
+def _warn_unavailable(token: str, message: str, *args) -> None:
+    now = _clock()
+    with _cache_lock:
+        last = _warned_at.get(token)
+        if last is not None and now - last < WARN_EVERY_SECONDS:
+            return
+        _warned_at[token] = now
+        if len(_warned_at) > 5000:  # bounded: drop the oldest half
+            for stale in sorted(_warned_at, key=_warned_at.get)[:2500]:
+                _warned_at.pop(stale, None)
+    logger.warning(message, *args)
 _cache: dict[str, float | None] = {}
 _cache_lock = Lock()
 _FACTORS = {"kg": 1.0, "kilogram": 1.0, "kilograms": 1.0, "g": 0.001, "gram": 0.001, "grams": 0.001, "lb": 0.45359237, "lbs": 0.45359237, "oz": 0.028349523125}
@@ -32,7 +49,10 @@ def _package_weight(key: str, item: dict | None, context: str, allow_fetch: bool
         weight = None
     if weight is None:
         # Cache-only list reads would otherwise log this on every request for the same item.
-        (logger.warning if allow_fetch else logger.debug)("Weight unavailable context=%s item_id=%s reason=missing/unsupported package weight", context, key)
+        if allow_fetch:
+            _warn_unavailable(f"pkg:{key}", "Weight unavailable context=%s item_id=%s reason=missing/unsupported package weight", context, key)
+        else:
+            logger.debug("Weight unavailable context=%s item_id=%s reason=missing/unsupported package weight", context, key)
     return weight
 
 
@@ -49,7 +69,7 @@ def calculate_line_weight_kg(quantity, unit, item_id: str | None, *, item: dict 
     if isinstance(item_id, dict):
         item_id = item_id.get("item_id") or item_id.get("id")
     if not item_id:
-        logger.warning("Weight unavailable context=%s reason=item_id missing", context)
+        _warn_unavailable(f"noid:{context}", "Weight unavailable context=%s reason=item_id missing", context)
         return None
     key = str(item_id)
     with _cache_lock:
@@ -58,7 +78,7 @@ def calculate_line_weight_kg(quantity, unit, item_id: str | None, *, item: dict 
         try:
             package_weight = _package_weight(key, item, context, allow_fetch)
         except (ZohoError, TypeError, ValueError, KeyError) as exc:
-            logger.warning("Weight unavailable context=%s item_id=%s reason=%s", context, key, exc)
+            _warn_unavailable(f"err:{key}", "Weight unavailable context=%s item_id=%s reason=%s", context, key, exc)
             package_weight = None
         if package_weight is not None:
             # Only successful structured weights are cached permanently; a failed or

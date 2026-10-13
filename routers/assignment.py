@@ -470,7 +470,7 @@ def assign_order(salesorder_id: str, body: AssignmentBody, current_user: Current
         item.assignment_status = "assigned"
         # helper_ids is kept in the live state too (as it is when loaded back from history): Send / Resend / Retry resolve the people to
         # notify from the stored assignment, so without it a fresh assignment would only ever notify the driver.
-        live_sales_order_cache.set_assignment(item.id, vehicle_id=body.vehicle_id, driver_id=primary_driver_id, helper_ids=driver_ids, assigned_at=assigned_at, assigned_by=current_user.id, assignment_status="assigned")
+        live_sales_order_cache.set_assignment(item.id, vehicle_id=body.vehicle_id, driver_id=primary_driver_id, helper_ids=driver_ids, assigned_at=assigned_at, assigned_by=current_user.id, assignment_status="assigned", expected_shipment_date=item.expected_shipment_date)
         sync_history_row(db, item)
     db.commit()
     live_sales_order_cache.bump_assignment_generation()

@@ -43,14 +43,30 @@ DEFINITIONS: dict[str, SettingDef] = {d.key: d for d in (
 )}
 
 _PHONE = re.compile(r"^[0-9+()\-\s]{0,32}$")
+_NUMBER_NOISE = re.compile(r"[,\s\u00a0\u202f]")
+_warned: set[str] = set()
 _lock = threading.Lock()
 _overrides: dict[str, str] = {}
 _meta: dict[str, dict] = {}
 
 
+def clean_number(raw: Any) -> str:
+    """"4,600", " 4 600 " and "4\u00a0600" all mean 4600: thousands separators and spaces are stripped before parsing."""
+    return _NUMBER_NOISE.sub("", "" if raw is None else str(raw))
+
+
+def _warn_once(token: str, message: str, *args) -> None:
+    """Log a configuration problem ONCE per process (i.e. once per startup), never on every read of the setting."""
+    with _lock:
+        if token in _warned:
+            return
+        _warned.add(token)
+    logger.warning(message, *args)
+
+
 def _org_limit() -> int:
     try:
-        return max(1, int(os.environ.get("ZOHO_ORG_DAILY_LIMIT", "10000")))
+        return max(1, int(clean_number(os.environ.get("ZOHO_ORG_DAILY_LIMIT", "10000"))))
     except ValueError:
         return 10000
 
@@ -68,10 +84,10 @@ def parse(definition: SettingDef, raw: Any) -> int | str:
         if not _PHONE.match(text):
             raise SettingError(f"{definition.label} may contain only digits, +, -, spaces and brackets (max 32 characters).")
         return text
-    if isinstance(raw, bool) or raw is None or (isinstance(raw, str) and not raw.strip()):
+    if isinstance(raw, bool) or raw is None or not clean_number(raw):
         raise SettingError(f"{definition.label} must be a whole number.")
     try:
-        number = int(str(raw).strip())
+        number = int(clean_number(raw))
     except ValueError as exc:
         raise SettingError(f"{definition.label} must be a whole number.") from exc
     low, high = _bounds(definition)
@@ -92,14 +108,14 @@ def _env_or_default(definition: SettingDef) -> int | str:
         text = raw.strip()
         if _PHONE.match(text):
             return text
-    elif raw.strip():
+    elif clean_number(raw):
         try:
-            return int(raw.strip())
+            return int(clean_number(raw))
         except ValueError:
             pass
     else:
         return definition.default
-    logger.warning("[SETTINGS] environment value for %s is invalid; using the built-in default", definition.key)
+    _warn_once(f"env:{definition.key}", "[SETTINGS] environment value for %s is invalid; using the built-in default (this is logged once per startup)", definition.key)
     return definition.default
 
 
@@ -111,7 +127,7 @@ def get(key: str) -> int | str:
         try:
             return parse(definition, stored)
         except SettingError:
-            logger.warning("[SETTINGS] stored value for %s is invalid; ignoring the override", key)
+            _warn_once(f"stored:{key}", "[SETTINGS] stored value for %s is invalid; ignoring the override (this is logged once per startup)", key)
     return _env_or_default(definition)
 
 
@@ -226,7 +242,8 @@ def describe() -> list[dict]:
 
 
 def reset() -> None:
-    """Test helper: forget every override."""
+    """Test helper: forget every override and the once-per-startup warnings."""
     with _lock:
         _overrides.clear()
         _meta.clear()
+        _warned.clear()

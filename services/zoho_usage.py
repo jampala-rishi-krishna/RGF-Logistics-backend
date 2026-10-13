@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import threading
 import time
 from collections import Counter
@@ -171,7 +172,7 @@ def budget() -> int:
 
 def org_limit() -> int:
     try:
-        return max(1, int(os.environ.get("ZOHO_ORG_DAILY_LIMIT", "10000")))
+        return max(1, int(re.sub(r"[,\s\u00a0\u202f]", "", os.environ.get("ZOHO_ORG_DAILY_LIMIT", "10000"))))
     except ValueError:
         return 10000
 
