@@ -1,6 +1,6 @@
 """Zoho Inventory transfer orders (TO) for Load Planning.
 
-Only open (Draft or Approved) transfer orders on the Mets <-> Glacier route (both directions) are ever shown or assigned. Warehouses are matched by their Zoho
+Only DRAFT transfer orders on the Mets <-> Glacier route (both directions) are ever shown or assigned. Warehouses are matched by their Zoho
 warehouse IDs (services/branches.py STOCK_RULES, env-overridable) - never by name. Every other warehouse (e.g. Production Area RC) is dropped
 right after the fetch.
 
@@ -102,16 +102,13 @@ def route_of(record: dict) -> tuple[str | None, str | None]:
     return warehouse_side(record.get("from_warehouse_id")), warehouse_side(record.get("to_warehouse_id"))
 
 
-OPEN_STATUSES = {"draft", "approved"}  # not yet shipped: a Draft TO, or one approved in Zoho that has not gone in transit
-
-
 def is_draft(record: dict) -> bool:
-    """Open for dispatch: Draft or Approved (in_transit / transferred / void are never shown)."""
-    return _s(record.get("status")).casefold().replace(" ", "_") in OPEN_STATUSES
+    """Draft ONLY (agreed rule). Approved, In Transit, Transferred, Partially Transferred, Pending and Void are never shown or assigned."""
+    return _s(record.get("status")).casefold().replace(" ", "_") == "draft"
 
 
 def is_wanted(record: dict) -> bool:
-    """Draft or Approved AND (Mets -> Glacier OR Glacier -> Mets). Anything else (other warehouses, other statuses) is excluded."""
+    """Draft AND (Mets -> Glacier OR Glacier -> Mets). Anything else (other warehouses, other statuses) is excluded."""
     return is_draft(record) and route_of(record) in {("mets", "glacier"), ("glacier", "mets")}
 
 
@@ -358,7 +355,7 @@ def list_rows(start: date, end: date, *, force: bool = False) -> tuple[list[Sale
 
 def ensure_row(order_id: str, *, validate: bool = False) -> SalesOrderCache:
     """Row with its lines for an id, fetching the detail from Zoho (one call) when it is not in memory. `validate` (assigning a fresh TO)
-    re-checks Draft/Approved + Mets<->Glacier; an already-assigned TO is loaded without it, whatever Zoho says now."""
+    re-checks Draft + Mets<->Glacier; an already-assigned TO is loaded without it, whatever Zoho says now."""
     tid = zoho_id(order_id)
     with _lock:
         record = (_list["records"] or {}).get(tid)
@@ -367,7 +364,7 @@ def ensure_row(order_id: str, *, validate: bool = False) -> SalesOrderCache:
         detail = fetch_detail(tid, record)
     base = {**(record or {}), **detail}
     if validate and not is_wanted(base):
-        raise NotAssignable(f"{base.get('transfer_order_number') or tid} is not an open (Draft/Approved) Mets <-> Glacier transfer order.")
+        raise NotAssignable(f"{base.get('transfer_order_number') or tid} is not a Draft Mets <-> Glacier transfer order.")
     return build_row(record or detail, detail)
 
 
