@@ -127,7 +127,7 @@ def build_package(db, warehouse, order_ids, date_from: str | None = None, date_t
     start = date_from or today
     end = date_to or start
     caption = f"{name} - {start} to {end} - Confirmed orders - Generated {datetime.now(PHT).strftime('%Y-%m-%d %H:%M')} PHT"
-    pdf = make_pdf(rows, caption, "confirmed").getvalue()
+    pdf = make_pdf(rows, caption, "confirmed", warehouse_fill=False).getvalue()
     xlsx = make_excel(rows, caption, "confirmed", warehouse_fill=False).getvalue()
     counts: dict[str, int] = {}
     for order in orders:

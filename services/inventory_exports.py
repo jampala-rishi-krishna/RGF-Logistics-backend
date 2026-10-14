@@ -269,7 +269,7 @@ def legend_markup() -> str:
     return f"Legend - order number colour: {parts}. Glacier rows are filled light blue in the Excel export; Mets rows have no fill."
 
 
-def make_pdf(rows: list[list], caption: str, layout: str = "default") -> BytesIO:
+def make_pdf(rows: list[list], caption: str, layout: str = "default", warehouse_fill: bool = True) -> BytesIO:
     output = BytesIO(); doc = SimpleDocTemplate(output, pagesize=landscape(A3), rightMargin=0.35 * inch, leftMargin=0.35 * inch, topMargin=0.35 * inch, bottomMargin=0.35 * inch)
     styles = getSampleStyleSheet(); title = ParagraphStyle("ExportTitle", parent=styles["Title"], fontName="Helvetica-Bold", fontSize=20, leading=24, textColor=RARE_RED); heading = ParagraphStyle("ExportHeading", parent=styles["Heading2"], fontName="Helvetica", fontSize=13, leading=16, textColor=BRAND_BLACK); caption_style = ParagraphStyle("ExportCaption", parent=styles["Normal"], fontName="Helvetica", fontSize=9, leading=11, textColor=BRAND_BLACK)
     # Paragraph backgrounds must stay unset: ReportLab would paint them only
@@ -287,6 +287,8 @@ def make_pdf(rows: list[list], caption: str, layout: str = "default") -> BytesIO
     negative_style = cell_style.clone("NegativeStock", textColor=NEGATIVE_RED, fontName="Helvetica-Bold")
     data = [[Paragraph(escape(header), confirmed_header_style if confirmed else header_style) for header in headers]]
     heading_rows: list[int] = []
+    glacier_rows: list[int] = []
+    warehouse_col = CONFIRMED_WAREHOUSE_COLUMN if confirmed else DEFAULT_WAREHOUSE_COLUMN
     items = list(group_by_truck(rows)) if confirmed else [("row", row) for row in rows]
     for kind, row in items:
         if kind == "heading":
@@ -294,6 +296,8 @@ def make_pdf(rows: list[list], caption: str, layout: str = "default") -> BytesIO
             data.append([Paragraph(f"<b>Truck: {escape(_text(row))}</b>", cell_style)] + [""] * (len(headers) - 1))
             continue
         cells = []
+        if warehouse_fill and row_warehouse_key(row, warehouse_col) == "glacier":
+            glacier_rows.append(len(data))  # same light-blue row fill as the Excel export
         for index, value in enumerate(row):
             style = cell_style
             if index == order_col:
@@ -312,6 +316,8 @@ def make_pdf(rows: list[list], caption: str, layout: str = "default") -> BytesIO
     commands = [("BACKGROUND", (0, 0), (-1, 0), CYAN if confirmed else RARE_RED), ("TEXTCOLOR", (0, 0), (-1, 0), BRAND_BLACK if confirmed else BRAND_WHITE), ("TEXTCOLOR", (0, 1), (-1, -1), BRAND_BLACK), ("BACKGROUND", (0, 1), (-1, -1), BRAND_WHITE), ("VALIGN", (0, 0), (-1, -1), "TOP"), ("LEFTPADDING", (0, 0), (-1, -1), 4), ("RIGHTPADDING", (0, 0), (-1, -1), 4), ("TOPPADDING", (0, 0), (-1, -1), 4), ("BOTTOMPADDING", (0, 0), (-1, -1), 4), ("GRID", (0, 0), (-1, -1), 0.25, BRAND_BLACK if confirmed else BEIGE)]
     if not confirmed:
         commands.append(("ROWBACKGROUNDS", (0, 1), (-1, -1), [BRAND_WHITE, BEIGE]))
+    for glacier_row in glacier_rows:
+        commands.append(("BACKGROUND", (0, glacier_row), (-1, glacier_row), colors.HexColor("#" + GLACIER_FILL)))
     for heading_row in heading_rows:
         commands += [("SPAN", (0, heading_row), (-1, heading_row)), ("BACKGROUND", (0, heading_row), (-1, heading_row), colors.HexColor("#D9D9D9"))]
     table.setStyle(TableStyle(commands))

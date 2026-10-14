@@ -121,3 +121,17 @@ def test_pdf_builds_with_colour_markup():
     for layout, data in (("confirmed", rows), ("default", ex.flatten_order(so("SO-1")) + ex.flatten_order(to("TO-1")))):
         pdf = ex.make_pdf(data, "cap", layout).getvalue()
         assert pdf.startswith(b"%PDF") and len(pdf) > 1000
+
+
+def test_pdf_fills_glacier_rows_light_blue_unless_single_warehouse(monkeypatch):
+    seen = []
+    real = ex.TableStyle
+    monkeypatch.setattr(ex, "TableStyle", lambda commands: seen.append(commands) or real(commands))
+    rows = confirmed_rows(so("SO-1"), to("TO-1"))
+    rows[0] = list(rows[0]); rows[0][ex.CONFIRMED_WAREHOUSE_COLUMN] = "Glacier Cold Storage"
+    glacier = [i for i, row in enumerate(rows) if ex.row_warehouse_key(row, ex.CONFIRMED_WAREHOUSE_COLUMN) == "glacier"]
+    assert glacier, "fixture needs a Glacier-line row"
+    ex.make_pdf(rows, "cap", "confirmed")
+    ex.make_pdf(rows, "cap", "confirmed", warehouse_fill=False)
+    fills = lambda commands: [c for c in commands if c[0] == "BACKGROUND" and getattr(c[3], "hexval", lambda: "")().upper().endswith(ex.GLACIER_FILL)]
+    assert len(fills(seen[0])) == len(glacier) and not fills(seen[1])
