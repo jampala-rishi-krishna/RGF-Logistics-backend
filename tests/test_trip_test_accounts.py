@@ -302,7 +302,7 @@ def test_full_e2e_flow_on_sqlite_leaves_a_closed_trip_and_blocks_external_calls(
     assert report.ok, report.table()
     names = [name for name, _, _ in report.rows]
     for expected in ("driver logs in with phone number", "helper repeating the driver's acknowledge -> already_done", "helper repeating start -> already_done (not 409)",
-                     "replaying an acknowledge with the same idempotency_key returns replayed=true", "driver ends the trip", "trip status is closed (database)"):
+                     "replaying an acknowledge with the same idempotency_key returns replayed=true", "driver ends the trip -> handover created automatically", "trip status is closed (database)"):
         assert expected in names
     table = report.table()
     assert "PASS" in table and "FAIL" not in table and "0 failed" in table

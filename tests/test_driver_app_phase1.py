@@ -333,5 +333,6 @@ def test_hardcopies_after_handover_are_with_the_officer_then_missing(env):
     post(env, "driver", "/api/driver/batches/B1/end", stamp())
     post(env, "driver", "/api/driver/batches/B1/handover", stamp(officer_user_id=env.officer, items=[{"so_id": "s1", "handed_over": True}, {"so_id": "s2", "handed_over": False, "note": "customer kept it"}]))
     rows = {r["so_number"]: r for r in env.client.get("/api/driver-overview/hardcopies", headers=env.h["dispatcher"]).json()["rows"]}
-    assert rows["SO-s1"]["state"] == "with_officer" and rows["SO-s1"]["holder"] == "Olivia Officer" and rows["SO-s1"]["invoice_no"] == "11"
-    assert rows["SO-s2"]["state"] == "not_handed_over" and rows["SO-s2"]["holder"] == "Emert Hirondo"
+    # End trip handed every copy over automatically (no officer chosen; the officer queue shows it to every officer)
+    assert rows["SO-s1"]["state"] == "with_officer" and rows["SO-s1"]["holder"] == "Logistics officer" and rows["SO-s1"]["invoice_no"] == "11"
+    assert rows["SO-s2"]["state"] == "with_officer" and rows["SO-s2"]["invoice_no"] == "12"

@@ -13,6 +13,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
 
+from fastapi import HTTPException
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
@@ -21,7 +22,7 @@ from sqlalchemy.orm import Session
 from auth.dependencies import CurrentUser
 from models.trip import (KIND_ACKNOWLEDGE, KIND_CHECKOUT, InvoiceHandover, InvoiceHandoverItem, SoAcknowledgement, Trip, TripPhoto, TripStop)
 from models.user import User
-from services import day_model, driver_assignments, form_templates, live_sales_order_cache, media_storage, stop_order, transfer_orders, trip_events, trip_state, warehouses
+from services import day_model, dispatch_changes, driver_assignments, form_templates, live_sales_order_cache, media_storage, stop_order, transfer_orders, trip_events, trip_state, warehouses
 from services.sales_order_location import address_lines
 from services.trip_events import Actor, fail
 
@@ -58,9 +59,14 @@ class HandoverItemBody(BaseModel):
 
 
 class HandoverBody(ActionBody):
-    officer_user_id: int
+    officer_user_id: int | None = None  # optional since End trip creates the handover itself (no officer chosen)
     note: str | None = None
     items: list[HandoverItemBody] = Field(default_factory=list)
+
+
+class AcknowledgeAllBody(ActionBody):
+    template_id: int | None = None
+    answers: dict[str, list[dict]] = Field(default_factory=dict)  # so_id -> answers as the single acknowledge takes (checklist on only)
 
 
 # ---- plumbing ---------------------------------------------------------------------------------------------------------
@@ -69,6 +75,7 @@ class HandoverBody(ActionBody):
 @dataclass
 class Duplicate:
     done_by: dict
+    response: dict = field(default_factory=dict)  # extra response keys (e.g. the handover of an ended trip)
 
 
 @dataclass
@@ -76,6 +83,8 @@ class Done:
     event_type: str
     so_id: str | None = None
     payload: dict = field(default_factory=dict)
+    response: dict = field(default_factory=dict)  # extra response keys, stored with the result (so a replay returns them)
+    extra_events: list = field(default_factory=list)  # [(event_type, payload)] written in the same transaction, without the key
 
 
 @dataclass
@@ -105,6 +114,7 @@ class Ctx:
     def row_of(self, so_id: str | None):
         row = next((r for r in self.rows if r.id == so_id), None)
         if row is None:
+            dispatch_changes.fail_if_order_removed(self.db, self.batch_id, so_id)  # 409 order_removed (contract 4)
             fail(404, "That order is not part of this assignment.", "not_found")
         return row
 
@@ -162,8 +172,16 @@ def _crew_member(db: Session, user: CurrentUser, batch_id: str) -> list:
         fail(403, "This login is not linked to a driver record. Contact dispatch.", "forbidden")
     rows = driver_assignments.rows_for_batch(db, user.staff_id, batch_id)
     if not rows:
+        dispatch_changes.fail_if_trip_removed(db, user.staff_id, batch_id)  # 409 trip_removed when dispatch took it away (contract 4)
         fail(404, "Assignment not found.", "not_found")  # same answer for "does not exist" and "not your batch"
     return rows
+
+
+def _own(rows: list, by_so: dict) -> dict:
+    """Workflow rows (acks / stops) of the orders still on the batch: an order dispatch removed keeps its history rows, but they
+    must not block or count for the rest of the trip."""
+    ids = {row.id for row in rows}
+    return {so_id: value for so_id, value in by_so.items() if so_id in ids}
 
 
 def _ensure_trip(ctx: Ctx) -> Trip:
@@ -201,11 +219,11 @@ def run_action(db: Session, user: CurrentUser, batch_id: str, body: ActionBody, 
     data = trip_state.load(db, [batch_id], names=False)
     trip = data.trips.get(batch_id)
     ctx = Ctx(db=db, user=user, batch_id=batch_id, rows=rows, body=body, so_id=so_id, received_at=received_at, client_ts=client_ts, gps=gps, trip=trip,
-              acks=data.acks.get(trip.id, {}) if trip else {}, stops=data.stops.get(trip.id, {}) if trip else {}, handover=data.handovers.get(batch_id))
+              acks=_own(rows, data.acks.get(trip.id, {})) if trip else {}, stops=_own(rows, data.stops.get(trip.id, {})) if trip else {}, handover=data.handovers.get(batch_id))
     try:
         outcome = handler(ctx)
         if isinstance(outcome, Duplicate):
-            return _response(db, user, batch_id, already_done=True, done_by=outcome.done_by)
+            return {**_response(db, user, batch_id, already_done=True, done_by=outcome.done_by), **outcome.response}
         db.flush()
     except IntegrityError:  # a concurrent request wrote the same thing
         db.rollback()
@@ -213,10 +231,13 @@ def run_action(db: Session, user: CurrentUser, batch_id: str, body: ActionBody, 
         if replay is not None:
             return replay
         fail(409, "Someone else just updated this trip. Refresh and check the new state.", "conflict")
-    result = _response(db, user, batch_id, already_done=False, done_by=None)
+    result = {**_response(db, user, batch_id, already_done=False, done_by=None), **outcome.response}
     actor = Actor(user_id=user.id, role=user.role, staff_id=user.staff_id, name=user.full_name)
     trip_events.add_event(db, trip_id=ctx.trip.id if ctx.trip else None, batch_id=batch_id, event_type=outcome.event_type, actor=actor, received_at=received_at,
                           client_ts=client_ts, gps=gps, so_id=outcome.so_id or so_id, key=body.idempotency_key, payload=outcome.payload, result=result)
+    for extra_type, extra_payload in outcome.extra_events:
+        trip_events.add_event(db, trip_id=ctx.trip.id if ctx.trip else None, batch_id=batch_id, event_type=extra_type, actor=actor, received_at=received_at,
+                              client_ts=client_ts, gps=gps, payload=extra_payload)
     replay = trip_events.commit_or_replay(db, body.idempotency_key)
     if replay is not None:
         return replay
@@ -235,19 +256,37 @@ def _acknowledge(ctx: Ctx):
     if ctx.trip is not None and ctx.trip.status != "pending":
         fail(409, "The trip has already started.", OUT_OF_ORDER)
     body: AcknowledgeBody = ctx.body  # type: ignore[assignment]
-    template = form_templates.load_for_kind(ctx.db, KIND_ACKNOWLEDGE, body.template_id)
-    if template is None:
-        fail(422, "That checklist version does not exist.", "validation", [{"key": "template_id", "message": "Unknown checklist version."}])
-    answers, errors = form_templates.validate_acknowledgement(template, body.answers, media_storage.is_enabled(), _photo_checker(ctx.db, ctx.batch_id))
-    if errors:
-        fail(422, "Please complete the checklist.", "validation", errors)
+    template, answers = _checked_answers(ctx, body.template_id, body.answers)
     trip = _ensure_trip(ctx)
+    _add_ack(ctx, trip, ctx.so_id, template, answers, body.discrepancy_note)
+    return Done("acknowledged", ctx.so_id, {"template_id": template["id"], "template_version": template["version"], "answers": answers, "discrepancy_note": body.discrepancy_note})
+
+
+def _checked_answers(ctx: Ctx, template_id: int | None, given: list[dict] | None, error_prefix: str = "") -> tuple[dict, list[dict]]:
+    """(template, answers to store). Checklist ON (an admin-saved, non-draft template): answers are validated (422 validation).
+    Checklist OFF (default): no answers are required; any sent are kept only when they are valid."""
+    enabled = form_templates.acknowledge_checklist_enabled(ctx.db)
+    template = form_templates.acknowledge_template_for_write(ctx.db, template_id)
+    if template is None:
+        if template_id is not None:
+            fail(422, "That checklist version does not exist.", "validation", [{"key": "template_id", "message": "Unknown checklist version."}])
+        fail(409, "The acknowledge checklist template is not configured yet. Contact dispatch.", "not_found")
+    if not enabled and not given:
+        return template, []
+    answers, errors = form_templates.validate_acknowledgement(template, given, media_storage.is_enabled(), _photo_checker(ctx.db, ctx.batch_id))
+    if errors:
+        if not enabled:
+            return template, []
+        fail(422, "Please complete the checklist.", "validation", [{**e, "key": f"{error_prefix}{e['key']}"} for e in errors])
+    return template, answers
+
+
+def _add_ack(ctx: Ctx, trip: Trip, so_id: str, template: dict, answers: list[dict], note: str | None = None) -> None:
     ctx.db.add(SoAcknowledgement(
-        trip_id=trip.id, batch_id=ctx.batch_id, so_id=ctx.so_id, template_id=template["id"], template_version=template["version"], answers=answers,
-        discrepancy_note=(body.discrepancy_note or "").strip() or None, acknowledged_at=ctx.client_ts, received_at=ctx.received_at,
+        trip_id=trip.id, batch_id=ctx.batch_id, so_id=so_id, template_id=template["id"], template_version=template["version"], answers=answers,
+        discrepancy_note=(note or "").strip() or None, acknowledged_at=ctx.client_ts, received_at=ctx.received_at,
         by_user_id=ctx.user.id, by_role=ctx.user.role, by_staff_id=ctx.user.staff_id, gps=ctx.gps,
     ))
-    return Done("acknowledged", ctx.so_id, {"template_id": template["id"], "template_version": template["version"], "answers": answers, "discrepancy_note": body.discrepancy_note})
 
 
 def _start(ctx: Ctx):
@@ -314,11 +353,14 @@ def _check_out(ctx: Ctx):
     crew = trip_state.crew_of(ctx.rows)
     prefill = driver_assignments._checkout_prefill(template, row, ", ".join(address_lines(row.shipping_address)), crew)
     is_transfer = transfer_orders.order_type_of(row) == "TO"
-    answers, errors = form_templates.validate_checkout(template, body.answers, media_storage.is_enabled(), _photo_checker(ctx.db, ctx.batch_id), prefill, skip_keys=frozenset({"invoice_dr_number"}) if is_transfer else frozenset())
+    sent = dict(body.answers or {})
+    if is_transfer:
+        sent.pop("invoice_dr_number", None)  # contract 5: whatever the phone sent is ignored for a TO
+    answers, errors = form_templates.validate_checkout(template, sent, media_storage.is_enabled(), _photo_checker(ctx.db, ctx.batch_id), prefill, skip_keys=frozenset({"invoice_dr_number"}) if is_transfer else frozenset())
     if errors:
         fail(422, "Please complete the delivery form.", "validation", errors)
-    if is_transfer and any(item["key"] == "invoice_dr_number" for item in template["items"]):
-        # No invoice for a transfer order: its TO# is stored as the reference, so the timeline, hard copies and CSV show it.
+    if is_transfer:
+        # No invoice for a transfer order: the server stores its TO# as the reference, so the timeline, handover, hard copies and CSV show it.
         answers.append({"key": "invoice_dr_number", "label": "Reference (TO#)", "type": "text", "value": row.salesorder_number or row.id})
     values = {a["key"]: a["value"] for a in answers}
     stop.status = "checked_out"
@@ -336,7 +378,7 @@ def _check_out(ctx: Ctx):
 def _end(ctx: Ctx):
     trip = ctx.trip
     if trip is not None and trip.status not in ("pending", "on_trip"):
-        return Duplicate(_done_by(ctx.db, trip.ended_by_user_id, trip.ended_at))
+        return Duplicate(_done_by(ctx.db, trip.ended_by_user_id, trip.ended_at), {"handover": handover_payload(ctx.db, ctx.handover, ctx.rows)})
     if trip is None or trip.status != "on_trip":
         fail(409, "Start the trip before ending it.", OUT_OF_ORDER)
     remaining = sum(1 for s in ctx.stops.values() if s.status != "checked_out") + sum(1 for row in ctx.rows if row.id not in ctx.stops)
@@ -346,20 +388,64 @@ def _end(ctx: Ctx):
     distance = trip_events.distance_between(ctx.gps, warehouse["lat"], warehouse["lng"]) if warehouse else None
     trip.status = "returned"
     trip.ended_at, trip.ended_received_at, trip.ended_by_user_id, trip.ended_gps, trip.end_distance_m = ctx.client_ts, ctx.received_at, ctx.user.id, ctx.gps, distance
-    return Done("trip_ended", None, {"end_distance_m": distance})
+    # Contract 2: End trip hands over every invoice / DR (TO: its TO#) automatically, in the same transaction; the officer validates.
+    handover, items = _create_handover(ctx, trip, officer_user_id=None, note=None, handed={row.id: (True, None) for row in ctx.rows})
+    return Done("trip_ended", None, {"end_distance_m": distance, "handover_id": handover.id}, response={"handover": handover_payload(ctx.db, handover, ctx.rows, items)},
+                extra_events=[("handover_submitted", {"handover_id": handover.id, "automatic": True, "items": [{"so_id": i.so_id, "invoice_no": i.invoice_no} for i in items]})])
+
+
+def _create_handover(ctx: Ctx, trip: Trip, *, officer_user_id: int | None, note: str | None, handed: dict[str, tuple[bool, str | None]]):
+    handover = InvoiceHandover(trip_id=trip.id, batch_id=ctx.batch_id, status="pending", submitted_by_user_id=ctx.user.id, submitted_at=ctx.client_ts,
+                               submitted_received_at=ctx.received_at, submitted_gps=ctx.gps, officer_user_id=officer_user_id, note=note)
+    ctx.db.add(handover)
+    ctx.db.flush()
+    by_id = {row.id: row for row in ctx.rows}
+    items = []
+    for so_id, (handed_over, crew_note) in handed.items():
+        row = by_id[so_id]
+        item = InvoiceHandoverItem(handover_id=handover.id, so_id=so_id, so_number=row.salesorder_number or row.id, customer_name=row.customer_name, handed_over=handed_over,
+                                   crew_note=crew_note, officer_status="pending", invoice_no=_invoice_no(row, ctx.stops.get(so_id)))
+        ctx.db.add(item)
+        items.append(item)
+    trip.status = "handover_submitted"
+    ctx.handover = handover
+    return handover, items
+
+
+def _invoice_no(row, stop) -> str | None:
+    """Invoice / DR number captured at check-out; a transfer order's reference is always its TO#."""
+    if transfer_orders.order_type_of(row) == "TO":
+        return row.salesorder_number or row.id
+    return trip_state.invoice_no_of(stop)
+
+
+def handover_payload(db: Session, handover: InvoiceHandover | None, rows: list, items: list | None = None) -> dict | None:
+    """Contract 2: {"id","status","items":[{"so_id","so_number","order_type","invoice_no","customer_name","status"}]}."""
+    if handover is None:
+        return None
+    if items is None:
+        items = db.execute(select(InvoiceHandoverItem).where(InvoiceHandoverItem.handover_id == handover.id).order_by(InvoiceHandoverItem.id)).scalars().all()
+    by_id = {row.id: row for row in rows}
+    return {"id": handover.id, "status": handover.status, "items": [
+        {"so_id": i.so_id, "so_number": i.so_number, "order_type": transfer_orders.order_type_of(by_id.get(i.so_id) or i.so_id), "invoice_no": i.invoice_no,
+         "customer_name": i.customer_name, "status": i.officer_status} for i in items]}
 
 
 def _handover(ctx: Ctx):
     existing = ctx.handover
-    if existing is not None:
-        return Duplicate(_done_by(ctx.db, existing.submitted_by_user_id, existing.submitted_at))
+    if existing is not None:  # End trip already created it (contract 2): return it, never a duplicate
+        return Duplicate(_done_by(ctx.db, existing.submitted_by_user_id, existing.submitted_at), {"handover": handover_payload(ctx.db, existing, ctx.rows)})
     trip = ctx.trip
     if trip is None or trip.status != "returned":
         fail(409, "End the trip before handing over invoices.", OUT_OF_ORDER)
     body: HandoverBody = ctx.body  # type: ignore[assignment]
+    if body.officer_user_id is None and not body.items:
+        # A trip ended before automatic handovers existed, sent by the new app (no form): hand over every SO, no officer chosen.
+        handover, items = _create_handover(ctx, trip, officer_user_id=None, note=(body.note or "").strip() or None, handed={row.id: (True, None) for row in ctx.rows})
+        return Done("handover_submitted", None, {"officer_user_id": None, "automatic": True, "note": body.note}, response={"handover": handover_payload(ctx.db, handover, ctx.rows, items)})
     errors: list[dict] = []
-    officer = ctx.db.get(User, body.officer_user_id)
-    if officer is None or officer.role != "logistics_officer" or officer.status not in (None, "active"):
+    officer = ctx.db.get(User, body.officer_user_id) if body.officer_user_id is not None else None
+    if body.officer_user_id is not None and (officer is None or officer.role != "logistics_officer" or officer.status not in (None, "active")):
         errors.append({"key": "officer_user_id", "message": "Choose an active logistics officer."})
     by_id = {row.id: row for row in ctx.rows}
     seen: dict[str, HandoverItemBody] = {}
@@ -377,20 +463,76 @@ def _handover(ctx: Ctx):
             errors.append({"key": so_id, "message": f"List {row.salesorder_number or so_id} in the handover."})
     if errors:
         fail(422, "Please check the invoice handover.", "validation", errors)
-    handover = InvoiceHandover(trip_id=trip.id, batch_id=ctx.batch_id, status="pending", submitted_by_user_id=ctx.user.id, submitted_at=ctx.client_ts,
-                               submitted_received_at=ctx.received_at, submitted_gps=ctx.gps, officer_user_id=body.officer_user_id, note=(body.note or "").strip() or None)
-    ctx.db.add(handover)
-    ctx.db.flush()
-    for so_id, item in seen.items():
-        row = by_id[so_id]
-        ctx.db.add(InvoiceHandoverItem(handover_id=handover.id, so_id=so_id, so_number=row.salesorder_number or row.id, customer_name=row.customer_name,
-                                       handed_over=item.handed_over, crew_note=(item.note or "").strip() or None, officer_status="pending", invoice_no=trip_state.invoice_no_of(ctx.stops.get(so_id))))
-    trip.status = "handover_submitted"
-    return Done("handover_submitted", None, {"officer_user_id": body.officer_user_id, "items": [{"so_id": i.so_id, "handed_over": i.handed_over, "note": i.note} for i in body.items], "note": body.note})
+    handover, items = _create_handover(ctx, trip, officer_user_id=body.officer_user_id, note=(body.note or "").strip() or None,
+                                       handed={so_id: (item.handed_over, (item.note or "").strip() or None) for so_id, item in seen.items()})
+    return Done("handover_submitted", None, {"officer_user_id": body.officer_user_id, "items": [{"so_id": i.so_id, "handed_over": i.handed_over, "note": i.note} for i in body.items], "note": body.note},
+                response={"handover": handover_payload(ctx.db, handover, ctx.rows, items)})
 
 
 def acknowledge(db: Session, user: CurrentUser, batch_id: str, so_id: str, body: AcknowledgeBody) -> dict:
     return run_action(db, user, batch_id, body, "acknowledged", _acknowledge, so_id)
+
+
+def acknowledge_all(db: Session, user: CurrentUser, batch_id: str, body: AcknowledgeAllBody) -> dict:
+    """Contract 1: one tap acknowledges every order (SO and TO) of the batch not yet acknowledged, in ONE transaction: per order the
+    same so_acknowledgements row + "acknowledged" trip_events row as the single endpoint (who, when, GPS). The first event carries the
+    idempotency key and the stored response, so a replay of the key returns the first result and writes nothing."""
+    rows = _crew_member(db, user, batch_id)
+    replay = _replay(db, body.idempotency_key, batch_id)
+    if replay is not None:
+        return replay
+    received_at = trip_events.now_utc()
+    client_ts, _adjusted = trip_events.parse_client_ts(body.client_ts, received_at)
+    gps = trip_events.clean_gps(body.gps, body.gps_denied_reason)
+    data = trip_state.load(db, [batch_id], names=False)
+    trip = data.trips.get(batch_id)
+    ctx = Ctx(db=db, user=user, batch_id=batch_id, rows=rows, body=body, so_id=None, received_at=received_at, client_ts=client_ts, gps=gps, trip=trip,
+              acks=_own(rows, data.acks.get(trip.id, {})) if trip else {}, stops=_own(rows, data.stops.get(trip.id, {})) if trip else {}, handover=data.handovers.get(batch_id))
+    ordered = sorted(rows, key=driver_assignments._sort_key)
+    already = [row.id for row in ordered if row.id in ctx.acks]
+    todo = [row for row in ordered if row.id not in ctx.acks]
+    if not todo:  # nothing to write (natural idempotency): same answer every time
+        return {"ok": True, "acknowledged": [], "already_acknowledged": already, "replayed": False, "already_done": True, "done_by": None, "batch": _batch(db, user, batch_id)}
+    if trip is not None and trip.status != "pending":
+        fail(409, "The trip has already started.", OUT_OF_ORDER)
+    checked: list[tuple[str, dict, list[dict]]] = []
+    errors: list[dict] = []
+    for row in todo:
+        try:
+            template, answers = _checked_answers(ctx, body.template_id, body.answers.get(row.id), error_prefix=f"{row.id}:")
+        except HTTPException as exc:
+            detail = exc.detail if isinstance(exc.detail, dict) else {}
+            if detail.get("code") != "validation":
+                raise
+            errors.extend(detail.get("errors") or [{"key": row.id, "message": detail.get("message")}])
+            continue
+        checked.append((row.id, template, answers))
+    if errors:
+        fail(422, "Please complete the checklist for every order.", "validation", errors)
+    try:
+        trip = _ensure_trip(ctx)
+        for so_id, template, answers in checked:
+            _add_ack(ctx, trip, so_id, template, answers)
+        db.flush()
+    except IntegrityError:  # a crew member acknowledged one of these at the same moment
+        db.rollback()
+        replay = trip_events.replay_of(db, body.idempotency_key)
+        if replay is not None:
+            return replay
+        fail(409, "Someone else just updated this trip. Refresh and check the new state.", "conflict")
+    done = [so_id for so_id, _, _ in checked]
+    result = {"ok": True, "acknowledged": done, "already_acknowledged": already, "replayed": False, "already_done": False, "done_by": None, "batch": _batch(db, user, batch_id)}
+    actor = Actor(user_id=user.id, role=user.role, staff_id=user.staff_id, name=user.full_name)
+    for index, (so_id, template, answers) in enumerate(checked):
+        first = index == 0
+        trip_events.add_event(db, trip_id=trip.id, batch_id=batch_id, event_type="acknowledged", actor=actor, received_at=received_at, client_ts=client_ts, gps=gps, so_id=so_id,
+                              key=body.idempotency_key if first else None, payload={"template_id": template["id"], "template_version": template["version"], "answers": answers, "bulk": True},
+                              result=result if first else None)
+    replay = trip_events.commit_or_replay(db, body.idempotency_key)
+    if replay is not None:
+        return replay
+    trip_events.bump()
+    return result
 
 
 def start(db: Session, user: CurrentUser, batch_id: str, body: ActionBody) -> dict:

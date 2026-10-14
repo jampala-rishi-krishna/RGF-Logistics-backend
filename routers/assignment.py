@@ -32,6 +32,7 @@ from services.item_weight import calculate_line_weight_kg, calculate_order_weigh
 from services.delivery_status import is_delivered
 from services.staff_roles import helper_ids_of, staff_kind
 from services import transfer_orders
+from services import dispatch_changes, trip_events
 from services import staff_directory_cache, live_sales_order_cache, memory_tables, vapi_client, vehicle_flags, voice_calls, voice_control, whatsapp_control
 from services.sales_order_history_sync import sync_history_row
 from routers.fleet import invalidate_fleet_cache
@@ -377,9 +378,63 @@ def create_new_driver(body: NewDriverBody, current_user: CurrentUser = Depends(r
 
 class BulkUnassignBody(BaseModel):
     order_ids: list[str]
+    confirm: bool = False  # contract 7: required when an order was already acknowledged / started / checked in
+
+
+class UnassignBody(BaseModel):
+    confirm: bool = False
+
+
+class UnassignPreviewBody(BaseModel):
+    order_ids: list[str]
 
 
 MAX_BULK_UNASSIGN = 200
+
+
+def _candidate(order_id: str, order, *, require_assigned: bool) -> dict:
+    """What the unassign rules need about one order (memory; `order` may be a Neon sales_orders row for the preview)."""
+    state = live_sales_order_cache.get_assignment(order_id) or {}
+    if order is None:
+        return dispatch_changes.candidate(order_id, number=None, order_type=transfer_orders.order_type_of(order_id), batch_id=None, blocker="Order was not found.")
+    status = getattr(order, "assignment_status", None)
+    delivered = status in {"completed", "delivered"} or is_delivered(getattr(order, "raw_json", None) or {})
+    blocker = "Delivered or completed sales orders cannot be unassigned." if delivered else _unassign_blocker(order, require_assigned=require_assigned)
+    return dispatch_changes.candidate(
+        order_id, number=getattr(order, "salesorder_number", None), order_type=transfer_orders.order_type_of(order),
+        batch_id=state.get("assignment_batch_id") or getattr(order, "assignment_batch_id", None),
+        blocker=blocker, delivered=delivered, assignment_status=status, driver_id=getattr(order, "driver_id", None),
+        helper_ids=getattr(order, "helper_ids", None) or state.get("helper_ids") or [],
+        delivery_date=getattr(order, "expected_shipment_date", None) or state.get("expected_shipment_date"),
+    )
+
+
+def _record_unassign(db: Session, user: CurrentUser, row: dict) -> None:
+    """Contract 8: the audit row of one unassigned order, in the caller's (uncommitted) transaction."""
+    batch = row["_batch_id"]
+    remaining = len(live_sales_order_cache.ids_for_batch(batch)) if batch else 0
+    dispatch_changes.add_unassign_event(db, user=user, row=row, remaining=remaining)
+
+
+# Registered before "/{salesorder_id}" so "unassign-preview" is not taken for an order id.
+@router.post("/unassign-preview")
+def unassign_preview(body: UnassignPreviewBody, current_user: CurrentUser = Depends(require_role("admin", "dispatcher")), db: Session = Depends(get_db)):
+    """Contract 6: what unassigning these orders would undo (acknowledged / trip started / checked in -> confirm; delivered -> blocked).
+    Memory first; the Neon sales_orders rows only for ids not in memory, plus the trip rows of the selected batches. Never Zoho."""
+    ids = list(dict.fromkeys(str(value).strip() for value in body.order_ids if str(value).strip()))
+    if not ids:
+        raise HTTPException(400, "Select at least one order.")
+    if len(ids) > MAX_BULK_UNASSIGN:
+        raise HTTPException(400, f"Select at most {MAX_BULK_UNASSIGN} orders at a time.")
+    found = {order_id: live_sales_order_cache.find_cached(order_id) for order_id in ids}
+    missing = [order_id for order_id, order in found.items() if order is None]
+    if missing:
+        from models.sales_order_history import SalesOrderHistory
+
+        for row in db.execute(select(SalesOrderHistory).where(SalesOrderHistory.id.in_(missing))).scalars().all():
+            found[row.id] = row
+    rows = dispatch_changes.describe(db, [_candidate(order_id, found[order_id], require_assigned=len(ids) > 1) for order_id in ids])
+    return dispatch_changes.preview_payload(rows)
 
 
 # Registered before "/{salesorder_id}" (like "new-driver") so "bulk-unassign" is not taken for an order id.
@@ -397,6 +452,7 @@ def bulk_unassign(body: BulkUnassignBody, current_user: CurrentUser = Depends(re
     unassigned: list[str] = []
     skipped: list[dict] = []
     batches: set[str] = set()
+    loaded: list[tuple[str, object]] = []
     for order_id in ids:
         try:
             order = live_sales_order_cache.find_cached(order_id) or live_sales_order_cache.ensure_zoho_data(order_id)
@@ -410,10 +466,22 @@ def bulk_unassign(body: BulkUnassignBody, current_user: CurrentUser = Depends(re
         if blocker:
             skipped.append({"id": order_id, "reason": blocker})
             continue
-        batch = (live_sales_order_cache.get_assignment(order_id) or {}).get("assignment_batch_id")
-        if batch:
-            batches.add(batch)
+        loaded.append((order_id, order))
+    # Contract 7: checked-out orders are skipped with the reason; acknowledged / started / checked-in ones need confirm (else 409, nothing done).
+    rows = dispatch_changes.describe(db, [_candidate(order_id, order, require_assigned=True) for order_id, order in loaded]) if loaded else []
+    for row in rows:
+        if row["blocked"]:
+            skipped.append({"id": row["id"], "reason": row["reason"]})
+    rows = [row for row in rows if not row["blocked"]]
+    if not body.confirm:
+        dispatch_changes.confirm_required(rows)
+    by_id = dict(loaded)
+    for row in rows:
+        order_id, order = row["id"], by_id[row["id"]]
+        if row["_batch_id"]:
+            batches.add(row["_batch_id"])
         _apply_unassign(order, db)
+        _record_unassign(db, current_user, row)
         unassigned.append(order_id)
     if unassigned:
         db.commit()
@@ -559,14 +627,19 @@ def assign_order(salesorder_id: str, body: AssignmentBody, current_user: Current
 
 
 @router.post("/{salesorder_id}/unassign")
-def unassign_order(salesorder_id: str, current_user: CurrentUser = Depends(require_role("admin", "dispatcher")), db: Session = Depends(get_db)):
+def unassign_order(salesorder_id: str, current_user: CurrentUser = Depends(require_role("admin", "dispatcher")), db: Session = Depends(get_db), body: UnassignBody | None = None):
+    """Contract 7: delivered / checked out -> 409 code "delivered"; acknowledged / trip started / checked in without
+    {"confirm": true} -> 409 code "confirm_required" (nothing done). The unassign and its audit event are ONE commit (contract 8)."""
     order = live_sales_order_cache.find_cached(salesorder_id) or live_sales_order_cache.ensure_zoho_data(salesorder_id)
     if order is None:
         raise HTTPException(404, "Sales order was not found.")
-    blocker = _unassign_blocker(order)
-    if blocker:
-        raise HTTPException(409, blocker)
+    row = dispatch_changes.describe(db, [_candidate(salesorder_id, order, require_assigned=False)])[0]
+    if row["blocked"]:
+        raise HTTPException(409, detail={"code": "delivered", "message": row["reason"]})
+    if not (body and body.confirm):
+        dispatch_changes.confirm_required([row])
     _apply_unassign(order, db)
+    _record_unassign(db, current_user, row)
     db.commit()
     _after_unassign()
     return {"success": True, "salesorder_id": order.id, "assignment_status": "unassigned"}
@@ -574,7 +647,7 @@ def unassign_order(salesorder_id: str, current_user: CurrentUser = Depends(requi
 
 def _unassign_blocker(order, *, require_assigned: bool = False) -> str | None:
     """Why this order cannot be unassigned (None = it can). Same rule for one order and for a bulk selection, for SO and TO."""
-    if order.assignment_status in {"completed", "delivered"} or is_delivered(order.raw_json or {}):
+    if order.assignment_status in {"completed", "delivered"} or is_delivered(getattr(order, "raw_json", None) or {}):
         return "Delivered or completed sales orders cannot be unassigned."
     if order.manifest_id is not None or order.assignment_status == "manifested":
         return "Sales orders on a confirmed manifest cannot be unassigned."
@@ -606,6 +679,7 @@ def _apply_unassign(order, db: Session) -> None:
 
 def _after_unassign() -> None:
     live_sales_order_cache.bump_assignment_generation()
+    trip_events.bump()  # driver "today" cache + Driver Overview re-read: the order leaves the crew's payload at once
     invalidate_fleet_cache()
     live_sales_order_cache.invalidate_assigned_zoho()
     live_sales_order_cache.invalidate_windows()

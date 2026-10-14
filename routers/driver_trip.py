@@ -10,7 +10,7 @@ from database import get_db
 from routers.driver import CREW_ROLES, resolve_driver_id
 from services import driver_assignments, trip_workflow
 from services.trip_events import fail
-from services.trip_workflow import AcknowledgeBody, ActionBody, CheckoutBody, HandoverBody
+from services.trip_workflow import AcknowledgeAllBody, AcknowledgeBody, ActionBody, CheckoutBody, HandoverBody
 
 router = APIRouter(prefix="/api/driver", tags=["driver-trip"])
 
@@ -37,6 +37,12 @@ def route(batch_id: str, driver_id: int | None = Query(None), user: CurrentUser 
 @router.post("/batches/{batch_id}/orders/{so_id}/acknowledge")
 def acknowledge(batch_id: str, so_id: str, body: AcknowledgeBody, user: CurrentUser = Depends(crew_or_admin), db: Session = Depends(get_db)):
     return trip_workflow.acknowledge(db, user, batch_id, so_id, body)
+
+
+@router.post("/batches/{batch_id}/acknowledge-all")
+def acknowledge_all(batch_id: str, body: AcknowledgeAllBody, user: CurrentUser = Depends(crew_or_admin), db: Session = Depends(get_db)):
+    """One tap acknowledges every order of the trip (contract 1)."""
+    return trip_workflow.acknowledge_all(db, user, batch_id, body)
 
 
 @router.post("/batches/{batch_id}/start")

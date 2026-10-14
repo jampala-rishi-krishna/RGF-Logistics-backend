@@ -54,10 +54,10 @@ STAFF = {
 @pytest.fixture()
 def env(monkeypatch):
     engine = create_engine("sqlite://", poolclass=StaticPool, connect_args={"check_same_thread": False})
-    from models.trip import DriverAlertRead, DriverIssue, FormTemplate, FormTemplateItem, InvoiceHandover, SoAcknowledgement, Trip, TripStop  # the driver payloads now read the trip workflow tables
+    from models.trip import DriverAlertRead, DriverIssue, FormTemplate, FormTemplateItem, InvoiceHandover, SoAcknowledgement, Trip, TripEvent, TripStop  # the driver payloads now read the trip workflow tables
 
     for table in (User.__table__, UserInvite.__table__, SalesOrderHistory.__table__, SalesOrderLine.__table__, FormTemplate.__table__, FormTemplateItem.__table__,
-                  Trip.__table__, SoAcknowledgement.__table__, TripStop.__table__, InvoiceHandover.__table__, DriverIssue.__table__, DriverAlertRead.__table__):
+                  Trip.__table__, SoAcknowledgement.__table__, TripStop.__table__, TripEvent.__table__, InvoiceHandover.__table__, DriverIssue.__table__, DriverAlertRead.__table__):
         table.create(engine)
     Session = sessionmaker(bind=engine, autoflush=False, expire_on_commit=False)
 

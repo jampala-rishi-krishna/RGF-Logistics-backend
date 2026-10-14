@@ -176,12 +176,14 @@ def test_full_trip_flow_and_chips(env, crew):
     d = detail(env, h)
     assert d["trip"]["can_end"] and d["trip"]["next_action"] == "end"
     end = env.client.post(url("end"), headers=h, json=body()).json()
-    assert end["batch"]["trip"]["chip"] == "returned" and end["batch"]["trip"]["can_submit_handover"]
+    # End trip creates the handover itself (contract 2): every SO, status pending, no officer chosen
+    assert end["batch"]["trip"]["chip"] == "handover_pending" and end["batch"]["trip"]["handover_status"] == "pending" and end["batch"]["trip"]["officer"] is None
+    assert [(i["so_id"], i["order_type"], i["status"]) for i in end["handover"]["items"]] == [("s1", "SO", "pending"), ("s2", "SO", "pending")] and end["handover"]["status"] == "pending"
     officer = make_user(env, "logistics_officer", None, "Off")
     assert env.client.get("/api/driver/officers", headers=h).json() == [{"id": officer, "name": "Off"}]
     items = [{"so_id": "s1", "handed_over": True}, {"so_id": "s2", "handed_over": False, "note": "customer kept it"}]
     r = env.client.post(url("handover"), headers=h, json=body(officer_user_id=officer, items=items)).json()
-    assert r["batch"]["trip"]["chip"] == "handover_pending" and r["batch"]["trip"]["handover_status"] == "pending" and r["batch"]["trip"]["officer"]["id"] == officer
+    assert r["already_done"] is True and r["handover"]["id"] == end["handover"]["id"]  # the old endpoint returns the automatic one
     c = counts(env)
     assert c["trips"] == 1 and c["so_acknowledgements"] == 2 and c["trip_stops"] == 2 and c["invoice_handover_items"] == 2 and c["trip_events"] == 9
     assert env.zoho_calls == []
@@ -269,7 +271,7 @@ def test_offline_queue_replay_twice_creates_no_duplicates(env, crew):
         for path, payload in queue:
             assert env.client.post(url(path), headers=h, json=payload).status_code == 200
     c = counts(env)
-    assert c == {"trips": 1, "so_acknowledgements": 2, "trip_stops": 2, "trip_events": 8, "invoice_handovers": 0, "invoice_handover_items": 0}
+    assert c == {"trips": 1, "so_acknowledgements": 2, "trip_stops": 2, "trip_events": 9, "invoice_handovers": 1, "invoice_handover_items": 2}  # end: + automatic handover
 
 
 # ---- checklist / templates -----------------------------------------------------------------------------------------------
@@ -277,6 +279,9 @@ def test_offline_queue_replay_twice_creates_no_duplicates(env, crew):
 
 def test_checklist_required_items_and_versioning(env, crew):
     h = H(crew)
+    with env.Session() as db:  # the checklist is enforced only once an admin saved a real (non-draft) template
+        db.get(FormTemplate, 1).is_draft = False
+        db.commit()
     r = env.client.post(url("orders/s1/acknowledge"), headers=h, json=body(answers=[]))
     assert r.status_code == 422 and r.json()["detail"]["code"] == "validation"
     keys = {e["key"] for e in r.json()["detail"]["errors"]}
@@ -421,6 +426,11 @@ def test_handover_validation(env):
     env.client.post(url("orders/s1/check-in"), headers=h, json=body())
     env.client.post(url("orders/s1/check-out"), headers=h, json=checkout_body())
     env.client.post(url("end"), headers=h, json=body())
+    with env.Session() as db:  # a trip that ended before automatic handovers existed: the old form still validates
+        db.execute(InvoiceHandoverItem.__table__.delete())
+        db.execute(InvoiceHandover.__table__.delete())
+        db.execute(Trip.__table__.update().values(status="returned"))
+        db.commit()
     officer = make_user(env, "logistics_officer", None, "Off")
     inactive = make_user(env, "logistics_officer", None, "Old", status="disabled")
     other = make_user(env, "dispatcher", None, "Disp")

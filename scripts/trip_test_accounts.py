@@ -582,10 +582,11 @@ def run_trip_e2e(Session, *, password: str, n_orders: int = 3, cleanup: bool = F
 
                 # ---- end + handover ----------------------------------------------------------------------------------
                 r = post(batch_url("end"), dt, **_action_body())
-                report.require("driver ends the trip", r.status_code == 200 and r.json()["batch"]["trip"]["chip"] == "returned", _brief(r))
+                report.require("driver ends the trip -> handover created automatically", r.status_code == 200 and r.json()["batch"]["trip"]["chip"] == "handover_pending"
+                               and len((r.json().get("handover") or {}).get("items") or []) == n_orders, _brief(r))
                 items = [{"so_id": so_id, "handed_over": True} for so_id in so_ids]
                 r = post(batch_url("handover"), dt, **_action_body(officer_user_id=officer_id, items=items))
-                report.require("driver submits the invoice handover to the test officer", r.status_code == 200 and r.json()["batch"]["trip"]["chip"] == "handover_pending", _brief(r))
+                report.require("the old handover endpoint returns the automatic handover (no duplicate)", r.status_code == 200 and r.json().get("already_done") is True, _brief(r))
 
                 # ---- officer validates -------------------------------------------------------------------------------
                 r = login(accounts["officer"].email)
@@ -593,7 +594,7 @@ def run_trip_e2e(Session, *, password: str, n_orders: int = 3, cleanup: bool = F
                 ot = r.json()["token"]
                 r = get("/api/officer/handovers?status=pending", ot)
                 row = next((h for h in (r.json() if r.status_code == 200 else []) if h["batch_id"] == batch_id), None)
-                report.require("officer queue shows the handover (for_me)", row is not None and row["for_me"] is True and row["totals"]["invoices"] == n_orders, _brief(r) if row is None else f"handover {row['handover_id']}, {row['totals']['invoices']} invoices")
+                report.require("officer queue shows the handover", row is not None and row["totals"]["invoices"] == n_orders, _brief(r) if row is None else f"handover {row['handover_id']}, {row['totals']['invoices']} invoices")
                 r = get(f"/api/officer/handovers/{row['handover_id']}", ot)
                 report.require("officer opens the handover detail", r.status_code == 200 and len(r.json()["items"]) == n_orders, _brief(r))
                 item_ids = [i["item_id"] for i in r.json()["items"]]

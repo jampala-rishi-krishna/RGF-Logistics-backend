@@ -119,8 +119,9 @@ def summarize(batch_id: str, rows: list, data: TripData, *, can_act: bool, order
     total = len(rows)
     trip = data.trips.get(batch_id)
     status = trip.status if trip else "pending"
-    acks = data.acks.get(trip.id, {}) if trip else {}
-    stops = data.stops.get(trip.id, {}) if trip else {}
+    own = {row.id for row in rows}  # an order dispatch removed keeps its history rows; they do not count or block here
+    acks = {k: v for k, v in data.acks.get(trip.id, {}).items() if k in own} if trip else {}
+    stops = {k: v for k, v in data.stops.get(trip.id, {}).items() if k in own} if trip else {}
     prog = day_model.progress([row.id for row in rows], trip, acks, stops)  # the ONE counting implementation
     acknowledged, stops_done = prog["acknowledged"], prog["stops_done"]
     current = next((stop for stop in stops.values() if stop.status == "checked_in"), None)

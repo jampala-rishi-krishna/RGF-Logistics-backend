@@ -201,7 +201,9 @@ class Flow:
     def __init__(self, monkeypatch):
         self.user = CurrentUser(id=1, email="pau@example.com", role="dispatcher", full_name="Pau", status="active")
         profile = SimpleNamespace(plate_no="TRK1", rated_capacity_kg=1000, is_reefer=None, is_third_party=False, capacity_note=None)
-        self.db = SimpleNamespace(execute=lambda stmt: SimpleNamespace(scalar_one_or_none=lambda: profile), commit=lambda: None)
+        self.added = []  # rows the unassign adds (its order_unassigned audit events); trip lookups find no trip
+        self.db = SimpleNamespace(execute=lambda stmt: SimpleNamespace(scalar_one_or_none=lambda: profile, scalars=lambda: SimpleNamespace(all=lambda: []), all=lambda: []),
+                                  commit=lambda: None, add=self.added.append)
         self.so = SimpleNamespace(id="so-1", salesorder_number="SO-1", customer_name="Customer 1", shipping_address=None, order_status="confirmed", manifest_id=None, route_id=None,
                                   raw_json={"shipping_address": {"city": "Manila"}, "line_items": [{"quantity": 7, "unit": "kg"}]}, assignment_status="unassigned",
                                   expected_shipment_date=date(2026, 10, 14), vehicle_id=None, driver_id=None, helper_ids=[], assigned_at=None, assigned_by=None, order_type="SO")
@@ -258,6 +260,8 @@ def test_bulk_unassign_returns_orders_counts_by_type_and_clears_email_status(zoh
     assert lc.ids_for_batch(batch) == ["TO:2"]
     assert sorted(i["id"] for i in call_list()["items"]) == ["TO:1"]  # TO 1 is back in the TO tab; TO 2 is still assigned
     assert flow.so.assignment_status == "unassigned"
+    events = [e for e in flow.added if getattr(e, "event_type", None) == "order_unassigned"]
+    assert sorted(e.so_id for e in events) == ["TO:1", "so-1"] and {e.batch_id for e in events} == {batch} and all(e.user_id == 1 and e.result["previous_state"] == "assigned" for e in events)
 
 
 def test_bulk_unassign_validates_the_selection(zoho, flow):

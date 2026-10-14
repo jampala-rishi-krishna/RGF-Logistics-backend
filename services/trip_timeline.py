@@ -6,7 +6,8 @@ yet) + memory (staff directory cache). No Zoho. Queries are batched per batch (o
 from __future__ import annotations
 
 from collections import defaultdict
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
+from types import SimpleNamespace
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -164,7 +165,11 @@ def build_timeline(db: Session, batch_id: str) -> dict | None:
     trip = db.execute(select(Trip).where(Trip.batch_id == batch_id)).scalar_one_or_none()
     rows = batch_rows(db, batch_id)
     if trip is None and not rows:
-        return None
+        if not batch_id or batch_id.startswith("legacy-"):
+            return None
+        # Every order was unassigned before the crew acted: the batch lives on only through its order_unassigned events.
+        if not db.execute(select(TripEvent.id).where(TripEvent.batch_id == batch_id).limit(1)).first():
+            return None
 
     stops: list[TripStop] = []
     acks: dict[str, SoAcknowledgement] = {}
@@ -195,6 +200,11 @@ def build_timeline(db: Session, batch_id: str) -> dict | None:
 
     row_by_so = {r.id: r for r in rows}
     first = rows[0] if rows else None
+    removed_events = [e for e in events if e.event_type == UNASSIGNED]
+    removed = {e.so_id for e in removed_events if e.so_id and e.so_id not in row_by_so}
+    if first is None and trip is None:  # only unassign events left: crew / date from the newest event's snapshot
+        last = (removed_events[-1].payload or {}) if removed_events else {}
+        first = SimpleNamespace(driver_id=last.get("driver_id"), helper_ids=last.get("helper_ids") or [], expected_shipment_date=_day(last.get("delivery_date")), vehicle_id=None, assigned_at=None)
     driver_id = trip.driver_staff_id if trip is not None else first.driver_id
     helper_ids = helper_ids_of(driver_id, trip.helper_staff_ids if trip is not None else first.helper_ids)
     crew = [{"id": driver_id, "name": staff_name(driver_id), "role": "driver", "phone": (staff_directory_cache.get_by_id(driver_id) or {}).get("phone") if driver_id is not None else None}]
@@ -218,6 +228,7 @@ def build_timeline(db: Session, batch_id: str) -> dict | None:
             "ack": _ack_payload(ack, template_items.get(ack.template_id, []), users) if ack else None,
             "stop": _stop_payload(stop, template_items.get(stop.form_template_id, []) if stop.form_template_id else [], users) if stop else None,
             "handover": _handover_item_payload(item, users) if item else None,
+            "removed": so_id in removed,  # unassigned by dispatch after the crew acted on it (history kept)
         })
     number_by_so = {o["so_id"]: o["so_number"] for o in orders}
 
@@ -243,5 +254,24 @@ def build_timeline(db: Session, batch_id: str) -> dict | None:
         "crew": crew,
         "orders": orders,
         "handover": handover_block,
-        "events": [{"type": e.event_type, "at": iso(e.client_ts), "received_at": iso(e.received_at), "by": _by(users, e.user_id, e.role), "so_number": number_by_so.get(e.so_id) if e.so_id else None, "gps": e.gps} for e in events],
+        "events": [_event_payload(e, users, number_by_so) for e in events],
     }
+
+
+UNASSIGNED = "order_unassigned"
+
+
+def _day(value):
+    try:
+        return date.fromisoformat(value) if value else None
+    except ValueError:
+        return None
+
+
+def _event_payload(e: TripEvent, users: dict[int, dict], number_by_so: dict[str, str]) -> dict:
+    out = {"type": e.event_type, "at": iso(e.client_ts), "received_at": iso(e.received_at), "by": _by(users, e.user_id, e.role), "so_number": number_by_so.get(e.so_id) if e.so_id else None, "gps": e.gps}
+    if e.event_type == UNASSIGNED:  # contract 9: shown even after the order left the batch
+        from services import dispatch_changes  # lazy: dispatch_changes -> trip_state -> ... keeps this module import-light
+
+        out.update(dispatch_changes.timeline_entry(e, (out["by"] or {}).get("name")))
+    return out

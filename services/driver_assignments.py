@@ -21,7 +21,7 @@ from sqlalchemy.orm import Session
 
 from models.sales_order_history import SalesOrderHistory
 from models.trip import KIND_CHECKOUT
-from services import day_model, delivery_details, form_templates, live_sales_order_cache, staff_directory_cache, stop_order, transfer_orders, trip_events, trip_state
+from services import day_model, delivery_details, dispatch_changes, form_templates, live_sales_order_cache, staff_directory_cache, stop_order, transfer_orders, trip_events, trip_state
 from services.pack_units import is_pack_unit
 from services.text_repair import repair_deep
 from services.sales_order_location import address_lines, address_object, find_city
@@ -148,6 +148,8 @@ def _order_payload(row, lines: list) -> dict:
         "delivery_status": row.delivery_status,
         "details_loading": contact is None,
         "invoice_hint": invoice_hint,  # pre-fill for the check-out Invoice / DR number; null = the crew types it
+        # Contract 3: a TO uses its TO# (no invoice; the server stores it at check-out); an SO the invoice number already in memory, else null.
+        "invoice_no_prefill": (row.salesorder_number or row.id) if order_type == "TO" else invoice_hint,
     })
 
 
@@ -234,6 +236,12 @@ def build_batches(db: Session, rows: list, driver_id: int, *, with_orders: bool 
 
 
 def today_batches(db: Session, driver_id: int, can_act: bool = True) -> list[dict]:
+    return today_view(db, driver_id, can_act)["batches"]
+
+
+def today_view(db: Session, driver_id: int, can_act: bool = True) -> dict:
+    """{"batches", "dispatch_changes"} of today, cached in memory per (assignment generation, trip-event generation): an unassign
+    bumps both, so a removed order leaves the payload at once and the change is listed."""
     today = manila_today()
     key = (driver_id, today.isoformat(), can_act)
     # Both counters: the live assignment state AND every committed trip action (never serve a stale workflow state).
@@ -241,13 +249,15 @@ def today_batches(db: Session, driver_id: int, can_act: bool = True) -> list[dic
     with _cache_lock:
         hit = _today_cache.get(key)
         if hit is not None and hit[1] == generation and time.monotonic() - hit[0] < TTL_SECONDS:
-            return hit[2]["batches"]
+            return hit[2]
     batches = build_batches(db, rows_for_driver(db, driver_id, today, today), driver_id, can_act=can_act)
+    changes = dispatch_changes.driver_changes(db, driver_id, today, {b["batch_id"] for b in batches})
+    view = {"batches": batches, "dispatch_changes": changes}
     with _cache_lock:
         for stale in [k for k in _today_cache if k[1] != today.isoformat()]:
             del _today_cache[stale]
-        _today_cache[key] = (time.monotonic(), generation, {"batches": batches})
-    return batches
+        _today_cache[key] = (time.monotonic(), generation, view)
+    return view
 
 
 def history_batches(db: Session, driver_id: int, start: date, end: date, can_act: bool = True) -> list[dict]:
@@ -302,3 +312,4 @@ def reset_cache() -> None:
     """Test hook."""
     with _cache_lock:
         _today_cache.clear()
+    form_templates.reset_cache()

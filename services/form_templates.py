@@ -54,8 +54,42 @@ def load_for_kind(db: Session, kind: str, template_id: int | None) -> dict | Non
     return load_active(db, kind) if template_id is None else load_by_id(db, template_id, kind)
 
 
+def acknowledge_checklist_enabled(db: Session) -> bool:
+    """The acknowledge checklist is OFF unless an admin saved a real one: the active acknowledge template is not a draft (the
+    migration seeds a DRAFT placeholder) and has at least one active item. Then one tap acknowledges without any answers.
+    Cached in memory per trip_events.generation() (saving a template bumps it), so the driver payload costs no extra query."""
+    from services import trip_events  # lazy: trip_events is plumbing, no cycle, but keep this module's imports minimal
+
+    generation = trip_events.generation()
+    if _checklist_cache.get("generation") == generation and _checklist_cache.get("db_bind") == id(db.get_bind()):
+        return _checklist_cache["enabled"]
+    template = load_active(db, KIND_ACKNOWLEDGE)
+    enabled = bool(template and not template["is_draft"] and template["items"])
+    _checklist_cache.update(generation=generation, db_bind=id(db.get_bind()), enabled=enabled)
+    return enabled
+
+
+_checklist_cache: dict = {}
+
+
+def reset_cache() -> None:
+    """Test hook."""
+    _checklist_cache.clear()
+
+
+def acknowledge_template_for_write(db: Session, template_id: int | None) -> dict | None:
+    """The template an acknowledgement row points at (so_acknowledgements.template_id is NOT NULL): the named version, else the
+    active one, else the newest acknowledge template of any state (checklist off: answers are empty)."""
+    template = load_for_kind(db, KIND_ACKNOWLEDGE, template_id)
+    if template is None and template_id is None:
+        newest = db.execute(select(FormTemplate).where(FormTemplate.kind == KIND_ACKNOWLEDGE).order_by(FormTemplate.version.desc())).scalars().first()
+        template = _template_payload(db, newest) if newest else None
+    return template
+
+
 def templates_payload(db: Session, storage_enabled: bool) -> dict:
-    return {"photo_storage_enabled": bool(storage_enabled), KIND_ACKNOWLEDGE: load_active(db, KIND_ACKNOWLEDGE), KIND_CHECKOUT: load_active(db, KIND_CHECKOUT)}
+    return {"photo_storage_enabled": bool(storage_enabled), "acknowledge_checklist_enabled": acknowledge_checklist_enabled(db),
+            KIND_ACKNOWLEDGE: load_active(db, KIND_ACKNOWLEDGE), KIND_CHECKOUT: load_active(db, KIND_CHECKOUT)}
 
 
 # ---- value helpers -------------------------------------------------------------------------------------------------

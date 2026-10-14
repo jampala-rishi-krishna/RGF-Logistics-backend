@@ -205,7 +205,8 @@ def outstanding_invoices(db: Session, warehouse: str | None, driver_id: int | No
 
 
 EVENT_LABELS = {"acknowledged": "Acknowledged {so}", "trip_started": "Started the trip", "checked_in": "Arrived at {so}", "checked_out": "Checked out of {so}", "trip_ended": "Ended the trip",
-                "handover_submitted": "Handed over invoices", "officer_acknowledged": "Officer received the invoices", "invoice_validated": "Invoice validated {so}", "invoice_resolved": "Invoice resolved {so}", "trip_closed": "Trip closed"}
+                "handover_submitted": "Handed over invoices", "officer_acknowledged": "Officer received the invoices", "invoice_validated": "Invoice validated {so}", "invoice_resolved": "Invoice resolved {so}", "trip_closed": "Trip closed",
+                "order_unassigned": "{so} removed by dispatch"}
 
 
 def _batch_label(state: str, facts: day_model.BatchFacts) -> str:
@@ -222,6 +223,8 @@ def board(db: Session, day: date, warehouse: str | None, status: str | None, dri
     last_gps_event: dict[str, TripEvent] = {}
     if ids:
         for event in db.execute(select(TripEvent).where(TripEvent.batch_id.in_(ids)).order_by(TripEvent.client_ts, TripEvent.id)).scalars().all():
+            if event.event_type == "order_unassigned":
+                continue  # a dispatcher action, not the crew's last activity (it must not reset "stale")
             last_event[event.batch_id] = event
             if event.gps and event.gps.get("lat") is not None:
                 last_gps_event[event.batch_id] = event

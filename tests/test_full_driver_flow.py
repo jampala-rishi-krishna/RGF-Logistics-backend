@@ -121,10 +121,12 @@ def test_the_full_trip_from_acknowledge_to_officer_validation(env):
     ok3 = post(env, "driver", f"/api/driver/batches/B1/orders/{third}/check-out", stamp(answers={"invoice_dr_number": "000125", "outcome": "Failed", "reason": "Store closed"}))
     assert ok3.status_code == 200 and ok3.json()["batch"]["trip"]["next_action"] == "end"
 
-    # 6. end the trip, hand over the carbon copies
-    assert post(env, "driver", "/api/driver/batches/B1/end", stamp()).json()["batch"]["trip"]["next_action"] == "handover"
+    # 6. end the trip: the handover of every carbon copy is created automatically (no driver form)
+    ended = post(env, "driver", "/api/driver/batches/B1/end", stamp()).json()
+    assert ended["batch"]["trip"]["next_action"] == "wait_officer" and ended["batch"]["trip"]["status"] == "handover_submitted"
+    assert sorted((i["so_number"], i["invoice_no"], i["status"]) for i in ended["handover"]["items"]) == [("SO-1", "000123", "pending"), ("SO-2", "000124", "pending"), ("SO-3", "000125", "pending")]
     handed = post(env, "driver", "/api/driver/batches/B1/handover", stamp(officer_user_id=env.officer, items=[{"so_id": so, "handed_over": True} for so in ("s1", "s2", "s3")]))
-    assert handed.status_code == 200 and handed.json()["batch"]["trip"]["status"] == "handover_submitted"
+    assert handed.status_code == 200 and handed.json()["already_done"] is True and handed.json()["handover"]["id"] == ended["handover"]["id"]  # no duplicate
 
     # 7. the officer validates every line (SO number + Invoice/DR number)
     queue = env.client.get("/api/officer/handovers", headers=env.h["officer"]).json()

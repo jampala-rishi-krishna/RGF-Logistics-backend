@@ -80,13 +80,23 @@ def me(driver_id: int | None = Query(None), user: CurrentUser = Depends(require_
 def today(driver_id: int | None = Query(None), user: CurrentUser = Depends(require_role("driver", "helper", "admin")), db: Session = Depends(get_db)):
     who = resolve_driver_id(user, driver_id)
     staff = staff_directory_cache.get_by_id(who) or {}
-    batches = driver_assignments.today_batches(db, who, can_act(user))
+    view = driver_assignments.today_view(db, who, can_act(user))
+    batches = view["batches"]
     return {
         "date": driver_assignments.manila_today().isoformat(),
         "driver": {"id": who, "name": staff.get("name")},
         "summary": driver_assignments.day_summary(batches, driver_issues.count_open(db, user_id=user.id) if user.role in CREW_ROLES else 0),
         "batches": batches,
+        "dispatch_changes": view["dispatch_changes"],
+        **_flags(db),
     }
+
+
+def _flags(db: Session) -> dict:
+    """Contract 3 flags (also in GET /api/driver/templates). Memory-cached; no extra query per poll."""
+    from services import form_templates, media_storage
+
+    return {"acknowledge_checklist_enabled": form_templates.acknowledge_checklist_enabled(db), "photo_storage_enabled": bool(media_storage.is_enabled())}
 
 
 def _parse_day(value: str, label: str) -> date:
@@ -137,4 +147,5 @@ def assignment_detail(batch_id: str, driver_id: int | None = Query(None), user: 
     if detail is None:
         # Same answer for "does not exist" and "belongs to someone else".
         raise HTTPException(404, "Assignment not found.")
-    return detail
+    changes = driver_assignments.today_view(db, who, can_act(user))["dispatch_changes"]  # cached: no extra query on a hit
+    return {**detail, "dispatch_changes": [c for c in changes if c["batch_id"] == batch_id], **_flags(db)}

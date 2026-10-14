@@ -13,7 +13,7 @@ from sqlalchemy.orm import Session
 from auth.dependencies import CurrentUser
 from models.trip import ISSUE_CATEGORIES, ISSUE_PRIORITIES, ISSUE_STATUSES, DriverIssue, TripPhoto
 from models.user import User
-from services import driver_assignments, trip_events
+from services import dispatch_changes, driver_assignments, trip_events
 from services.trip_events import fail
 from services.trip_timeline import iso, staff_name
 
@@ -77,10 +77,13 @@ def create(db: Session, user: CurrentUser, body: IssueBody) -> dict:
     so_id = (body.so_id or "").strip() or None
     rows = driver_assignments.rows_for_batch(db, user.staff_id, batch_id) if batch_id else []
     if batch_id and not rows:
+        dispatch_changes.fail_if_trip_removed(db, user.staff_id, batch_id)  # 409 trip_removed (contract 4)
         fail(404, "Assignment not found.", "not_found")  # same answer for "does not exist" and "not your batch"
     row = None
     if so_id:
         row = next((r for r in rows if r.id == so_id), None)
+        if row is None and batch_id:
+            dispatch_changes.fail_if_order_removed(db, batch_id, so_id)  # 409 order_removed (contract 4)
         if row is None:
             errors.append({"key": "so_id", "message": "That order is not part of this assignment."})
     photo_ids = list(dict.fromkeys(body.photo_ids))[:5]
