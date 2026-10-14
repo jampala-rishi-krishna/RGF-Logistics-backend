@@ -306,7 +306,7 @@ def driver_detail(db: Session, staff_id: int, start: date, end: date) -> dict:
     for batch in sorted(mine, key=lambda b: (b["date"], b["batch_id"]), reverse=True):
         summary_ = _trip_summary(batch)
         batches.append({"batch_id": batch["batch_id"], "delivery_date": batch["date"].isoformat(), "vehicle": batch["vehicle"], "so_count": len(batch["sos"]), "role": "driver" if batch["driver_id"] == staff_id else "helper",
-                        "driver": {"id": batch["driver_id"], "name": staff_name(batch["driver_id"])}, "trip": summary_})
+                        "driver": {"id": batch["driver_id"], "name": staff_name(batch["driver_id"])}, "helpers": [staff_name(h) for h in batch["helper_ids"] if h != batch["driver_id"]], "trip": summary_})
         totals["sos"] += len(batch["sos"])
         totals["acknowledged"] += len(batch["acks"])
         for stop in batch["stops"]:
