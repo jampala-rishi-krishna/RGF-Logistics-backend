@@ -161,7 +161,7 @@ def _paginate(fetch_fn, list_key: str, max_pages: int, per_page: int = 200, stop
     records: list[dict] = []
     for page in range(1, max_pages + 1):
         payload = fetch_fn(page=page, per_page=per_page)
-        page_records = payload.get(list_key) or []
+        page_records = payload.get(list_key) or (payload.get("transfer_orders") if list_key == "transferorders" else None) or []  # Zoho names this list "transfer_orders"
         records.extend(page_records)
         if stop_when and stop_when(page_records):
             break

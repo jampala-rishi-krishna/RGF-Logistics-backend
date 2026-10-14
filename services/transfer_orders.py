@@ -1,6 +1,6 @@
 """Zoho Inventory transfer orders (TO) for Load Planning.
 
-Only DRAFT transfer orders on the Mets <-> Glacier route (both directions) are ever shown or assigned. Warehouses are matched by their Zoho
+Only open (Draft or Approved) transfer orders on the Mets <-> Glacier route (both directions) are ever shown or assigned. Warehouses are matched by their Zoho
 warehouse IDs (services/branches.py STOCK_RULES, env-overridable) - never by name. Every other warehouse (e.g. Production Area RC) is dropped
 right after the fetch.
 
@@ -102,12 +102,16 @@ def route_of(record: dict) -> tuple[str | None, str | None]:
     return warehouse_side(record.get("from_warehouse_id")), warehouse_side(record.get("to_warehouse_id"))
 
 
+OPEN_STATUSES = {"draft", "approved"}  # not yet shipped: a Draft TO, or one approved in Zoho that has not gone in transit
+
+
 def is_draft(record: dict) -> bool:
-    return _s(record.get("status")).casefold().replace(" ", "_") == "draft"
+    """Open for dispatch: Draft or Approved (in_transit / transferred / void are never shown)."""
+    return _s(record.get("status")).casefold().replace(" ", "_") in OPEN_STATUSES
 
 
 def is_wanted(record: dict) -> bool:
-    """Draft AND (Mets -> Glacier OR Glacier -> Mets). Anything else (other warehouses, other statuses) is excluded."""
+    """Draft or Approved AND (Mets -> Glacier OR Glacier -> Mets). Anything else (other warehouses, other statuses) is excluded."""
     return is_draft(record) and route_of(record) in {("mets", "glacier"), ("glacier", "mets")}
 
 
@@ -139,19 +143,32 @@ FAILURE_BACKOFF_SECONDS = 60
 def _pull() -> dict[str, dict]:
     floor = datetime.now(PHT).date() - timedelta(days=LOOKBACK_DAYS)
     wanted: dict[str, dict] = {}
+    seen = not_draft = off_route = 0
+    statuses: dict[str, int] = {}
+    unknown_warehouses: set[str] = set()
     for page in range(1, MAX_PAGES + 1):
         payload = fetch_transfer_orders_page(page=page, per_page=200)
-        records = [r for r in (payload.get("transferorders") or []) if isinstance(r, dict)]
+        records = [r for r in (payload.get("transfer_orders") or payload.get("transferorders") or []) if isinstance(r, dict)]
         for record in records:
             rid = _record_id(record)
+            seen += 1
+            status = _s(record.get("status")).casefold()
+            statuses[status] = statuses.get(status, 0) + 1
             if rid and is_wanted(record):
                 wanted[rid] = record
+            elif not is_draft(record):
+                not_draft += 1
+            else:
+                off_route += 1
+                unknown_warehouses.update(w for w in (_s(record.get("from_warehouse_id")), _s(record.get("to_warehouse_id"))) if w and not warehouse_side(w))
         has_more = (payload.get("page_context") or {}).get("has_more_page")
         if isinstance(has_more, str):
             has_more = has_more.strip().lower() == "true"
         dates = [d for d in (_as_date(r.get("date")) for r in records) if d]
         if not records or not has_more or (dates and min(dates) < floor):
             break
+    logger.info("[TRANSFER_ORDERS] pull: %d seen, %d kept, %d not draft, %d draft but off Mets<->Glacier; statuses=%s; unmatched warehouse ids=%s",
+                seen, len(wanted), not_draft, off_route, statuses, sorted(unknown_warehouses))
     return wanted
 
 
@@ -341,7 +358,7 @@ def list_rows(start: date, end: date, *, force: bool = False) -> tuple[list[Sale
 
 def ensure_row(order_id: str, *, validate: bool = False) -> SalesOrderCache:
     """Row with its lines for an id, fetching the detail from Zoho (one call) when it is not in memory. `validate` (assigning a fresh TO)
-    re-checks Draft + Mets<->Glacier; an already-assigned TO is loaded without it, whatever Zoho says now."""
+    re-checks Draft/Approved + Mets<->Glacier; an already-assigned TO is loaded without it, whatever Zoho says now."""
     tid = zoho_id(order_id)
     with _lock:
         record = (_list["records"] or {}).get(tid)
@@ -350,7 +367,7 @@ def ensure_row(order_id: str, *, validate: bool = False) -> SalesOrderCache:
         detail = fetch_detail(tid, record)
     base = {**(record or {}), **detail}
     if validate and not is_wanted(base):
-        raise NotAssignable(f"{base.get('transfer_order_number') or tid} is not a Draft Mets <-> Glacier transfer order.")
+        raise NotAssignable(f"{base.get('transfer_order_number') or tid} is not an open (Draft/Approved) Mets <-> Glacier transfer order.")
     return build_row(record or detail, detail)
 
 

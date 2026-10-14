@@ -65,7 +65,7 @@ def zoho(monkeypatch):
 
     def page(page=1, per_page=200):
         fake.list_calls += 1
-        return {"transferorders": [dict(r) for r in RECORDS], "page_context": {"has_more_page": False}}
+        return {"transfer_orders": [dict(r) for r in RECORDS], "page_context": {"has_more_page": False}}
 
     def detail(tid):
         fake.detail_calls.append(tid)
@@ -90,6 +90,13 @@ def zoho(monkeypatch):
 def test_only_draft_mets_glacier_both_directions_by_warehouse_id(zoho):
     records, _ = transfer_orders.get_records()
     assert sorted(records) == ["1", "2", "7"]  # 3/4 other warehouse, 5/6 not Draft, 8 named Mets but its ID is unknown
+
+
+def test_approved_is_open_but_shipped_or_void_are_not():
+    mets, glacier = sorted(transfer_orders.METS_WAREHOUSE_IDS)[0], sorted(transfer_orders.GLACIER_WAREHOUSE_IDS)[0]
+    base = {"from_warehouse_id": glacier, "to_warehouse_id": mets}
+    assert transfer_orders.is_wanted({**base, "status": "approved"}) and transfer_orders.is_wanted({**base, "status": "Draft"})
+    assert not any(transfer_orders.is_wanted({**base, "status": s}) for s in ("in_transit", "transferred", "void"))
 
 
 def test_route_sides_use_ids_never_names():
