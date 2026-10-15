@@ -160,8 +160,10 @@ def _handover_item_payload(item: InvoiceHandoverItem, users: dict[int, dict]) ->
             "checked_at": iso(item.officer_checked_at), "checked_by": _by(users, item.officer_user_id), "resolved_at": iso(item.resolved_at)}
 
 
-def build_timeline(db: Session, batch_id: str) -> dict | None:
-    """Full read-only timeline of a batch, or None when no such batch."""
+def build_timeline(db: Session, batch_id: str, extras: dict | None = None) -> dict | None:
+    """Full read-only timeline of a batch, or None when no such batch. `extras` (optional dict) receives the rows already read
+    (events, stops, acks, items_by_so, template_items, trip, handover) so the Driver Overview drawer adds its fields without
+    reading them twice."""
     trip = db.execute(select(Trip).where(Trip.batch_id == batch_id)).scalar_one_or_none()
     rows = batch_rows(db, batch_id)
     if trip is None and not rows:
@@ -244,6 +246,8 @@ def build_timeline(db: Session, batch_id: str) -> dict | None:
         "handover_status": handover.status if handover else None,
     }
     trip_block["trip_minutes"] = trip_block["duration_minutes"]
+    if extras is not None:
+        extras.update(events=events, stops=stops, acks=acks, items_by_so=items_by_so, template_items=template_items, trip=trip, handover=handover, rows=rows)
     handover_block = None
     if handover is not None:
         handover_block = {"handover_id": handover.id, "status": handover.status, "submitted_at": iso(handover.submitted_at), "submitted_by": _by(users, handover.submitted_by_user_id),

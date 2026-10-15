@@ -232,7 +232,7 @@ def test_driver_scores_exclude_unknown_distance_and_ambiguous_driver_days(monkey
     monkeypatch.setattr(eco_views, "staff_name", lambda sid: f"Driver #{sid}")
     monday = date(2026, 9, 28)
     rows = [
-        drow(km=60, staff=13, offset=0),
+        drow(km=60, staff=13, offset=0, idle_total=0, elsewhere=0),
         drow(km=None, staff=13, offset=1),
         {**drow(km=200, staff=13, offset=2), "data_quality": {"ambiguous_driver_attribution": True}},
     ]

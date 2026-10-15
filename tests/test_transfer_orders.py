@@ -3,7 +3,7 @@ SO + TO assign / unassign / bulk-unassign flow. Mocked only: no Zoho, no databas
 from __future__ import annotations
 
 import os
-from datetime import date
+from datetime import date, datetime
 from types import SimpleNamespace
 
 import pytest
@@ -274,6 +274,14 @@ def test_bulk_unassign_validates_the_selection(zoho, flow):
 
 
 def test_confirmed_orders_lists_assigned_to_next_to_so(zoho, flow, monkeypatch):
+    class AssignmentDay(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            value = datetime.fromisoformat(DAY + "T12:00:00").replace(tzinfo=load_planning.PHT)
+            return value.astimezone(tz) if tz else value.replace(tzinfo=None)
+
+    # This is explicitly the live assigned-cache branch, not a historical read.
+    monkeypatch.setattr(load_planning, "datetime", AssignmentDay)
     flow.assign(["TO:1", "so-1"])
     monkeypatch.setattr(load_planning, "_ack_snapshot", lambda: (set(), {}))
     monkeypatch.setattr(lc, "get_assigned_snapshot_ex", lambda block=True, **kw: (list(lc._assigned_zoho.values()), False))

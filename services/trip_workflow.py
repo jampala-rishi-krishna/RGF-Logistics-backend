@@ -545,7 +545,10 @@ def check_in(db: Session, user: CurrentUser, batch_id: str, so_id: str, body: Ac
 
 
 def check_out(db: Session, user: CurrentUser, batch_id: str, so_id: str, body: CheckoutBody) -> dict:
-    return run_action(db, user, batch_id, body, "checked_out", _check_out, so_id)
+    result = run_action(db, user, batch_id, body, "checked_out", _check_out, so_id)
+    if not result.get("replayed") and not result.get("already_done"):
+        media_storage.after_checkout(db, batch_id, so_id)  # committed: best-effort Drive name / description update, off the request (never raises)
+    return result
 
 
 def end(db: Session, user: CurrentUser, batch_id: str, body: ActionBody) -> dict:

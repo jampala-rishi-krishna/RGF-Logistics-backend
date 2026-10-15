@@ -18,9 +18,9 @@ from zoneinfo import ZoneInfo
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from models.trip import FormTemplate, FormTemplateItem, InvoiceHandover, InvoiceHandoverItem, Trip, TripEvent
+from models.trip import ISSUE_PRIORITIES, ISSUE_STATUSES, DriverIssue, FormTemplate, FormTemplateItem, InvoiceHandover, InvoiceHandoverItem, Trip, TripEvent
 from services import day_model, driver_issues, live_sales_order_cache, order_types, trip_state, staff_directory_cache, trip_events, warehouses
-from services.staff_roles import staff_kind
+from services.staff_roles import helper_ids_of, staff_kind
 from services.trip_events import fail
 from services.trip_timeline import aware, iso, minutes_between, staff_name, users_by_id
 
@@ -171,6 +171,7 @@ def _active_idle_drivers(warehouse: str | None, driver_id: int | None) -> list[d
 
 
 def summary(db: Session, start: date, end: date, warehouse: str | None, driver_id: int | None) -> dict:
+    # legacy for Overview v2: the 12 KPIs; v2 uses trips_list() tile_counts / orders_line. Kept for old clients.
     data = Data(db, start, end)
     batches = data.filtered(warehouse, driver_id)
     by_driver = day_model.by_driver([b["facts"] for b in batches])
@@ -204,7 +205,7 @@ def outstanding_invoices(db: Session, warehouse: str | None, driver_id: int | No
 # ---- board ----------------------------------------------------------------------------------------------------------
 
 
-EVENT_LABELS = {"acknowledged": "Acknowledged {so}", "trip_started": "Started the trip", "checked_in": "Arrived at {so}", "checked_out": "Checked out of {so}", "trip_ended": "Ended the trip",
+EVENT_LABELS = {"acknowledged": "Loaded (acknowledged) {so}", "trip_started": "Started the trip", "checked_in": "Arrived at {so}", "checked_out": "Checked out of {so}", "trip_ended": "Ended the trip",
                 "handover_submitted": "Handed over invoices", "officer_acknowledged": "Officer received the invoices", "invoice_validated": "Invoice validated {so}", "invoice_resolved": "Invoice resolved {so}", "trip_closed": "Trip closed",
                 "order_unassigned": "{so} removed by dispatch"}
 
@@ -214,6 +215,7 @@ def _batch_label(state: str, facts: day_model.BatchFacts) -> str:
 
 
 def board(db: Session, day: date, warehouse: str | None, status: str | None, driver_id: int | None, stale_minutes: int) -> dict:
+    # legacy for Overview v2: one row per PERSON; v2 shows one row per trip (trips_list). Kept for old clients.
     """One row per PERSON. A person on several batches (two Assign clicks to the same truck) is ONE row whose progress is the SUM
     over all of their batches today, so it equals what their own app shows; `batches` lists each trip (Trip 1, Trip 2 ...)."""
     data = Data(db, day, day)
@@ -298,6 +300,7 @@ def _trip_summary(batch: dict) -> dict:
 
 
 def driver_detail(db: Session, staff_id: int, start: date, end: date) -> dict:
+    # legacy for Overview v2: the old person panel; v2 uses trip_detail() other_days + search. Kept for old clients.
     staff = staff_directory_cache.get_by_id(staff_id)
     data = Data(db, start, end)
     mine = [b for b in data.filtered() if b["driver_id"] == staff_id or staff_id in b["helper_ids"]]
@@ -333,6 +336,7 @@ def driver_detail(db: Session, staff_id: int, start: date, end: date) -> dict:
 
 
 def map_points(db: Session, start: date, end: date, warehouse: str | None, driver_id: int | None) -> dict:
+    # legacy for Overview v2: Overview v2 has no map. Kept for old clients.
     data = Data(db, start, end)
     points = []
 
@@ -373,9 +377,17 @@ def _safe(value) -> str:
     return "'" + text if text[:1] in ("=", "+", "-", "@", "\t", "\r") else text
 
 
-def export_csv(db: Session, start: date, end: date, warehouse: str | None, driver_id: int | None) -> bytes:
-    data = Data(db, start, end)
-    batches = data.filtered(warehouse, driver_id)
+def export_csv(db: Session, start: date, end: date, warehouse: str | None, driver_id: int | None, q: str | None = None, tile: str | None = None, stale_minutes: int | None = None) -> bytes:
+    """Same columns / encoding as always. With q / tile: only the orders of the trips the Trips list shows for those filters
+    (the same row matcher, so the file equals the screen)."""
+    if day_model.search_key(q) or tile:
+        rows, _busy, data = _scoped_rows(db, start, end, warehouse, driver_id, stale_minutes or stale_minutes_default())
+        needle = day_model.search_key(q)
+        keep = {r["batch_id"] for r in rows if _row_matches(r, needle) and _row_in_tile(r, tile)}
+        batches = [b for b in data.filtered(warehouse, driver_id) if b["batch_id"] in keep]
+    else:
+        data = Data(db, start, end)
+        batches = data.filtered(warehouse, driver_id)
     users = users_by_id(db, [a.by_user_id for b in batches for a in b["acks"].values()] + [b["handover"].officer_acknowledged_by_user_id for b in batches if b["handover"]] + [i.officer_user_id for b in batches for i in b["items"]])
     buffer = io.StringIO()
     writer = csv.writer(buffer, quoting=csv.QUOTE_MINIMAL, lineterminator="\r\n")
@@ -507,34 +519,252 @@ def create_template_version(db: Session, kind: str, user_id: int, name: str, ite
 # ---- trips list -----------------------------------------------------------------------------------------------------------
 
 
-def trips_list(db: Session, start: date, end: date, warehouse: str | None, driver_id: int | None) -> dict:
-    """One row per batch in the range with the numbers every screen shares (day_model) plus trip timings."""
+TILES = ("loading", "on_road", "back", "closed", "attention")
+TILE_RANK = {"on_road": 1, "loading": 2, "back": 3, "closed": 4}  # after "attention" (0)
+
+
+def parse_tile(value: str | None) -> str | None:
+    if not value:
+        return None
+    tile = value.strip().lower()
+    if tile not in TILES:
+        fail(422, f"tile must be one of {', '.join(TILES)}.", "validation")
+    return tile
+
+
+def _crew(facts: day_model.BatchFacts) -> list[dict]:
+    """Driver first, then helpers; a helper never gets a row of their own."""
+    return ([trip_state._person(facts.driver_id, "driver")] if facts.driver_id is not None else []) + [trip_state._person(h, "helper") for h in facts.helper_ids]
+
+
+def _photo_rules(template_items: dict[int, list]) -> dict[int, list[dict]]:
+    return {tid: [{"key": i.key, "item_type": i.item_type, "required": bool(i.required), "show_when": i.show_when} for i in items if i.item_type == "photo" and i.required and i.active is not False]
+            for tid, items in template_items.items()}
+
+
+def _batch_extras(db: Session, batches: list[dict]) -> tuple[dict, dict, dict]:
+    """What attention flags need besides the trip data, for every batch in scope in 3 batched reads (inside the 15 s cache):
+    trip_events of the batches, their OPEN driver_issues, and the required photo items of the check-out templates used."""
+    ids = [b["batch_id"] for b in batches]
+    events: dict[str, list] = defaultdict(list)
+    issues: dict[str, list] = defaultdict(list)
+    if ids:
+        for event in db.execute(select(TripEvent).where(TripEvent.batch_id.in_(ids))).scalars().all():
+            events[event.batch_id].append(event)
+        for issue in db.execute(select(DriverIssue).where(DriverIssue.batch_id.in_(ids), DriverIssue.status.in_(driver_issues.OPEN_STATUSES))).scalars().all():
+            issues[issue.batch_id].append(issue)
+    template_ids = {s.form_template_id for b in batches for s in b["stops"] if s.status == "checked_out" and s.form_template_id}
+    items: dict[int, list] = defaultdict(list)
+    if template_ids:
+        for item in db.execute(select(FormTemplateItem).where(FormTemplateItem.template_id.in_(template_ids), FormTemplateItem.item_type == "photo")).scalars().all():
+            items[item.template_id].append(item)
+    return events, issues, _photo_rules(items)
+
+
+def _invoice_nos(facts: day_model.BatchFacts) -> list[str]:
+    numbers = [trip_state.invoice_no_of(s) for s in facts.stops.values()] + [i.invoice_no for i in facts.items]
+    return list(dict.fromkeys(str(n) for n in numbers if n))
+
+
+def _trip_row(batch: dict, number: tuple[int, int], now: datetime, stale_minutes: int, events: list, issues: list, rules: dict) -> dict:
+    """ONE trip (batch) row: every key the old /trips rows had, plus the v2 fields (CONTRACT)."""
+    f = batch["facts"]
+    trip = batch["trip"]
+    step = day_model.driver_step(f)
+    minutes = minutes_between(trip.started_at, trip.ended_at) if trip else None
+    return {
+        "batch_id": batch["batch_id"], "date": batch["date"].isoformat() if batch["date"] else None, "driver_id": batch["driver_id"], "driver_name": staff_name(batch["driver_id"]),
+        "helpers": [staff_name(h) for h in batch["helper_ids"]], "vehicle": batch["vehicle"], "trip_number": number[0], "trips_on_date": number[1], "state": f.state,
+        "state_label": _batch_label(f.state, f), "so_count": f.so_count, "kg": f.kg, "kg_complete": f.kg_complete, "kg_unknown_lines": f.kg_unknown_lines, "packs": f.packs,
+        "acknowledged": f.acknowledged, "stops_done": f.stops_done, "delivered": f.delivered, "partial": f.partial, "failed": f.failed,
+        "started_at": iso(trip.started_at) if trip else None, "ended_at": iso(trip.ended_at) if trip else None,
+        "trip_minutes": minutes, "handover_status": batch["handover"].status if batch["handover"] else None,
+        # ---- v2 ----
+        "warehouse": _batch_warehouse(batch), "step": step, "tile": day_model.tile_of(step), "crew": _crew(f),
+        "outcomes": {"delivered": f.delivered, "partial": f.partial, "failed": f.failed}, "invoices": day_model.invoice_counts(f),
+        "attention": day_model.attention_flags(f, now, stale_minutes, events=events, open_issues=issues, photo_rules=rules),
+        "last_crew_activity_at": iso(day_model.last_crew_activity(events)), "duration_minutes": minutes,
+        "so_numbers": [o.so_number for o in f.orders], "invoice_nos": _invoice_nos(f), "customers": list(dict.fromkeys(o.customer_name for o in f.orders if o.customer_name)),
+    }
+
+
+def _row_matches(row: dict, needle: str) -> bool:
+    """The ONE trip search (list, tiles, export): driver / helper names, plate, SO / TO numbers, invoice numbers, customers."""
+    return day_model.matches(needle, [row["driver_name"], *row["helpers"], row["vehicle"], *row["so_numbers"], *row["invoice_nos"], *row["customers"]])
+
+
+def _row_in_tile(row: dict, tile: str | None) -> bool:
+    return tile is None or (bool(row["attention"]) if tile == "attention" else row["tile"] == tile)
+
+
+def _scoped_rows(db: Session, start: date, end: date, warehouse: str | None, driver_id: int | None, stale_minutes: int) -> tuple[list[dict], set[int], Data]:
+    """Every trip row of the date range + warehouse (+ legacy driver_id) and the staff ids that are crew on any trip of the range."""
     data = Data(db, start, end)
-    rows = []
-    numbering: dict[int, dict[str, tuple[int, int]]] = {}
-    for staff_id, items in day_model.by_driver([b["facts"] for b in data.filtered(warehouse, driver_id)]).items():
-        numbering[staff_id] = day_model.trip_numbers(items)
-    for batch in sorted(data.filtered(warehouse, driver_id), key=lambda b: (b["date"], b["batch_id"]), reverse=True):
-        f = batch["facts"]
-        trip = batch["trip"]
-        n, total = numbering.get(batch["driver_id"], {}).get(batch["batch_id"], (1, 1))
-        rows.append({"batch_id": batch["batch_id"], "date": batch["date"].isoformat() if batch["date"] else None, "driver_id": batch["driver_id"], "driver_name": staff_name(batch["driver_id"]),
-                     "helpers": [staff_name(h) for h in batch["helper_ids"]], "vehicle": batch["vehicle"], "trip_number": n, "trips_on_date": total, "state": f.state,
-                     "state_label": _batch_label(f.state, f), "so_count": f.so_count, "kg": f.kg, "kg_complete": f.kg_complete, "kg_unknown_lines": f.kg_unknown_lines, "packs": f.packs,
-                     "acknowledged": f.acknowledged, "stops_done": f.stops_done, "delivered": f.delivered, "partial": f.partial, "failed": f.failed,
-                     "started_at": iso(trip.started_at) if trip else None, "ended_at": iso(trip.ended_at) if trip else None,
-                     "trip_minutes": minutes_between(trip.started_at, trip.ended_at) if trip else None, "handover_status": batch["handover"].status if batch["handover"] else None})
-    return {"from": start.isoformat(), "to": end.isoformat(), "total": len(rows), "trips": rows}
+    busy = {sid for b in data.filtered() for sid in [b["driver_id"], *b["helper_ids"]] if sid is not None}
+    batches = data.filtered(warehouse, driver_id)
+    numbering: dict[int, dict[str, tuple[int, int]]] = {staff_id: day_model.trip_numbers(items) for staff_id, items in day_model.by_driver([b["facts"] for b in batches]).items()}
+    events, issues, rules = _batch_extras(db, batches)
+    now = trip_events.now_utc()
+    rows = [_trip_row(b, numbering.get(b["driver_id"], {}).get(b["batch_id"], (1, 1)), now, stale_minutes, events.get(b["batch_id"], []), issues.get(b["batch_id"], []), rules) for b in batches]
+    return rows, busy, data
+
+
+def trips_list(db: Session, start: date, end: date, warehouse: str | None, driver_id: int | None, q: str | None = None, tile: str | None = None, stale_minutes: int | None = None) -> dict:
+    """One row per trip (batch). tile_counts, orders_line, the rows and not_assigned all come from the SAME rows (one code path):
+    tile_counts / orders_line after date + warehouse + search, rows after the tile filter as well."""
+    stale = stale_minutes or stale_minutes_default()
+    rows, busy, _ = _scoped_rows(db, start, end, warehouse, driver_id, stale)
+    needle = day_model.search_key(q)
+    scope = [r for r in rows if _row_matches(r, needle)]
+    counts = {t: 0 for t in TILES}
+    for row in scope:
+        counts[row["tile"]] += 1
+        if row["attention"]:
+            counts["attention"] += 1
+    orders = sum(r["so_count"] for r in scope)
+    outcome = {k: sum(r["outcomes"][k] for r in scope) for k in ("delivered", "partial", "failed")}
+    shown = [r for r in scope if _row_in_tile(r, tile)]
+    shown.sort(key=lambda r: (-(date.fromisoformat(r["date"]).toordinal() if r["date"] else 0), 0 if r["attention"] else TILE_RANK.get(r["tile"], 9), str(r["vehicle"] or "").casefold(), r["trip_number"], r["batch_id"]))
+    not_assigned = [{"staff_id": s["id"], "name": s.get("name") or f"Staff #{s['id']}", "warehouse": str(s.get("warehouse") or "").upper() or None, "phone": s.get("phone") or None}
+                    for s in _active_idle_drivers(warehouse, driver_id) if s["id"] not in busy and day_model.matches(needle, [s.get("name")])]
+    not_assigned.sort(key=lambda s: str(s["name"]).casefold())
+    return {"from": start.isoformat(), "to": end.isoformat(), "generated_at": trip_events.now_utc().isoformat(), "stale_minutes": stale, "tile_counts": counts,
+            "orders_line": {"orders": orders, **outcome, "to_go": max(orders - sum(outcome.values()), 0)}, "total": len(shown), "trips": shown, "not_assigned": not_assigned}
+
+
+# ---- trip drawer ----------------------------------------------------------------------------------------------------------
+
+
+def _invoice_entry(order: dict) -> dict | None:
+    """One line of the drawer's "Invoices for this trip", from the timeline's own order payload (no extra read)."""
+    item, stop = order.get("handover"), order.get("stop")
+    checkout = (stop or {}).get("checkout") or {}
+    if item is not None:
+        officer_status = str(item.get("officer_status") or "pending").lower()
+        status = ("with_officer" if item.get("handed_over") else "not_handed_over") if officer_status == "pending" else officer_status
+        return {"so_id": order["so_id"], "so_number": order["so_number"], "invoice_no": item.get("invoice_no") or checkout.get("invoice_no"), "status": status,
+                "officer_name": (item.get("checked_by") or {}).get("name") if item.get("checked_at") else None, "checked_at": item.get("checked_at"), "officer_note": item.get("officer_note")}
+    if stop is not None and stop.get("status") == "checked_out":
+        return {"so_id": order["so_id"], "so_number": order["so_number"], "invoice_no": checkout.get("invoice_no"), "status": "with_driver", "officer_name": None, "checked_at": None, "officer_note": None}
+    return None
+
+
+def trip_detail(db: Session, batch_id: str, stale_minutes: int | None = None) -> dict:
+    """GET /trips/{batch_id}: the full timeline (every existing key) + step, tile, attention, invoices, issues, other_days, and per
+    order `flags` + `photos`. Reads: the timeline's own reads, the batch's facts (day_model.load_batch), its driver_issues rows and the
+    driver's batches of the 7 days before the trip (day_model.load with staff_id). All inside the 15 s cache."""
+    from services.trip_timeline import build_timeline
+
+    stale = stale_minutes or stale_minutes_default()
+    raw: dict = {}
+    timeline = build_timeline(db, batch_id, raw)
+    if timeline is None:
+        fail(404, "Trip not found.", "not_found")
+    facts = day_model.load_batch(db, batch_id) or day_model.BatchFacts(batch_id=batch_id, date=None, driver_id=None, helper_ids=[], vehicle=None, orders=[], trip=None, acks={}, stops={}, handover=None)
+    issue_rows = _issue_rows(db, status="all", batch_id=batch_id)
+    open_rows = [i for i in issue_rows if i.status in driver_issues.OPEN_STATUSES]
+    hits = day_model.attention_hits(facts, trip_events.now_utc(), stale, events=raw.get("events", []), open_issues=open_rows, photo_rules=_photo_rules(raw.get("template_items", {})))
+    per_stop = day_model.flags_by_stop(hits)
+    stops = {s.so_id: s for s in raw.get("stops", [])}
+    acks = raw.get("acks", {})
+    for order in timeline["orders"]:
+        so_id, number = order["so_id"], order["so_number"]
+        order["flags"] = per_stop.get(so_id, [])
+        order["photos"] = day_model.stop_photos(stops.get(so_id), number) + day_model.ack_photos(acks.get(so_id), number) + [p for i in issue_rows if i.so_id == so_id for p in day_model.issue_photos(i)]
+    step = day_model.driver_step(facts)
+    seen: dict[str, dict] = {}
+    for entry in hits:
+        seen.setdefault(entry["code"], entry)
+    timeline.update({
+        "step": step, "tile": day_model.tile_of(step), "attention": list(seen.values()), "last_crew_activity_at": iso(day_model.last_crew_activity(raw.get("events", []))),
+        "invoices": [e for e in (_invoice_entry(o) for o in timeline["orders"]) if e is not None],
+        "issues": _issue_payloads(db, issue_rows),
+    })
+    driver_id = facts.driver_id if facts.driver_id is not None else next((c["id"] for c in timeline["crew"] if c["role"] == "driver"), None)
+    day = facts.date or (date.fromisoformat(timeline["batch"]["delivery_date"]) if timeline["batch"].get("delivery_date") else None)
+    other_days, number = [], (1, 1)
+    if driver_id is not None and day is not None:
+        mine = [f for f in day_model.load(db, day - timedelta(days=7), day, staff_id=driver_id).values() if f.driver_id == driver_id]
+        numbers = day_model.trip_numbers(mine + ([facts] if facts.orders and all(f.batch_id != batch_id for f in mine) else []))
+        number = numbers.get(batch_id, number)
+        for f in sorted((f for f in mine if f.batch_id != batch_id), key=lambda f: (f.date or date.min, numbers[f.batch_id][0]), reverse=True):
+            s = day_model.driver_step(f)
+            other_days.append({"batch_id": f.batch_id, "date": f.date.isoformat() if f.date else None, "vehicle": f.vehicle, "trip_number": numbers[f.batch_id][0], "step": s, "tile": day_model.tile_of(s)})
+    timeline["other_days"] = other_days
+    day_model.photo_capture_times(db, [p for o in timeline["orders"] for p in o["photos"]])
+    timeline["batch"].update({"trip_number": number[0], "trips_on_date": number[1], "kg": facts.kg, "kg_complete": facts.kg_complete, "kg_unknown_lines": facts.kg_unknown_lines, "packs": facts.packs,
+                              "warehouse": timeline["batch"].get("warehouse") or _staff_warehouse(driver_id)})
+    return timeline
+
+
+# ---- issues (dispatch view) -----------------------------------------------------------------------------------------------
+
+
+def _issue_rows(db: Session, *, status: str | None = "open", priority: str | None = None, day: date | None = None, batch_id: str | None = None, limit: int = 1000) -> list[DriverIssue]:
+    """Same filters and order as driver_issues.list_all (open first, urgent first, newest first) + optional batch / Manila day."""
+    query = select(DriverIssue)
+    if status == "open":
+        query = query.where(DriverIssue.status.in_(driver_issues.OPEN_STATUSES))
+    elif status in ISSUE_STATUSES:
+        query = query.where(DriverIssue.status == status)
+    elif status not in (None, "", "all"):
+        fail(422, f"status must be open, all or one of {', '.join(ISSUE_STATUSES)}.", "validation")
+    if priority in ISSUE_PRIORITIES:
+        query = query.where(DriverIssue.priority == priority)
+    if batch_id is not None:
+        query = query.where(DriverIssue.batch_id == batch_id)
+    if day is not None:
+        start = datetime.combine(day, datetime.min.time(), MANILA)
+        query = query.where(DriverIssue.created_at >= start, DriverIssue.created_at < start + timedelta(days=1))
+    rows = list(db.execute(query.order_by(DriverIssue.created_at.desc(), DriverIssue.id.desc()).limit(limit)).scalars().all())
+    weight = {"urgent": 0, "high": 1, "normal": 2}
+    rows.sort(key=lambda r: (0 if r.status in driver_issues.OPEN_STATUSES else 1, weight.get(r.priority, 3)))
+    return rows
+
+
+def _issue_payloads(db: Session, rows: list[DriverIssue]) -> list[dict]:
+    """Exactly the /issues item shape: driver_issues.public() + responded_by + photos (caption metadata)."""
+    responders = {r.responded_by_user_id for r in rows if r.responded_by_user_id}
+    names = users_by_id(db, responders)
+    out = []
+    for row in rows:
+        item = driver_issues.public(row)
+        item["responded_by"] = names.get(row.responded_by_user_id, {}).get("name") if row.responded_by_user_id else None
+        item["photos"] = day_model.issue_photos(row)
+        out.append(item)
+    day_model.photo_capture_times(db, [p for item in out for p in item["photos"]])
+    return out
+
+
+def issues_list(db: Session, status: str | None, priority: str | None, q: str | None = None, warehouse: str | None = None, day: date | None = None, limit: int = 200) -> list[dict]:
+    """GET /issues with search (reference, SO, truck, reporter, category, description), warehouse (the trip driver's, else the
+    reporter's staff record) and an optional Manila report date. Reads driver_issues (+ trips of those issues for the warehouse)."""
+    rows = _issue_rows(db, status=status, priority=priority, day=day, limit=1000 if (q or warehouse) else limit)
+    if warehouse and rows:
+        drivers = {t.batch_id: t for t in db.execute(select(Trip).where(Trip.batch_id.in_({r.batch_id for r in rows if r.batch_id}))).scalars().all()}
+        rows = [r for r in rows if ((_staff_warehouse(drivers[r.batch_id].driver_staff_id) or str(drivers[r.batch_id].warehouse or "").upper()) if r.batch_id in drivers else _staff_warehouse(r.reporter_staff_id)) == warehouse]
+    needle = day_model.search_key(q)
+    if needle:
+        rows = [r for r in rows if day_model.matches(needle, [r.reference, r.so_number, r.vehicle, staff_name(r.reporter_staff_id) if r.reporter_staff_id is not None else None, r.category, r.description, r.batch_id])]
+    return _issue_payloads(db, rows[:limit])
 
 
 # ---- hard copies: who holds each signed carbon-copy invoice, and since when ---------------------------------------------------
 
 
-def hardcopies(db: Session, warehouse: str | None, driver_id: int | None) -> dict:
-    """Every invoice hard copy not yet validated as received, ALL dates:
+def hardcopies(db: Session, warehouse: str | None, driver_id: int | None, q: str | None = None, day: date | None = None) -> dict:
+    """Every invoice hard copy not yet validated as received, ALL dates (or only trips of `day`):
     with the driver (checked out of a stop, handover not submitted) / with the officer (handed over, not validated) /
-    missing or discrepancy (validated with a problem, not resolved)."""
+    missing or discrepancy (validated with a problem, not resolved). `q` = the same search as the Trips list (SO, invoice,
+    customer, driver / helper names, plate). Counts are over the filtered rows."""
     out: list[dict] = []
+    needle = day_model.search_key(q)
+
+    def trip_fields(trip) -> dict:
+        return {"so_id": None, "vehicle": trip.vehicle, "driver_name": staff_name(trip.driver_staff_id), "helpers": [staff_name(h) for h in helper_ids_of(trip.driver_staff_id, trip.helper_staff_ids)]}
+
+    def wanted(trip) -> bool:
+        return day is None or trip.delivery_date == day
     trips = db.execute(select(Trip).where(Trip.status.in_(("on_trip", "returned")))).scalars().all()
     if trips:
         from models.trip import TripStop
@@ -543,10 +773,11 @@ def hardcopies(db: Session, warehouse: str | None, driver_id: int | None) -> dic
             trip = next(t for t in trips if t.id == stop.trip_id)
             if driver_id is not None and trip.driver_staff_id != driver_id:
                 continue
-            if warehouse and (_staff_warehouse(trip.driver_staff_id) or str(trip.warehouse or "").upper()) != warehouse:
+            if (warehouse and (_staff_warehouse(trip.driver_staff_id) or str(trip.warehouse or "").upper()) != warehouse) or not wanted(trip):
                 continue
             out.append({"so_number": stop.so_number, "customer_name": stop.customer_name, "invoice_no": trip_state.invoice_no_of(stop), "state": "with_driver", "state_label": "With the driver",
-                        "holder": staff_name(trip.driver_staff_id), "since": iso(stop.checkout_at), "batch_id": trip.batch_id, "delivery_date": trip.delivery_date.isoformat(), "note": None})
+                        "holder": staff_name(trip.driver_staff_id), "since": iso(stop.checkout_at), "batch_id": trip.batch_id, "delivery_date": trip.delivery_date.isoformat(), "note": None,
+                        **trip_fields(trip), "so_id": stop.so_id})
     found = db.execute(select(InvoiceHandoverItem, InvoiceHandover, Trip).join(InvoiceHandover, InvoiceHandover.id == InvoiceHandoverItem.handover_id).join(Trip, Trip.id == InvoiceHandover.trip_id)
                        .where(InvoiceHandoverItem.officer_status != "received")).all()
     officer_ids = {h.officer_user_id for _i, h, _t in found if h.officer_user_id is not None}
@@ -554,7 +785,7 @@ def hardcopies(db: Session, warehouse: str | None, driver_id: int | None) -> dic
     for item, handover, trip in found:
         if driver_id is not None and trip.driver_staff_id != driver_id:
             continue
-        if warehouse and (_staff_warehouse(trip.driver_staff_id) or str(trip.warehouse or "").upper()) != warehouse:
+        if (warehouse and (_staff_warehouse(trip.driver_staff_id) or str(trip.warehouse or "").upper()) != warehouse) or not wanted(trip):
             continue
         if item.officer_status == "pending":
             officer = names.get(handover.officer_user_id, {}).get("name") if handover.officer_user_id is not None else None
@@ -562,7 +793,13 @@ def hardcopies(db: Session, warehouse: str | None, driver_id: int | None) -> dic
         else:
             state, label, holder, since = item.officer_status, "Missing" if item.officer_status == "missing" else "Discrepancy", staff_name(trip.driver_staff_id), item.officer_checked_at
         out.append({"so_number": item.so_number, "customer_name": item.customer_name, "invoice_no": item.invoice_no, "state": state, "state_label": label, "holder": holder, "since": iso(since),
-                    "batch_id": trip.batch_id, "delivery_date": trip.delivery_date.isoformat(), "note": item.officer_note or item.crew_note})
+                    "batch_id": trip.batch_id, "delivery_date": trip.delivery_date.isoformat(), "note": item.officer_note or item.crew_note, **trip_fields(trip), "so_id": item.so_id})
+    if needle:
+        out = [r for r in out if day_model.matches(needle, [r["so_number"], r["invoice_no"], r["customer_name"], r["driver_name"], *r["helpers"], r["vehicle"]])]
+    # A legacy returned trip can already have a handover. Its handover item is
+    # authoritative; do not also show the same invoice as still with its driver.
+    handed = {(r["batch_id"], r["so_id"]) for r in out if r["state"] != "with_driver"}
+    out = [r for r in out if r["state"] != "with_driver" or (r["batch_id"], r["so_id"]) not in handed]
     out.sort(key=lambda r: r["since"] or "")
     counts: dict[str, int] = defaultdict(int)
     for row in out:

@@ -344,7 +344,16 @@ def test_sample_keeps_only_verified_fields_and_uses_capture_time():
     assert not ({"rpm", "temp1", "clock", "driver"} & set(s))
 
 
-def test_parked_truck_repeating_one_event_still_counts_as_covered():
+def test_parked_truck_repeating_one_event_still_counts_as_covered(monkeypatch):
+    class CaptureDay(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            value = datetime(2026, 10, 6, 12, tzinfo=timezone.utc)
+            return value.astimezone(tz) if tz else value.replace(tzinfo=None)
+
+    # Retention is relative to now; a fixed historical sample day must have a
+    # fixed clock too, otherwise this test starts failing as the calendar moves.
+    monkeypatch.setattr(sampler, "datetime", CaptureDay)
     sampler.reset()
     base = datetime(2026, 10, 6, 0, 0, tzinfo=MANILA)
     for i in range(144):

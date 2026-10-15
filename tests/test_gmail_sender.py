@@ -29,6 +29,12 @@ def gmail_env(monkeypatch):
     gmail_sender._sent_keys.clear()
     gmail_sender._log.clear()
     gmail_sender._sendas.update(addresses=None, fetched_at=0.0)
+    # Header-building tests can trigger the Send-As preflight too; never let
+    # that read escape to Gmail when only POST was mocked by `sent`.
+    monkeypatch.setattr(gmail_sender.httpx, "get", lambda *a, **k: FakeResponse(200, {"sendAs": [
+        {"sendAsEmail": "dispatch@example.com", "isPrimary": True},
+        {"sendAsEmail": "martin.logistics@rareglobalfood.com", "verificationStatus": "accepted"},
+    ]}))
     gmail_sender._labels.update(ids={"Logistics": "L1", "Logistics/Sent": "L2"}, fetched_at=9e12)
 
 

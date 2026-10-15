@@ -1,14 +1,19 @@
-"""Photo / signature upload (object storage only) and signed-URL redirect. Contract: docs/TRIP_WORKFLOW.md sections 4 and 9.
+"""Photo / signature upload and viewing. Contracts: docs/GDRIVE_MEDIA.md (Google Drive, the default) and docs/TRIP_WORKFLOW.md
+sections 4 and 9 (request / response shape, R2).
 
-Bytes go to R2; Neon gets one `trip_photos` metadata row per upload. No Zoho, no local disk.
+Bytes go to the storage provider (services/media_storage.py: Drive or R2); Neon gets one `trip_photos` metadata row per upload.
+No Zoho, no local disk. With Drive the server re-encodes the photo (JPEG, <= 1600px, no EXIF) and names / describes it from the
+batch it already holds; viewing streams the bytes through this API (never a google.com redirect, never a public link).
 """
 from __future__ import annotations
 
+import logging
 import re
 import uuid
 
-from fastapi import APIRouter, Depends, File, Form, UploadFile
-from fastapi.responses import RedirectResponse
+from fastapi import APIRouter, Depends, File, Form, Header, Query, UploadFile
+from fastapi.concurrency import run_in_threadpool
+from fastapi.responses import RedirectResponse, Response
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
@@ -16,16 +21,19 @@ from sqlalchemy.orm import Session
 from auth.dependencies import CurrentUser, ROLE_ALIASES, require_role
 from database import get_db
 from models.trip import TripPhoto
-from services import media_storage
+from services import gdrive_storage, image_processing, media_storage, trip_events
 from services.trip_events import fail
 from services.trip_timeline import batch_crew, batch_rows, is_crew
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["media"])
 
 MAX_BYTES = 5 * 1024 * 1024
-ISSUE_BATCH = "issue"  # trip_photos.batch_id of a photo attached to a reported issue that is not tied to a trip
+ISSUE_BATCH = media_storage.ISSUE_BATCH  # trip_photos.batch_id of a photo attached to a reported issue that is not tied to a trip
 EXTENSIONS = {"image/jpeg": "jpg", "image/png": "png", "image/webp": "webp"}
 _SAFE = re.compile(r"[^A-Za-z0-9._-]")
+VIEW_CACHE_CONTROL = "private, max-age=86400"
 
 
 def sniff_image(data: bytes) -> str | None:
@@ -43,6 +51,17 @@ def _photo_response(photo: TripPhoto, replayed: bool = False) -> dict:
     return {"photo_id": photo.id, "content_type": photo.content_type, "size_bytes": photo.size_bytes, "replayed": replayed}
 
 
+def _drive_store(meta: media_storage.PhotoMeta, upload_key: str, captured, jpeg: bytes) -> str:
+    """storage_key of the photo in Drive (threadpool: Drive calls block). 503 keeps the photo queued on the phone."""
+    try:
+        stored = media_storage.store_drive_photo(meta, upload_key, captured, jpeg)
+    except gdrive_storage.DriveAuthError:
+        fail(503, "Photo storage needs to be reconnected. The photo stays on the phone and will be sent later.", "storage_disabled")
+    except gdrive_storage.DriveError:
+        fail(503, "The photo could not be stored. Try again.", "storage_disabled")
+    return f"{media_storage.DRIVE_PREFIX}{stored['id']}"
+
+
 @router.post("/api/driver/uploads")
 async def upload_photo(
     file: UploadFile = File(...),
@@ -50,10 +69,12 @@ async def upload_photo(
     field_key: str = Form(...),
     upload_key: str = Form(...),
     so_id: str | None = Form(None),
+    captured_at: str | None = Form(None),  # phone capture time (ISO); validated like every client_ts, else the server receipt time
     user: CurrentUser = Depends(require_role("driver", "helper")),
     db: Session = Depends(get_db),
 ):
-    if not media_storage.is_enabled():
+    provider = media_storage.provider()
+    if provider == "none":
         fail(503, "Photo storage is not set up yet.", "storage_disabled")
     upload_key = (upload_key or "").strip()
     if not upload_key or len(upload_key) > 100:
@@ -82,17 +103,31 @@ async def upload_photo(
     content_type = sniff_image(data)
     if content_type is None:
         fail(422, "Only JPEG, PNG or WebP images are accepted.", "validation", [{"key": "file", "message": "Unsupported image type."}])
+    field_key = (field_key or "photo")[:100]
+    received = trip_events.now_utc()
+    captured, _adjusted = trip_events.parse_client_ts((captured_at or "").strip()[:64] or None, received)
 
-    storage_key = f"trips/{_SAFE.sub('_', batch_id)}/{uuid.uuid4().hex}.{EXTENSIONS[content_type]}"
-    try:
-        media_storage.put_object(storage_key, data, content_type)
-    except media_storage.StorageError:
-        fail(503, "The photo could not be stored. Try again.", "storage_disabled")
-    photo = TripPhoto(batch_id=batch_id, so_id=so_id, field_key=(field_key or "photo")[:100], storage_key=storage_key, content_type=content_type, size_bytes=len(data), uploaded_by_user_id=user.id, upload_key=upload_key)
+    if provider == "gdrive":
+        try:
+            jpeg, _width, _height = await run_in_threadpool(image_processing.reencode_jpeg, data)
+        except image_processing.ImageError:
+            fail(422, "The photo could not be read. Take it again.", "validation", [{"key": "file", "message": "Unreadable image."}])
+        meta = media_storage.photo_meta(db, batch_id=batch_id, so_id=so_id, field_key=field_key, uploader_staff_id=user.staff_id)
+        storage_key = await run_in_threadpool(_drive_store, meta, upload_key, captured, jpeg)
+        content_type, size = "image/jpeg", len(jpeg)
+    else:
+        storage_key = f"trips/{_SAFE.sub('_', batch_id)}/{uuid.uuid4().hex}.{EXTENSIONS[content_type]}"
+        try:
+            media_storage.put_object(storage_key, data, content_type)
+        except media_storage.StorageError:
+            fail(503, "The photo could not be stored. Try again.", "storage_disabled")
+        size = len(data)
+    # Existing timestamp preserves camera time across offline sync; old rows keep upload time.
+    photo = TripPhoto(batch_id=batch_id, so_id=so_id, field_key=field_key, storage_key=storage_key, content_type=content_type, size_bytes=size, uploaded_by_user_id=user.id, upload_key=upload_key, created_at=captured)
     db.add(photo)
     try:
         db.commit()
-    except IntegrityError:  # a concurrent retry of the same upload_key won: return its row
+    except IntegrityError:  # a concurrent retry of the same upload_key won (it may have reused the same Drive file): return its row
         db.rollback()
         winner = db.execute(select(TripPhoto).where(TripPhoto.upload_key == upload_key)).scalar_one_or_none()
         if winner is None:
@@ -101,8 +136,37 @@ async def upload_photo(
     return _photo_response(photo)
 
 
+def _etag_matches(header: str | None, etag: str) -> bool:
+    if not header:
+        return False
+    if header.strip() == "*":
+        return True
+    bare = etag.strip('"')
+    return any(part.strip().removeprefix("W/").strip('"') == bare for part in header.split(","))
+
+
+def _stream_drive(file_id: str, thumb: bool, if_none_match: str | None) -> Response:
+    headers = {"Cache-Control": VIEW_CACHE_CONTROL}
+    try:
+        if if_none_match:
+            etag = media_storage.known_etag(file_id, thumb, ask_drive=True)  # a revalidation costs at most one metadata call, never the bytes
+            if etag and _etag_matches(if_none_match, etag):
+                return Response(status_code=304, headers={**headers, "ETag": etag})
+        data, etag = media_storage.read_drive_photo(file_id, thumb)
+    except gdrive_storage.DriveNotFound:
+        fail(404, "Photo not found.", "not_found")
+    except gdrive_storage.DriveError:
+        fail(503, "Photo storage is not reachable right now.", "storage_disabled")
+    except image_processing.ImageError:
+        fail(404, "Photo not found.", "not_found")
+    if _etag_matches(if_none_match, etag):
+        return Response(status_code=304, headers={**headers, "ETag": etag})
+    return Response(content=data, media_type="image/jpeg", headers={**headers, "ETag": etag})
+
+
 @router.get("/api/media/{photo_id}")
-def get_media(photo_id: int, user: CurrentUser = Depends(require_role("driver", "helper", "logistics_officer", "admin", "dispatcher")), db: Session = Depends(get_db)):
+def get_media(photo_id: int, size: str = Query("full", pattern="^(full|thumb)$"), if_none_match: str | None = Header(None),
+              user: CurrentUser = Depends(require_role("driver", "helper", "logistics_officer", "admin", "dispatcher")), db: Session = Depends(get_db)):
     photo = db.get(TripPhoto, photo_id)
     if photo is None:
         fail(404, "Photo not found.", "not_found")
@@ -115,6 +179,12 @@ def get_media(photo_id: int, user: CurrentUser = Depends(require_role("driver", 
             if crew is None or not is_crew(crew, user.staff_id):
                 if photo.uploaded_by_user_id != user.id:
                     fail(404, "Photo not found.", "not_found")  # same answer as "does not exist"
-    if not media_storage.is_enabled():
+    if media_storage.is_drive_key(photo.storage_key):
+        if not gdrive_storage.configured():
+            fail(503, "Photo storage is not set up yet.", "storage_disabled")
+        file_id = media_storage.drive_file_id(photo.storage_key)
+        media_storage.retry_pending(file_id)  # a Drive name / description update that failed after check-out: try again (off the request)
+        return _stream_drive(file_id, size == "thumb", if_none_match)
+    if not media_storage.r2_configured():  # an R2 photo (plain key or "r2:<key>") resolves through R2 whatever MEDIA_STORAGE says
         fail(503, "Photo storage is not set up yet.", "storage_disabled")
-    return RedirectResponse(media_storage.presign_get(photo.storage_key, 600), status_code=302, headers={"Cache-Control": "private, no-store"})
+    return RedirectResponse(media_storage.presign_get(media_storage.r2_object_key(photo.storage_key), 600), status_code=302, headers={"Cache-Control": "private, no-store"})

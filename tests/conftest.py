@@ -6,6 +6,7 @@ Three layers, all active for the whole session:
 2. Any attempt to resolve a *.neon.tech host raises.
 3. Any attempt to open a connection through the app's engine is refused AND recorded; the test that tried fails
    (even if the code under test swallowed the exception).
+4. External DNS/network connections are refused and recorded; all API providers must be mocked.
 """
 import os
 import socket
@@ -17,12 +18,16 @@ for _name in ("DATABASE_URL", "DATABASE_URL_DIRECT"):
     os.environ[_name] = BLOCKED_DATABASE_URL
 
 _real_getaddrinfo = socket.getaddrinfo
+NETWORK_ATTEMPTS: list[str] = []
 
 
 def _guarded_getaddrinfo(host, *args, **kwargs):
     text = host.decode("utf-8", "ignore") if isinstance(host, bytes) else str(host or "")
     if "neon.tech" in text.lower():
         raise RuntimeError(f"tests must never connect to the real database ({text})")
+    if text.lower() not in ("localhost", "127.0.0.1", "::1", "", "none"):
+        NETWORK_ATTEMPTS.append(text)
+        raise RuntimeError("tests must mock external APIs; outbound network access is disabled")
     return _real_getaddrinfo(host, *args, **kwargs)
 
 
@@ -56,7 +61,10 @@ def _no_real_database(monkeypatch):
     monkeypatch.setattr(vehicle_flags, "_open_session", blocked)
     monkeypatch.setattr(assignment_email_status, "_open_session", blocked)  # status writes stay in memory under test
     before = len(CONNECTION_ATTEMPTS)
+    network_before = len(NETWORK_ATTEMPTS)
     yield
     attempts = CONNECTION_ATTEMPTS[before:]
     if attempts:
         pytest.fail(f"this test tried to open a database connection ({len(attempts)}x); the suite never touches a real database", pytrace=False)
+    if len(NETWORK_ATTEMPTS) > network_before:
+        pytest.fail("this test attempted an external network connection; Google/Zoho/Cartrack must be mocked", pytrace=False)

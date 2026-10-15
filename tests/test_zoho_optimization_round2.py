@@ -208,11 +208,15 @@ class Round2OptimizationTests(unittest.TestCase):
 
         def fake_batch(item_ids):
             seen.append(list(item_ids))
-            return {"items": [{"item_id": item_id, "warehouses": []} for item_id in item_ids]}
+            # Stock-bearing batch results do not need the detail fallback. An
+            # empty warehouses fixture unintentionally triggered live OAuth.
+            return {"items": [{"item_id": item_id, "warehouses": [{"warehouse_id": "test", "warehouse_available_stock": 1}]} for item_id in item_ids]}
 
         with patch.object(item_detail_cache, "fetch_item_details_batch", side_effect=fake_batch), \
-                patch.object(item_detail_cache, "_pool", InlinePool()):
+                patch.object(item_detail_cache, "_pool", InlinePool()), \
+                patch.object(item_detail_cache, "fetch_item_detail") as detail:
             waiting = item_detail_cache.request_refresh(["A", "B", "A"])
+            detail.assert_not_called()
         self.assertEqual(waiting, 2)
         self.assertEqual(seen, [["A", "B"]])
 

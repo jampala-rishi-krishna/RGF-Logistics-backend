@@ -13,7 +13,7 @@ from sqlalchemy.orm import Session
 from auth.dependencies import CurrentUser
 from models.trip import ISSUE_CATEGORIES, ISSUE_PRIORITIES, ISSUE_STATUSES, DriverIssue, TripPhoto
 from models.user import User
-from services import dispatch_changes, driver_assignments, trip_events
+from services import dispatch_changes, driver_assignments, media_storage, trip_events
 from services.trip_events import fail
 from services.trip_timeline import iso, staff_name
 
@@ -112,6 +112,7 @@ def create(db: Session, user: CurrentUser, body: IssueBody) -> dict:
             raise
         return {"ok": True, "replayed": True, "issue": public(winner)}
     trip_events.bump()  # Driver Overview KPIs / alerts caches
+    media_storage.after_issue(db, issue)  # committed: best-effort IS- reference + category on the Drive photos, off the request (never raises)
     return {"ok": True, "replayed": False, "issue": public(issue)}
 
 

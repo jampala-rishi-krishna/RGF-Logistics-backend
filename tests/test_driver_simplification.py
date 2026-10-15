@@ -179,6 +179,18 @@ def test_to_checkout_uses_the_to_number_and_end_trip_creates_the_handover(world)
     off = H(make_user(env, "logistics_officer", None, "Olivia"), "logistics_officer")
     queue = env.client.get("/api/officer/handovers", headers=off).json()
     assert [q["handover_id"] for q in queue] == [handover["id"]] and queue[0]["officer"] is None and queue[0]["totals"]["invoices"] == 2
+    # Driver's already-cached Today must change after an officer validates.
+    before = env.client.get("/api/driver/today", headers=h).json()["batches"][0]
+    assert before["step"]["step"] == 3
+    assert {i["officer_status"] for i in before["invoice_handover_items"]} == {"pending"}
+    with env.Session() as db:
+        invoice_items = db.execute(select(InvoiceHandoverItem).order_by(InvoiceHandoverItem.id)).scalars().all()
+        validations = [{"item_id": i.id, "status": "missing" if i.so_id == "s1" else "received", "note": "Not returned" if i.so_id == "s1" else None} for i in invoice_items]
+    result = env.client.post(f"/api/officer/handovers/{handover['id']}/validate", headers=off, json={**body(), "items": validations})
+    assert result.status_code == 200, result.text
+    after = env.client.get("/api/driver/today", headers=h).json()["batches"][0]
+    assert {i["so_id"]: i["officer_status"] for i in after["invoice_handover_items"]} == {"s1": "missing", "TO:5": "received"}
+    assert after["step"]["sub"]["missing"] == 1
 
 
 # ---- 3, 4, 6, 7, 8, 9. unassign ------------------------------------------------------------------------------------------

@@ -13,13 +13,18 @@ from auth.dependencies import CurrentUser, require_role
 from database import get_db
 from services import driver_issues, overview, reconcile
 from services.trip_events import fail
-from services.trip_timeline import build_timeline
 
 router = APIRouter(prefix="/api/driver-overview", tags=["driver-overview"], dependencies=[Depends(require_role("admin", "dispatcher"))])
 
 BOARD_STATES = ("idle", "to_acknowledge", "ready", "on_trip", "returned", "handover_pending", "closed")
 
 
+def _optional_day(value: str | None):
+    """An optional single date (Invoices / Issues "Only this date"); None = all dates."""
+    return overview.parse_range(value, None, None)[0] if value else None
+
+
+# legacy for Overview v2 (12 KPIs); v2 reads tile_counts from /trips
 @router.get("/summary")
 def summary(date: str | None = None, from_: str | None = Query(None, alias="from"), to: str | None = None, warehouse: str | None = None, driver_id: int | None = None, db: Session = Depends(get_db)):
     start, end = overview.parse_range(date, from_, to)
@@ -27,6 +32,7 @@ def summary(date: str | None = None, from_: str | None = Query(None, alias="from
     return overview.cached("summary", (start, end, wh, driver_id), lambda: overview.summary(db, start, end, wh, driver_id))
 
 
+# legacy for Overview v2 (one row per person); v2 = /trips
 @router.get("/board")
 def board(date: str | None = None, warehouse: str | None = None, status: str | None = None, driver_id: int | None = None, stale_minutes: int | None = Query(None, ge=1, le=1440), db: Session = Depends(get_db)):
     start, _ = overview.parse_range(date, None, None)
@@ -37,6 +43,7 @@ def board(date: str | None = None, warehouse: str | None = None, status: str | N
     return overview.cached("board", (start, wh, status, driver_id, stale), lambda: overview.board(db, start, wh, status, driver_id, stale))
 
 
+# legacy for Overview v2 (person panel); v2 = /trips/{batch_id} other_days + search
 @router.get("/drivers/{staff_id}")
 def driver(staff_id: int, from_: str | None = Query(None, alias="from"), to: str | None = None, date: str | None = None, db: Session = Depends(get_db)):
     start, end = overview.parse_range(date, from_, to)
@@ -45,12 +52,12 @@ def driver(staff_id: int, from_: str | None = Query(None, alias="from"), to: str
 
 @router.get("/trips/{batch_id}")
 def trip(batch_id: str, db: Session = Depends(get_db)):
-    timeline = build_timeline(db, batch_id)
-    if timeline is None:
-        fail(404, "Trip not found.", "not_found")
-    return timeline
+    """The trip drawer: the full timeline + step, tile, attention, invoices, issues, other_days, per-order flags + photos."""
+    stale = overview.stale_minutes_default()
+    return overview.cached("trip", (batch_id, stale), lambda: overview.trip_detail(db, batch_id, stale))
 
 
+# legacy for Overview v2 (no map in v2)
 @router.get("/map")
 def map_view(date: str | None = None, from_: str | None = Query(None, alias="from"), to: str | None = None, driver_id: int | None = None, warehouse: str | None = None, db: Session = Depends(get_db)):
     start, end = overview.parse_range(date, from_, to)
@@ -59,30 +66,43 @@ def map_view(date: str | None = None, from_: str | None = Query(None, alias="fro
 
 
 @router.get("/export.csv")
-def export_csv(date: str | None = None, from_: str | None = Query(None, alias="from"), to: str | None = None, warehouse: str | None = None, driver_id: int | None = None, db: Session = Depends(get_db)):
+def export_csv(date: str | None = None, from_: str | None = Query(None, alias="from"), to: str | None = None, warehouse: str | None = None, driver_id: int | None = None,
+               q: str | None = Query(None, max_length=200), tile: str | None = None, db: Session = Depends(get_db)):
     start, end = overview.parse_range(date, from_, to)
     wh = overview.parse_warehouse(warehouse)
-    content = overview.cached("csv", (start, end, wh, driver_id), lambda: overview.export_csv(db, start, end, wh, driver_id))
+    tile_ = overview.parse_tile(tile)
+    stale = overview.stale_minutes_default()
+    content = overview.cached("csv", (start, end, wh, driver_id, q or "", tile_, stale), lambda: overview.export_csv(db, start, end, wh, driver_id, q, tile_, stale))
     return Response(content=content, media_type="text/csv; charset=utf-8", headers={"Content-Disposition": f'attachment; filename="driver-overview-{start}-{end}.csv"', "Cache-Control": "private, no-store"})
 
 
 @router.get("/trips")
-def trips(date: str | None = None, from_: str | None = Query(None, alias="from"), to: str | None = None, warehouse: str | None = None, driver_id: int | None = None, db: Session = Depends(get_db)):
+def trips(date: str | None = None, from_: str | None = Query(None, alias="from"), to: str | None = None, warehouse: str | None = None, driver_id: int | None = None,
+          q: str | None = Query(None, max_length=200), tile: str | None = None, db: Session = Depends(get_db)):
+    """One row per trip + tile_counts + orders_line + not_assigned (CONTRACT). date | from&to (<= 366 days), warehouse, q, tile."""
     start, end = overview.parse_range(date, from_, to)
     wh = overview.parse_warehouse(warehouse)
-    return overview.cached("trips", (start, end, wh, driver_id), lambda: overview.trips_list(db, start, end, wh, driver_id))
+    tile_ = overview.parse_tile(tile)
+    stale = overview.stale_minutes_default()
+    return overview.cached("trips", (start, end, wh, driver_id, q or "", tile_, stale), lambda: overview.trips_list(db, start, end, wh, driver_id, q, tile_, stale))
 
 
 @router.get("/hardcopies")
-def hardcopies(warehouse: str | None = None, driver_id: int | None = None, db: Session = Depends(get_db)):
+def hardcopies(warehouse: str | None = None, driver_id: int | None = None, q: str | None = Query(None, max_length=200), date: str | None = None, db: Session = Depends(get_db)):
+    """Invoice hard copies not yet received: all dates by default, `date` = only trips of that day."""
     wh = overview.parse_warehouse(warehouse)
-    return overview.cached("hardcopies", (wh, driver_id), lambda: overview.hardcopies(db, wh, driver_id))
+    day = _optional_day(date)
+    return overview.cached("hardcopies", (wh, driver_id, q or "", day), lambda: overview.hardcopies(db, wh, driver_id, q, day))
 
 
 @router.get("/issues")
-def issues(status: str | None = "open", priority: str | None = None, db: Session = Depends(get_db)):
-    """Issues reported from the driver app (open first, urgent first). Read by admin and dispatcher."""
-    return {"issues": driver_issues.list_all(db, status, priority), **driver_issues.meta(), "statuses": list(driver_issues.STATUS_LABELS)}
+def issues(status: str | None = "open", priority: str | None = None, q: str | None = Query(None, max_length=200), warehouse: str | None = None, date: str | None = None, db: Session = Depends(get_db)):
+    """Issues reported from the driver app (open first, urgent first), with search / warehouse / optional report date and photo
+    caption metadata. Read by admin and dispatcher. Cached 15 s per generation (a report or a response bumps it)."""
+    wh = overview.parse_warehouse(warehouse)
+    day = _optional_day(date)
+    items = overview.cached("issues", (status, priority, q or "", wh, day), lambda: overview.issues_list(db, status, priority, q, wh, day))
+    return {"issues": items, **driver_issues.meta(), "statuses": list(driver_issues.STATUS_LABELS)}
 
 
 @router.post("/issues/{issue_id}/respond")

@@ -28,8 +28,21 @@ services:
         sync: false
       - key: JWT_DRIVER_EXPIRE_MINUTES
         sync: false
-      # Cloudflare R2 object storage for trip photos / signatures. Secrets: set in Render, never commit values.
-      # Leave unset to run without photo capture (the driver app hides photo and signature fields).
+      # Trip photo storage switch: gdrive | r2 | none (docs/GDRIVE_MEDIA.md). Unset = gdrive when the GDRIVE_* env is
+      # complete, else r2 when every R2_* is set, else none (the driver app hides photo and signature fields).
+      - key: MEDIA_STORAGE
+        sync: false
+      # Google Drive (default store): folder owned by martin@ + martin@'s Drive refresh token (scope drive). The OAuth
+      # client reuses GMAIL_COMMS_CLIENT_ID / _SECRET unless GDRIVE_CLIENT_ID / _SECRET are set. Never commit values.
+      - key: GDRIVE_PHOTO_FOLDER_ID
+        sync: false
+      - key: GDRIVE_REFRESH_TOKEN
+        sync: false
+      - key: GDRIVE_CLIENT_ID
+        sync: false
+      - key: GDRIVE_CLIENT_SECRET
+        sync: false
+      # Cloudflare R2 object storage (previous store; old photo rows still resolve through it when set). Secrets: set in Render, never commit values.
       - key: R2_ACCOUNT_ID
         sync: false
       - key: R2_ACCESS_KEY_ID

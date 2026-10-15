@@ -170,6 +170,17 @@ def _checkout_prefill(template: dict | None, row, address_text: str, crew: list[
     return {item["key"]: sources.get(item["prefill"]) for item in template["items"] if item.get("prefill")}
 
 
+def _handover_items(facts: day_model.BatchFacts, rows_by_id: dict) -> list[dict]:
+    """The officer's status per invoice once the trip ended (pending | received | missing | discrepancy); [] before End trip.
+    Read with the batched trip data (services/trip_state.load), so it costs nothing per poll: Today is cached per generation and
+    an officer validate / resolve bumps trip_events.generation()."""
+    if facts.handover is None:
+        return []
+    return [{"so_id": item.so_id, "so_number": item.so_number,
+             "order_type": transfer_orders.order_type_of(rows_by_id[item.so_id]) if item.so_id in rows_by_id else order_types.order_type_of(str(item.so_id), item.so_number),
+             "invoice_no": item.invoice_no, "officer_status": item.officer_status, "checked_at": trip_state.iso(item.officer_checked_at)} for item in facts.items]
+
+
 def _batch_payload(rows: list, lines: dict[str, list], driver_id: int, *, with_orders: bool, data: trip_state.TripData, can_act: bool, checkout_template: dict | None) -> dict:
     rows = sorted(rows, key=_sort_key)
     first = rows[0]
@@ -184,7 +195,7 @@ def _batch_payload(rows: list, lines: dict[str, list], driver_id: int, *, with_o
     orders = [_order_payload(row, lines.get(row.id, [])) for row in rows]
     crew = trip_state.crew_of(rows)
     trip_summary, facts = trip_state.summarize(batch_id, rows, data, can_act=can_act, order_source_optimized=source == "optimized")
-    shared = day_model.facts_for_rows(batch_id, rows, lines, data)  # THE numbers (same function Driver Overview uses)
+    shared = day_model.facts_for_rows(batch_id, rows, lines, data, items_by_handover=data.handover_items)  # THE numbers (same function Driver Overview uses)
     helpers = [_person(hid) for hid in helper_ids_of(first.driver_id if first.driver_id is not None else driver_id, first.helper_ids)]
     emails = [row.email_status for row in rows if row.email_status]
     statuses = {row.assignment_status for row in rows}
@@ -209,6 +220,8 @@ def _batch_payload(rows: list, lines: dict[str, list], driver_id: int, *, with_o
         "details_loading": any(order["details_loading"] for order in orders),
         "trip": trip_summary,
         "crew": crew,
+        "step": day_model.driver_step(shared),  # the 3-step rail: the same function as the Driver Overview tiles
+        "invoice_handover_items": _handover_items(shared, {row.id: row for row in rows}),
     }
     if with_orders:
         so_numbers = {row.id: (row.salesorder_number or row.id) for row in rows}
@@ -227,6 +240,11 @@ def build_batches(db: Session, rows: list, driver_id: int, *, with_orders: bool 
     data = trip_state.load(db, list(grouped), names=with_orders)
     template = form_templates.load_active(db, KIND_CHECKOUT) if with_orders else None
     batches = [_batch_payload(group, lines, driver_id, with_orders=with_orders, data=data, can_act=can_act, checkout_template=template) for group in grouped.values()]
+    if with_orders:
+        # One referenced-metadata read across all batches; Today has no order
+        # photos and therefore gains no read on its generation-cached polls.
+        day_model.photo_capture_times(db, [photo for batch in batches for order in batch.get("orders", [])
+                                          for photo in ((order.get("workflow") or {}).get("stop") or {}).get("photos", [])])
     # Two Assign clicks to the same truck on the same day are two real trips: numbered in assignment order, never merged.
     facts_by_batch = {batch_id: day_model.facts_for_rows(batch_id, group, lines, data) for batch_id, group in grouped.items()}
     numbering = day_model.trip_numbers(list(facts_by_batch.values()))

@@ -440,7 +440,8 @@ def test_eco_trucks_endpoint_separates_unassigned_km_and_never_shows_zeros_for_m
     by_plate = {t["plate"]: t for t in data["trucks"]}
     assert by_plate["NFX5791"]["totals"]["unassigned_km"] == 50.0 and by_plate["NFX5791"]["totals"]["assigned_km"] == 200.0
     assert by_plate["NFX5791"]["totals"]["days_missing_km"] == 1
-    assert by_plate["NFX5791"]["totals"]["unclassified_idle_min"] == 10.0 and by_plate["NFX5791"]["kmpl"] is None and by_plate["NFX5791"]["litres"] is None and by_plate["NFX5791"]["co2_kg"] is None
+    # Both unclassified rows count: 600 seconds unassigned + 300 with unknown km.
+    assert by_plate["NFX5791"]["totals"]["unclassified_idle_min"] == 15.0 and by_plate["NFX5791"]["kmpl"] is None and by_plate["NFX5791"]["litres"] is None and by_plate["NFX5791"]["co2_kg"] is None
     assert by_plate["DCD8955"]["totals"] is None and by_plate["DCD8955"]["days_with_data"] == 0          # tracked but no data yet: null, not zero
     assert "Motorcycle 1" not in by_plate and "ASIAN CONNECT" not in by_plate
 

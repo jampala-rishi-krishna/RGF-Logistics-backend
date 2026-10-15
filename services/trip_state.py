@@ -11,7 +11,7 @@ from datetime import datetime, timezone
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from models.trip import InvoiceHandover, SoAcknowledgement, Trip, TripStop
+from models.trip import InvoiceHandover, InvoiceHandoverItem, SoAcknowledgement, Trip, TripStop
 from models.user import User
 from services import day_model, staff_directory_cache
 from services.staff_roles import helper_ids_of
@@ -48,6 +48,7 @@ class TripData:
         self.acks: dict[int, dict[str, SoAcknowledgement]] = defaultdict(dict)
         self.stops: dict[int, dict[str, TripStop]] = defaultdict(dict)
         self.handovers: dict[str, InvoiceHandover] = {}
+        self.handover_items: dict[int, list] = defaultdict(list)  # handover id -> InvoiceHandoverItem rows (officer status per invoice)
         self.users: dict[int, dict] = {}
 
     def user(self, user_id: int | None, role: str | None = None) -> dict | None:
@@ -58,8 +59,9 @@ class TripData:
 
 
 def load(db: Session, batch_ids: list[str], *, names: bool) -> TripData:
-    """Trips of `batch_ids` + their acknowledgements, stops and handovers (4 queries), plus the users that need a name
-    (1 query: everyone who acted when names=True, otherwise only the receiving officers)."""
+    """Trips of `batch_ids` + their acknowledgements, stops and handovers (4 queries), the handovers' invoice items (1 query, only
+    when a handover exists), plus the users that need a name (1 query: everyone who acted when names=True, otherwise only the
+    receiving officers)."""
     data = TripData()
     if not batch_ids:
         return data
@@ -77,6 +79,9 @@ def load(db: Session, batch_ids: list[str], *, names: bool) -> TripData:
         for handover in db.execute(select(InvoiceHandover).where(InvoiceHandover.trip_id.in_(trip_ids))).scalars().all():
             data.handovers[handover.batch_id] = handover
             user_ids.update(u for u in (handover.officer_user_id, handover.submitted_by_user_id) if u is not None)
+        if data.handovers:  # only trips past End trip: the officer's status per invoice (driver Return step, Driver Overview)
+            for item in db.execute(select(InvoiceHandoverItem).where(InvoiceHandoverItem.handover_id.in_([h.id for h in data.handovers.values()])).order_by(InvoiceHandoverItem.id)).scalars().all():
+                data.handover_items[item.handover_id].append(item)
         for trip in trips:
             user_ids.update(u for u in (trip.started_by_user_id, trip.ended_by_user_id) if u is not None)
     if not names:
@@ -202,6 +207,8 @@ def order_workflow(row, facts: dict, trip_summary: dict, data: TripData, *, can_
             "sequence": stop.sequence, "status": stop.status, "checkin_at": iso(stop.checkin_at), "checkin_by": data.user(stop.checkin_by_user_id),
             "checkin_distance_m": stop.checkin_distance_m, "checkin_far": stop.checkin_far, "checkout_at": iso(stop.checkout_at),
             "checkout_by": data.user(stop.checkout_by_user_id), "outcome": stop.outcome, "reason": stop.reason, "invoice_no": invoice_no_of(stop),
+            # proof photos stored with the check-out answers: id + caption data (SO, client time, result); no extra read
+            "photos": day_model.stop_photos(stop, so_numbers.get(row.id) or row.salesorder_number or row.id),
         },
         "can_acknowledge": can_ack, "can_check_in": can_in, "can_check_out": can_out, "blocker": blocker,
     }
