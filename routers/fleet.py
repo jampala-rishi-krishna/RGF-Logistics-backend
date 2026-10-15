@@ -363,7 +363,7 @@ def refresh_vehicles(force: bool = False, db: Session = Depends(get_db)):
         request_cache: dict[str, dict] = {}
         for order in assigned:
             raw = order.raw_json or {}
-            zoho_id = raw.get("salesorder_id") or raw.get("sales_order_id") or raw.get("transfer_order_id") or raw.get("id")
+            zoho_id = raw.get("salesorder_id") or raw.get("sales_order_id") or raw.get("transfer_order_id") or raw.get("purchaseorder_id") or raw.get("id")
             if not zoho_id:
                 sync_errors.append(str(order.salesorder_number or order.id))
                 continue

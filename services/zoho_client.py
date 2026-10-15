@@ -400,6 +400,17 @@ def fetch_transfer_order_detail(transfer_order_id: str) -> dict:
     return _request_with_feature("GET", f"transferorders/{transfer_order_id}", {}, "inventory_list")
 
 
+def fetch_purchase_orders_page(page: int = 1, per_page: int = 200) -> dict:
+    """One page of the purchase-order list, newest date first (Load Planning's PO tab). No branch_ids filter: the PO rule drops only
+    "SS PO-" numbers and the SariSuki branch itself (services/purchase_orders.py). Counted as an inventory list call."""
+    return _request_with_feature("GET", "purchaseorders", {"page": page, "per_page": min(per_page, 200), "sort_column": "date", "sort_order": "D"}, "inventory_list")
+
+
+def fetch_purchase_order_detail(purchaseorder_id: str) -> dict:
+    """One purchase order with its line items (quantity, unit, item_id) and addresses. Only called for orders being shown/assigned."""
+    return _request_with_feature("GET", f"purchaseorders/{purchaseorder_id}", {}, "inventory_list")
+
+
 def fetch_inventory_adjustments(page: int = 1, per_page: int = 200, sort_column: str | None = None) -> dict:
     params: dict = {"page": page, "per_page": min(per_page, 200)}
     if sort_column:

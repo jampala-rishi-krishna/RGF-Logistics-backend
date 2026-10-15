@@ -24,7 +24,7 @@ from datetime import date, datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
 from models.inventory import SalesOrderCache
-from services import branches, warehouses
+from services import branches, order_types, warehouses
 from services.item_weight import calculate_line_weight_kg
 from services.pack_units import is_pack_unit
 from services.serialize import row_to_dict
@@ -79,13 +79,8 @@ def row_id(transfer_order_id) -> str:
 
 
 def order_type_of(row) -> str:
-    """'TO' for a transfer-order row (or id), else 'SO'. Works for live rows, Neon history rows and plain ids."""
-    if isinstance(row, str):
-        return "TO" if is_to_id(row) else "SO"
-    kind = _s(getattr(row, "order_type", None)).upper()
-    if kind == "TO" or is_to_id(getattr(row, "id", "")):
-        return "TO"
-    return "SO"
+    """'SO' | 'WM' | 'PO' | 'TO' (services/order_types.py). Works for live rows, Neon history rows and plain ids."""
+    return order_types.order_type_of(row)
 
 
 def warehouse_side(warehouse_id) -> str | None:

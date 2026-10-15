@@ -11,6 +11,7 @@ from openpyxl import Workbook
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
 
+from services import order_types as order_type_rules
 from services.sales_order_location import address_lines, shipping_city
 from services.warehouses import WAREHOUSES, warehouse_key
 
@@ -41,8 +42,8 @@ BEIGE = colors.HexColor("#FFEBCE")
 HUNTER_GREEN = colors.HexColor("#33673B")
 BRAND_WHITE = colors.HexColor("#FFFFFF")
 BRAND_BLACK = colors.HexColor("#1B2419")
-TYPE_COLORS = {"PO": "#1F4E9E", "SO": "#C00000", "TO": "#2E7D32"}
-TYPE_RANK = {"SO": 0, "TO": 1, "PO": 2}
+TYPE_COLORS = {"PO": "#1F4E9E", "SO": "#C00000", "WM": "#7C3AED", "TO": "#2E7D32"}
+TYPE_RANK = {"SO": 0, "WM": 1, "TO": 2, "PO": 3}
 GLACIER_FILL = "DDEBF7"
 
 
@@ -89,8 +90,8 @@ def _line_warehouse(item: dict) -> str | None:
 
 
 def order_type_of(order) -> str:
-    """'SO' | 'TO' | 'PO'; a missing/unknown order_type means SO."""
-    value = str(getattr(order, "order_type", None) or "SO").strip().upper()
+    """'SO' | 'WM' | 'PO' | 'TO' (services/order_types.py: a WM-SO number is WM even on a row saved as 'SO'); unknown means SO."""
+    value = order_type_rules.order_type_of(order)
     return value if value in TYPE_RANK else "SO"
 
 
@@ -112,10 +113,23 @@ def _source_warehouse_name(order) -> str | None:
     return WAREHOUSES[key]["name"] if key in WAREHOUSES else None
 
 
+def _destination_warehouse_name(order) -> str | None:
+    raw = getattr(order, "raw_json", None) or {}
+    name = raw.get("to_warehouse_name") or getattr(order, "destination_warehouse", None)
+    if name:
+        return _text(name)
+    key = raw.get("destination_warehouse_key")
+    return WAREHOUSES[key]["name"] if key in WAREHOUSES else None
+
+
 def order_line_warehouse(order, item: dict) -> str | None:
-    """SO line -> its own line warehouse; TO -> every line comes from the source warehouse."""
+    """SO / WM line -> its own line warehouse; TO -> every line comes from the source warehouse; PO -> every line goes to the destination
+    (receiving) warehouse."""
+    kind = order_type_of(order)
+    if kind == "PO":
+        return _destination_warehouse_name(order) or _line_warehouse(item)
     own = _line_warehouse(item)
-    if order_type_of(order) == "TO":
+    if kind == "TO":
         return own or _source_warehouse_name(order)
     return own
 
@@ -129,7 +143,7 @@ def _truck_label(value) -> str:
 
 
 def sort_confirmed_rows(rows: list[list]) -> list[list]:
-    """Group by truck (no truck last), then type SO/TO/PO, then number. Stable: line order within an order is kept."""
+    """Group by truck (no truck last), then type SO/WM/TO/PO, then number. Stable: line order within an order is kept."""
     def key(row):
         truck = _truck_label(row[CONFIRMED_TRUCK_COLUMN])
         return (truck == "", truck.casefold(), TYPE_RANK.get(_text(row[CONFIRMED_TYPE_COLUMN]).upper(), 9), _text(row[CONFIRMED_ORDER_COLUMN]).casefold())
@@ -199,6 +213,7 @@ def _number_format(value) -> str:
 LEGEND_LINES = [
     ("Order number in blue text = Purchase Order (PO)", "1F4E9E", None),
     ("Order number in red text = Sales Order (SO)", "C00000", None),
+    ("Order number in purple text = Wet Market order (WM)", "7C3AED", None),
     ("Order number in green text = Transfer Order (TO)", "2E7D32", None),
     ("Glacier rows = light blue row fill", "000000", GLACIER_FILL),
     ("Mets rows = no fill", "000000", None),
@@ -265,7 +280,7 @@ def make_excel(rows: list[list], caption: str, layout: str = "default", warehous
 
 
 def legend_markup() -> str:
-    parts = ", ".join(f'<font color="{TYPE_COLORS[t]}"><b>{label}</b></font>' for t, label in (("PO", "PO (blue)"), ("SO", "SO (red)"), ("TO", "TO (green)")))
+    parts = ", ".join(f'<font color="{TYPE_COLORS[t]}"><b>{label}</b></font>' for t, label in (("SO", "SO (red)"), ("WM", "WM (purple)"), ("PO", "PO (blue)"), ("TO", "TO (green)")))
     return f"Legend - order number colour: {parts}. Glacier rows are filled light blue in the Excel export; Mets rows have no fill."
 
 

@@ -21,7 +21,7 @@ from models.inventory import SalesOrderCache
 from models.sales_order_history import SalesOrderHistory
 from models.sales_order_lines import SalesOrderLine
 from services import branches as branch_service, staff_directory_cache, live_sales_order_cache
-from services import transfer_orders, zoho_acquisition
+from services import order_types as order_type_rules, purchase_orders, transfer_orders, zoho_acquisition
 from services.serialize import row_to_dict
 from services.zoho_client import (
     ZohoError,
@@ -215,11 +215,15 @@ _normalized_order_status = live_sales_order_cache._normalized_order_status
 
 
 def _summary(row, db: Session | None = None, *, allow_fetch: bool = True) -> dict:
-    is_transfer = transfer_orders.order_type_of(row) == "TO"
+    kind = order_type_rules.order_type_of(row)
+    is_transfer = kind == "TO"
+    is_reference = order_type_rules.is_reference_type(kind)  # PO / TO: no branch stock, no Zoho SO fields
     if is_transfer and not isinstance(row, SalesOrderHistory):
         return transfer_orders.summary(row, allow_fetch=allow_fetch)  # a live TO: its own shape (no branch / stock / Zoho SO fields)
+    if kind == "PO" and not isinstance(row, SalesOrderHistory):
+        return purchase_orders.summary(row, allow_fetch=allow_fetch)  # a live PO: its own shape (vendor, destination warehouse)
     result = row_to_dict(row)
-    result["order_type"] = "TO" if is_transfer else "SO"
+    result["order_type"] = kind
     result["id"] = row.id
     if result.get("total") is not None:
         result["total"] = float(result["total"])
@@ -273,7 +277,7 @@ def _summary(row, db: Session | None = None, *, allow_fetch: bool = True) -> dic
             normalized = unit.casefold()
             # The order-level stock saved at assignment time is a point-in-time snapshot that may
             # be wrong; show Zoho's own per-item "Available for Sale" instead.
-            saved_item_stock = ((fetch_item_stock(str(line.item_id), stock_branch) if allow_fetch else cached_item_stock(str(line.item_id), stock_branch)) if line.item_id and not is_transfer else None) or {}
+            saved_item_stock = ((fetch_item_stock(str(line.item_id), stock_branch) if allow_fetch else cached_item_stock(str(line.item_id), stock_branch)) if line.item_id and not is_reference else None) or {}
             if is_pack_unit(normalized): total_packs += quantity
             elif "case" in normalized or "carton" in normalized: total_cases += quantity
             else: total_units += quantity
@@ -303,6 +307,9 @@ def _summary(row, db: Session | None = None, *, allow_fetch: bool = True) -> dic
 
     if is_transfer:  # a saved (past-dated) TO: the TO fields come from its own columns
         result.update(transfer_order_number=row.salesorder_number, reason=None, source_warehouse=row.source_warehouse, destination_warehouse=row.destination_warehouse, created_by=None, last_modified_by=None)
+    elif kind == "PO":  # a saved (past-dated) PO: vendor (pickup) in source_warehouse, destination warehouse in destination_warehouse
+        result.update(purchaseorder_number=row.salesorder_number, vendor_name=row.customer_name, pickup_from=row.source_warehouse, source_warehouse=None, destination_warehouse=row.destination_warehouse,
+                      status_label=purchase_orders.status_label(row.order_status), expected_delivery_date=row.expected_shipment_date.isoformat() if row.expected_shipment_date else None)
     result["product_count"] = len([p for p in products if p["name"]])
     result["products"] = products
     result["pack_count"] = total_packs
@@ -320,8 +327,8 @@ def _total_weight_kg(rows, db: Session) -> tuple[float, bool]:
     for row in rows:
         if isinstance(row, SalesOrderHistory):
             continue
-        if transfer_orders.order_type_of(row) == "TO" and not (row.raw_json or {}).get("lines_loaded"):
-            complete = False  # a TO whose lines have not loaded yet has an unknown weight, not zero
+        if order_type_rules.is_reference_type(order_type_rules.order_type_of(row)) and not (row.raw_json or {}).get("lines_loaded"):
+            complete = False  # a TO / PO whose lines have not loaded yet has an unknown weight, not zero
             continue
         for item in (row.raw_json or {}).get("line_items") or []:
             if not isinstance(item, dict) or item.get("quantity") in (None, ""):
@@ -354,7 +361,7 @@ def list_sales_orders(
     customer: str | None = Query(None),
     delivery_status: str | None = Query(None),
     branches: str | None = Query(None, description="Comma-separated Zoho branch ids; empty = all branches"),
-    order_types: str | None = Query(None, description="Confirmed Orders only (assignment=assigned): comma-separated SO,TO. Absent = SO only."),
+    order_types: str | None = Query(None, description="Comma-separated SO,WM,PO,TO. Absent = every sales order (SO and WM). The SO tab sends SO, the WM tab WM; PO/TO rows only exist once assigned (Confirmed Orders)."),
     page: int = Query(1, ge=1),
     per_page: int = Query(25, ge=1, le=100),
     db: Session = Depends(get_db),
@@ -375,12 +382,12 @@ def list_sales_orders(
     page_rows = rows[start_index : start_index + per_page]
     # Never block the list on per-item Zoho calls: serve cached stock/weights (stale is fine),
     # fill only the visible page in the background, and tell the UI to poll while it settles.
-    live_rows = [row for row in page_rows if not isinstance(row, SalesOrderHistory) and transfer_orders.order_type_of(row) != "TO"]  # a TO has no branch stock
+    live_rows = [row for row in page_rows if not isinstance(row, SalesOrderHistory) and not order_type_rules.is_reference_type(order_type_rules.order_type_of(row))]  # a TO / PO has no branch stock
     stock, waiting = stock_for_orders_cached(live_rows) if live_rows else ({}, 0)
     for row in page_rows:
         setattr(row, "_mets_qty_available_for_sale", stock.get(f"{row.id}:mets"))
         setattr(row, "_glacier_qty_available_for_sale", stock.get(f"{row.id}:glacier"))
-    saved_page = [row.id for row in page_rows if isinstance(row, SalesOrderHistory) and transfer_orders.order_type_of(row) != "TO"]
+    saved_page = [row.id for row in page_rows if isinstance(row, SalesOrderHistory) and not order_type_rules.is_reference_type(order_type_rules.order_type_of(row))]
     if saved_page:
         # Past-dated orders: queue a background fetch of each line's item so its stock fills in.
         waiting += item_detail_cache.request_refresh(db.execute(select(SalesOrderLine.item_id).where(SalesOrderLine.sales_order_id.in_(saved_page))).scalars().all())
@@ -464,6 +471,76 @@ def hard_refresh_transfer_orders():
     return {"refreshed_at": refreshed.isoformat(), "count": len(records)}
 
 
+def _po_search_match(row, needle: str) -> bool:
+    raw = row.raw_json or {}
+    text = " ".join(str(x or "") for x in (row.salesorder_number, row.reference_number, raw.get("vendor_name"), raw.get("to_warehouse_name"), raw.get("branch_name"), row.vehicle_id)).lower()
+    return needle in text or (len(branch_service.squash_number(needle)) >= 3 and branch_service.squash_number(needle) in branch_service.squash_number(row.salesorder_number))
+
+
+@router.get("/inventory/purchase-orders")
+def list_purchase_orders(
+    date_from: str | None = Query(None),
+    date_to: str | None = Query(None),
+    search: str | None = Query(None),
+    statuses: str | None = Query(None, description="Comma-separated Zoho PO statuses (e.g. open,billed) or 'all'. Absent = every status except Cancelled and Closed."),
+    assignment: str | None = Query(None, pattern="^(assigned|unassigned)$"),
+    page: int = Query(1, ge=1),
+    per_page: int = Query(25, ge=1, le=100),
+    db: Session = Depends(get_db),
+):
+    """PO- purchase orders (Zoho Inventory; never "SS PO-", never the SariSuki branch) planned (= Expected Delivery Date, else the PO date,
+    flagged no_expected_date) in [date_from, date_to], default today like the SO list. Unassigned (default) comes from the live PO list in
+    memory (Zoho is read on first load / after the TTL / Hard refresh only); assignment=assigned lists the POs already on a truck.
+    status_counts: every status in the date range before the status filter. Line items (and so kg) load in the background."""
+    start = _date(date_from) or datetime.now(PHT).date()
+    end = _date(date_to) or start
+    if end < start:
+        raise HTTPException(400, "date_to must be on or after date_from.")
+    needle = (search or "").strip().lower()
+    waiting = 0
+    status_counts: dict[str, int] = {}
+    if assignment == "assigned":
+        rows = _rows_any_branch(db, date_from, date_to, None, search, "assigned", order_types="PO")
+        refreshed, pending = purchase_orders.last_refreshed_at(), 0
+        total_weight, weight_complete = _total_weight_kg(rows, db)
+    else:
+        try:
+            all_rows, refreshed, pending, status_counts = live_sales_order_cache.purchase_order_rows(start, end, statuses=purchase_orders.parse_statuses(statuses))
+        except ZohoError as exc:
+            raise HTTPException(502, str(exc)) from exc
+        rows = [row for row in all_rows if (row.assignment_status or "unassigned") == "unassigned" and (not needle or _po_search_match(row, needle))]
+        total_weight, weight_complete, missing_items = purchase_orders.total_weight_kg(rows)
+        if missing_items:
+            waiting = item_detail_cache.request_refresh(missing_items)
+    start_index = (page - 1) * per_page
+    page_rows = rows[start_index : start_index + per_page]
+    return {
+        "items": [_summary(row, db, allow_fetch=False) for row in page_rows],
+        "page": page,
+        "per_page": per_page,
+        "total": len(rows),
+        "has_more": start_index + per_page < len(rows),
+        "total_weight_kg": total_weight,
+        "weight_complete": weight_complete and pending == 0,
+        "details_pending": pending > 0 or waiting > 0,
+        "last_refreshed_at": refreshed.isoformat() if refreshed else None,
+        "status_counts": status_counts,
+        "hidden_by_default": sorted(purchase_orders.HIDDEN_BY_DEFAULT - {"canceled"}),
+        "source": "zoho",
+    }
+
+
+@router.post("/inventory/purchase-orders/refresh")
+def hard_refresh_purchase_orders():
+    """The PO tab's "Hard refresh": re-reads the PO list from Zoho now, bypassing the cache (counts toward the Zoho budget). Line items
+    already known are kept until Zoho reports a newer last_modified_time."""
+    try:
+        records, refreshed = purchase_orders.get_records(force=True)
+    except ZohoError as exc:
+        raise HTTPException(502, str(exc)) from exc
+    return {"refreshed_at": refreshed.isoformat(), "count": len(records), "status_counts": purchase_orders.loaded_status_counts()}
+
+
 _address_object = address_object
 
 
@@ -497,7 +574,10 @@ def list_sales_order_cities(date_from: str | None = Query(None), date_to: str | 
 def _row_in_branches(row, wanted: set[str]) -> bool:
     """Branch filter. Rows with no branch info (past-dated Neon rows keep no raw_json) are kept only
     when no branch filter is active - they cannot be attributed to a branch."""
-    return not wanted or transfer_orders.order_type_of(row) == "TO" or (branch_service.branch_id_of(row) in wanted)  # a TO has no branch: the filter never hides it
+    if not wanted or transfer_orders.order_type_of(row) == "TO":  # a TO has no branch: the filter never hides it
+        return True
+    branch_id = branch_service.branch_id_of(row)
+    return branch_id in wanted or (branch_id is None and order_type_rules.order_type_of(row) == "PO")  # a saved PO keeps no branch
 
 
 def _filtered_rows(db: Session, date_from: str | None, date_to: str | None, status: str | None, search: str | None, assignment: str | None = None, cities: str | None = None, vehicle: str | None = None, customer: str | None = None, delivery_status: str | None = None, branches: str | None = None, order_types: str | None = None):
@@ -510,12 +590,15 @@ def _rows_any_branch(db: Session, date_from: str | None, date_to: str | None, st
     start = _date(date_from) or datetime.now(PHT).date(); end = _date(date_to) or start
     if end < start: raise HTTPException(400, "date_to must be on or after date_from.")
     today = datetime.now(PHT).date()
-    # Confirmed Orders can show SO and TO together; everything else (and an absent order_types) is sales orders only.
-    types = {part.strip().upper() for part in (order_types if isinstance(order_types, str) else "").split(",") if part.strip()} & {"SO", "TO"} or {"SO"}
+    # Confirmed Orders can show SO, WM, PO and TO together; an absent order_types is every sales order (SO + WM). The SO and WM Inventory tabs
+    # ask for one each: WM is the same Zoho list split by the "WM-SO" number prefix, never an extra Zoho call.
+    types = order_type_rules.parse_types(order_types)
     if assignment == "assigned" and end < today:
         # Earlier calendar dates for Confirmed SO: Neon (sales_order_history) only - no
         # Zoho call, no live-cache, no sales_orders_cache read at all.
-        rows = db.execute(select(SalesOrderHistory).where(SalesOrderHistory.expected_shipment_date >= start, SalesOrderHistory.expected_shipment_date <= end, SalesOrderHistory.order_type.in_(sorted(types))).order_by(SalesOrderHistory.expected_shipment_date.desc(), SalesOrderHistory.salesorder_number.desc())).scalars().all()
+        stored = types | ({"SO"} if "WM" in types else set())  # WM rows saved before the split are stored as 'SO'; order_type_of reads their number
+        rows = db.execute(select(SalesOrderHistory).where(SalesOrderHistory.expected_shipment_date >= start, SalesOrderHistory.expected_shipment_date <= end, SalesOrderHistory.order_type.in_(sorted(stored))).order_by(SalesOrderHistory.expected_shipment_date.desc(), SalesOrderHistory.salesorder_number.desc())).scalars().all()
+        rows = [row for row in rows if order_type_rules.order_type_of(row) in types]
         # Saved rows keep no branch: hide any that are not RGF/MSSI-numbered (nothing to hide today - checked 2026-10-08).
         rows = branch_service.filter_allowed(rows)
     elif assignment == "assigned":
@@ -526,7 +609,7 @@ def _rows_any_branch(db: Session, date_from: str | None, date_to: str | None, st
     else:
         # Unassigned / no assignment filter, any date: live Zoho window cache (5-min TTL).
         # No sales_orders_cache read/write at all any more.
-        rows = live_sales_order_cache.get_window(start, end, block=False)
+        rows = [row for row in live_sales_order_cache.get_window(start, end, block=False) if order_type_rules.order_type_of(row) in types]
     needle = (search or "").lower(); wanted = (status or "").lower()
     needle_squashed = branch_service.squash_number(search)
     def search_match(row) -> bool:
@@ -543,7 +626,7 @@ def _rows_any_branch(db: Session, date_from: str | None, date_to: str | None, st
             if wanted and wanted != "all" and wanted_label not in {"confirmed", "all except acknowledged"}:
                 return False
             return _is_inventory_acknowledge_candidate(row, acknowledged_ids or set(), ack_overrides)
-        if not wanted or wanted == "all" or transfer_orders.order_type_of(row) == "TO":  # a TO has no Zoho SO status / acknowledgement to filter on
+        if not wanted or wanted == "all" or order_type_rules.is_reference_type(order_type_rules.order_type_of(row)):  # a TO / PO has no Zoho SO status / acknowledgement to filter on
             return True
         actual_status = _normalized_order_status(getattr(row, "raw_json", None) or {}) or str(row.order_status or "")
         if wanted_label == "all except acknowledged":
@@ -596,6 +679,7 @@ class EmailFilterContext(BaseModel):
     order_ids: list[str] = Field(default_factory=list)
     assignment: str | None = None
     branches: str | None = None
+    order_types: str | None = None
 
 
 class EmailDraftRequest(EmailFilterContext):
@@ -609,7 +693,7 @@ class EmailSendRequest(EmailFilterContext):
 
 
 def _email_rows(db: Session, context: EmailFilterContext) -> list[SalesOrderCache]:
-    rows = _filtered_rows(db, context.date_from, context.date_to, context.status, context.search, context.assignment, branches=context.branches, order_types="SO,TO" if context.assignment == "assigned" else None)
+    rows = _filtered_rows(db, context.date_from, context.date_to, context.status, context.search, context.assignment, branches=context.branches, order_types="SO,WM,PO,TO" if context.assignment == "assigned" else context.order_types)
     if context.order_ids:
         wanted = {str(value) for value in context.order_ids}
         rows = [row for row in rows if str(row.id) in wanted]
@@ -709,7 +793,7 @@ def _wanted_order_types(order_types: str | None) -> set[str] | None:
 def _export_payload(db: Session, rows: list, assignment: str | None, order_types: str | None = None) -> tuple[list[list], str]:
     wanted = _wanted_order_types(order_types)
     if wanted:
-        rows = [row for row in rows if str(getattr(row, "order_type", None) or "SO").upper() in wanted]
+        rows = [row for row in rows if order_type_rules.order_type_of(row) in wanted]
     rows = _hydrate_export_rows(db, rows)
     if assignment == "assigned":
         return _confirmed_export_rows(rows), "confirmed"
@@ -862,10 +946,11 @@ def acknowledge_filtered_sales_orders(
     status: str | None = Query(None),
     search: str | None = Query(None),
     branches: str | None = Query(None),
+    order_types: str | None = Query(None, description="SO (SO tab) or WM (WM tab); absent = both"),
     db: Session = Depends(get_db),
     current_user: CurrentUser = Depends(require_role("admin", "dispatcher", "warehouse")),
 ):
-    rows = _filtered_rows(db, date_from, date_to, status, search, branches=branches)
+    rows = _filtered_rows(db, date_from, date_to, status, search, branches=branches, order_types=order_types)
     eligible = [row for row in rows if _can_apply_acknowledged_sub_status(row) and not _is_acknowledged(row)]
     acknowledged = 0
     failed = 0

@@ -67,7 +67,8 @@ class SalesOrderHistory(TimestampedBase):
     delivery_notes: Mapped[str | None] = mapped_column(Text)
     delivery_contact: Mapped[dict | None] = mapped_column(JSONB)  # {"person", "phone", "attention"}
     # Transfer orders (migration s9e0f1a2b3c4): 'SO' (default, every older row) or 'TO'. A TO row has id 'TO:<zoho id>', the TO# in
-    # salesorder_number and the destination warehouse as customer_name.
+    # salesorder_number and the destination warehouse as customer_name. Since 2026-10-15 also 'WM' (WM-SO numbered sales orders) and 'PO'
+    # (id 'PO:<zoho id>', vendor as customer_name and source_warehouse, receiving warehouse as destination_warehouse) - no schema change.
     order_type: Mapped[str] = mapped_column(String(4), nullable=False, default="SO", server_default="SO")
     source_warehouse: Mapped[str | None] = mapped_column(Text)
     destination_warehouse: Mapped[str | None] = mapped_column(Text)

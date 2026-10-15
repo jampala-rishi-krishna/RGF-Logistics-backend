@@ -21,7 +21,7 @@ from sqlalchemy.orm import Session
 
 from models.sales_order_history import SalesOrderHistory
 from models.trip import KIND_CHECKOUT
-from services import day_model, delivery_details, dispatch_changes, form_templates, live_sales_order_cache, staff_directory_cache, stop_order, transfer_orders, trip_events, trip_state
+from services import day_model, delivery_details, dispatch_changes, form_templates, live_sales_order_cache, order_types, staff_directory_cache, stop_order, transfer_orders, trip_events, trip_state
 from services.pack_units import is_pack_unit
 from services.text_repair import repair_deep
 from services.sales_order_location import address_lines, address_object, find_city
@@ -124,13 +124,17 @@ def _order_payload(row, lines: list) -> dict:
         for line in lines
     ]
     order_type = transfer_orders.order_type_of(row)
+    reference = order_types.is_reference_type(order_type)
     return repair_deep({
         "id": row.id,
-        "order_type": order_type,  # "SO" | "TO": a TO is delivered TO its destination warehouse (customer_name / address below)
-        "so_number": row.salesorder_number or row.id,  # the TO# for a TO: its reference (no invoice / DR number is asked for)
-        "order_reference": (row.salesorder_number or row.id) if order_type == "TO" else None,
+        # "SO" | "WM" | "PO" | "TO". A TO is delivered TO its destination warehouse (customer_name / address below). A PO is picked up at the
+        # vendor (customer_name / address below = the vendor) and delivered to destination_warehouse.
+        "order_type": order_type,
+        "so_number": row.salesorder_number or row.id,  # the TO# / PO# for a TO / PO: its reference (no invoice / DR number is asked for)
+        "order_reference": (row.salesorder_number or row.id) if reference else None,
         "source_warehouse": getattr(row, "source_warehouse", None) if order_type == "TO" else None,
-        "destination_warehouse": getattr(row, "destination_warehouse", None) if order_type == "TO" else None,
+        "pickup_from": (getattr(row, "source_warehouse", None) or row.customer_name) if order_type == "PO" else None,
+        "destination_warehouse": getattr(row, "destination_warehouse", None) if reference else None,
         "customer_name": row.customer_name,
         "contact": None if contact is None else {"person": contact.get("person"), "phone": contact.get("phone"), "attention": contact.get("attention")},
         "address_lines": address,
@@ -149,7 +153,7 @@ def _order_payload(row, lines: list) -> dict:
         "details_loading": contact is None,
         "invoice_hint": invoice_hint,  # pre-fill for the check-out Invoice / DR number; null = the crew types it
         # Contract 3: a TO uses its TO# (no invoice; the server stores it at check-out); an SO the invoice number already in memory, else null.
-        "invoice_no_prefill": (row.salesorder_number or row.id) if order_type == "TO" else invoice_hint,
+        "invoice_no_prefill": (row.salesorder_number or row.id) if reference else invoice_hint,
     })
 
 

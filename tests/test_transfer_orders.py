@@ -252,7 +252,7 @@ def test_bulk_unassign_returns_orders_counts_by_type_and_clears_email_status(zoh
     assignment_email_status.record(["TO:1", "TO:2", "so-1"], "sent", message_id="m1")
     assert assignment_email_status.summarize(["TO:1"])["status"] == "sent"
     out = assignment.bulk_unassign(assignment.BulkUnassignBody(order_ids=["TO:1", "so-1", "TO:9999-not-assigned"]), flow.user, flow.db)
-    assert sorted(out["unassigned"]) == ["TO:1", "so-1"] and out["count"] == 2 and out["count_by_type"] == {"SO": 1, "TO": 1}
+    assert sorted(out["unassigned"]) == ["TO:1", "so-1"] and out["count"] == 2 and out["count_by_type"] == {"SO": 1, "WM": 0, "PO": 0, "TO": 1}
     assert [s["id"] for s in out["skipped"]] == ["TO:9999-not-assigned"]
     assert assignment_email_status.summarize(["TO:1", "so-1"])["status"] is None  # cleared
     assert (lc.get_assignment("TO:1") or {}).get("assignment_batch_id") is None

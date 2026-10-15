@@ -70,9 +70,15 @@ class _FilteredOrder:
 
 
 def _line_key(order, item: dict) -> str | None:
+    """The warehouse a line belongs to for the Mets / Glacier email: SO / WM -> the line's own warehouse; TO -> its SOURCE warehouse;
+    PO -> its DESTINATION (receiving) warehouse."""
+    raw = getattr(order, "raw_json", None) or {}
+    kind = order_type_of(order)
+    if kind == "PO":
+        dest = str(raw.get("destination_warehouse_key") or "").lower()
+        return dest if dest in WAREHOUSES else warehouse_key(order_line_warehouse(order, item))
     key = warehouse_key(order_line_warehouse(order, item))
-    if key is None and order_type_of(order) == "TO":
-        raw = getattr(order, "raw_json", None) or {}
+    if key is None and kind == "TO":
         source = str(raw.get("source_warehouse_key") or "").lower()
         key = source if source in WAREHOUSES else None
     return key

@@ -15,7 +15,7 @@ from fastapi import HTTPException
 
 from models.inventory import SalesOrderCache
 from services.zoho_client import ZohoError, fetch_sales_order_detail, fetch_sales_orders, fetch_sales_orders_by_shipment_date
-from services import branches, text_repair, transfer_orders, zoho_acquisition
+from services import branches, order_types, purchase_orders, text_repair, transfer_orders, zoho_acquisition
 
 logger = logging.getLogger("live_sales_order_cache")
 
@@ -174,7 +174,10 @@ def record_payload(record: dict) -> dict:
 def _build_transient(record: dict) -> SalesOrderCache:
     """A real SalesOrderCache instance, but never added to a DB session - used purely as a
     typed in-memory shape so row_to_dict()/_summary() work unchanged. Never persisted."""
-    return SalesOrderCache(**record_payload(record))
+    row = SalesOrderCache(**record_payload(record))
+    if order_types.is_wm_number(row.salesorder_number):
+        row.order_type = "WM"  # wet market: same Zoho sales-order list, split by number prefix only
+    return row
 
 
 def merge_zoho_payload(row: SalesOrderCache, record: dict) -> SalesOrderCache:
@@ -308,6 +311,10 @@ def ensure_zoho_data(order_id: str) -> SalesOrderCache | None:
         with _state_lock:
             known = order_id in _assignment_state  # an already-assigned TO is loaded as it is; a fresh one must still be a Draft Mets<->Glacier TO
         return _ensure_transfer_order(order_id, validate=not known)
+    if purchase_orders.is_po_id(order_id):
+        with _state_lock:
+            known = order_id in _assignment_state
+        return _ensure_purchase_order(order_id, validate=not known)
     if order_id in _excluded_ids:
         raise branches.BranchNotAllowed(_excluded_ids[order_id])  # no Zoho call for a known excluded order
     epoch = zoho_acquisition.generation()
@@ -339,6 +346,32 @@ def _ensure_transfer_order(order_id: str, *, validate: bool = False) -> SalesOrd
             _apply_assignment(row)
             _assigned_zoho[order_id] = row
     return _apply_assignment(row)
+
+
+def _ensure_purchase_order(order_id: str, *, validate: bool = False) -> SalesOrderCache | None:
+    """A purchase order (id "PO:<zoho id>"): same as a TO - lines from the PO cache or one Zoho detail call, held with the assigned rows."""
+    existing = _assigned_zoho.get(order_id)
+    if existing is not None:
+        return existing
+    epoch = zoho_acquisition.generation()
+    try:
+        row = purchase_orders.ensure_row(order_id, validate=validate)
+    except ZohoError:
+        return None
+    except purchase_orders.NotAssignable as exc:
+        raise HTTPException(409, str(exc)) from exc
+    with zoho_acquisition.publication(epoch) as current:
+        if current:
+            _apply_assignment(row)
+            _assigned_zoho[order_id] = row
+    return _apply_assignment(row)
+
+
+def purchase_order_rows(start: date, end: date, *, statuses: set[str] | None = None, force: bool = False):
+    """PO- purchase orders planned in [start, end] with the assignment state applied: (rows, last refreshed, details still loading,
+    status counts). force=True is the Hard refresh button."""
+    rows, refreshed, pending, counts = purchase_orders.list_rows(start, end, statuses=statuses, force=force)
+    return [_apply_assignment(row) for row in rows], refreshed, pending, counts
 
 
 def transfer_order_rows(start: date, end: date, *, force: bool = False):
@@ -897,8 +930,8 @@ def find_cached(order_id: str) -> SalesOrderCache | None:
     row = _assigned_zoho.get(order_id)
     if row is not None:
         return row
-    if transfer_orders.is_to_id(order_id):
-        return None  # a TO is only ever held (with its lines) in _assigned_zoho; ensure_zoho_data loads it
+    if transfer_orders.is_to_id(order_id) or purchase_orders.is_po_id(order_id):
+        return None  # a TO / PO is only ever held (with its lines) in _assigned_zoho; ensure_zoho_data loads it
     with _window_lock:
         for _, records in _windows.values():
             if order_id in records:

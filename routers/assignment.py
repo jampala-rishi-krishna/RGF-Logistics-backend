@@ -31,7 +31,7 @@ from services.sales_order_location import address_lines
 from services.item_weight import calculate_line_weight_kg, calculate_order_weight_kg
 from services.delivery_status import is_delivered
 from services.staff_roles import helper_ids_of, staff_kind
-from services import transfer_orders
+from services import order_types, transfer_orders
 from services import dispatch_changes, trip_events
 from services import staff_directory_cache, live_sales_order_cache, memory_tables, vapi_client, vehicle_flags, voice_calls, voice_control, whatsapp_control
 from services.sales_order_history_sync import sync_history_row
@@ -492,9 +492,10 @@ def bulk_unassign(body: BulkUnassignBody, current_user: CurrentUser = Depends(re
             if left:
                 assignment_email_status.record(left, "not_sent")
         logger.info("[BULK_UNASSIGN] user=%s unassigned=%d skipped=%d", current_user.email, len(unassigned), len(skipped))
-    count_by_type = {"SO": 0, "TO": 0}
+    count_by_type = order_types.empty_counts()
+    loaded_by_id = dict(loaded)
     for order_id in unassigned:
-        count_by_type[transfer_orders.order_type_of(order_id)] += 1
+        count_by_type[transfer_orders.order_type_of(loaded_by_id.get(order_id) or order_id)] += 1  # the row: a WM id alone looks like an SO
     return {"success": True, "unassigned": unassigned, "count": len(unassigned), "count_by_type": count_by_type, "skipped": skipped}
 
 

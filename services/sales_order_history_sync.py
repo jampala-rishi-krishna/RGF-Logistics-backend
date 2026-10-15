@@ -6,7 +6,7 @@ from sqlalchemy.orm import Session
 from models.inventory import SalesOrderCache
 from models.sales_order_history import SalesOrderHistory
 from models.sales_order_lines import SalesOrderLine
-from services import delivery_details, transfer_orders
+from services import delivery_details, order_types
 from services.delivery_status import sales_order_delivery_status
 from services.item_weight import calculate_line_weight_kg
 from services.warehouse_stock import stock_for_orders
@@ -45,8 +45,10 @@ def sync_history_row(db: Session, order: SalesOrderCache) -> None:
         db.add(history)
     for column in _MIRRORED_COLUMNS:
         setattr(history, column, getattr(order, column))
-    is_transfer = transfer_orders.order_type_of(order) == "TO"
-    history.order_type = "TO" if is_transfer else "SO"
+    kind = order_types.order_type_of(order)
+    is_transfer = order_types.is_reference_type(kind)  # TO / PO: no branch stock; their two ends are kept in source/destination_warehouse
+    history.order_type = kind  # SO | WM | PO | TO
+    # TO: source / destination warehouse. PO: source_warehouse = the vendor (pickup), destination_warehouse = the receiving warehouse.
     history.source_warehouse = getattr(order, "source_warehouse", None) if is_transfer else None
     history.destination_warehouse = getattr(order, "destination_warehouse", None) if is_transfer else None
     history.delivery_status = sales_order_delivery_status(raw)
@@ -59,7 +61,7 @@ def sync_history_row(db: Session, order: SalesOrderCache) -> None:
         history.delivery_contact = contact
     if notes is not None:
         history.delivery_notes = notes
-    if not is_transfer:  # a transfer order has no branch stock columns (and must not cost Zoho item calls)
+    if not is_transfer:  # a transfer / purchase order has no branch stock columns (and must not cost Zoho item calls)
         stock = stock_for_orders([order])
         history.mets_qty_available_for_sale = stock.get(f"{order.id}:mets")
         history.glacier_qty_available_for_sale = stock.get(f"{order.id}:glacier")

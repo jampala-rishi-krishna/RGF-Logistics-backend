@@ -22,7 +22,7 @@ from sqlalchemy.orm import Session
 from auth.dependencies import CurrentUser
 from models.trip import (KIND_ACKNOWLEDGE, KIND_CHECKOUT, InvoiceHandover, InvoiceHandoverItem, SoAcknowledgement, Trip, TripPhoto, TripStop)
 from models.user import User
-from services import day_model, dispatch_changes, driver_assignments, form_templates, live_sales_order_cache, media_storage, stop_order, transfer_orders, trip_events, trip_state, warehouses
+from services import day_model, dispatch_changes, driver_assignments, form_templates, live_sales_order_cache, media_storage, order_types, stop_order, transfer_orders, trip_events, trip_state, warehouses
 from services.sales_order_location import address_lines
 from services.trip_events import Actor, fail
 
@@ -352,7 +352,8 @@ def _check_out(ctx: Ctx):
         fail(422, "That delivery form version does not exist.", "validation", [{"key": "template_id", "message": "Unknown form version."}])
     crew = trip_state.crew_of(ctx.rows)
     prefill = driver_assignments._checkout_prefill(template, row, ", ".join(address_lines(row.shipping_address)), crew)
-    is_transfer = transfer_orders.order_type_of(row) == "TO"
+    kind = transfer_orders.order_type_of(row)
+    is_transfer = order_types.is_reference_type(kind)  # TO or PO: no invoice, the order number is the reference
     sent = dict(body.answers or {})
     if is_transfer:
         sent.pop("invoice_dr_number", None)  # contract 5: whatever the phone sent is ignored for a TO
@@ -361,7 +362,7 @@ def _check_out(ctx: Ctx):
         fail(422, "Please complete the delivery form.", "validation", errors)
     if is_transfer:
         # No invoice for a transfer order: the server stores its TO# as the reference, so the timeline, handover, hard copies and CSV show it.
-        answers.append({"key": "invoice_dr_number", "label": "Reference (TO#)", "type": "text", "value": row.salesorder_number or row.id})
+        answers.append({"key": "invoice_dr_number", "label": f"Reference ({kind}#)", "type": "text", "value": row.salesorder_number or row.id})
     values = {a["key"]: a["value"] for a in answers}
     stop.status = "checked_out"
     stop.checkout_at, stop.checkout_received_at, stop.checkout_by_user_id, stop.checkout_gps = ctx.client_ts, ctx.received_at, ctx.user.id, ctx.gps
@@ -369,7 +370,7 @@ def _check_out(ctx: Ctx):
     stop.reason = values.get("reason")
     stop.form_template_id, stop.form_template_version, stop.form_answers = template["id"], template["version"], answers
     if is_transfer and day_model.outcome_bucket(stop.outcome) in ("delivered", "partial") and row.assignment_status == "assigned":
-        # Zoho never reports a transfer order "delivered" (Fleet's sync does that for sales orders), so the crew's check-out completes it.
+        # Zoho never reports a transfer / purchase order "delivered" (Fleet's sync does that for sales orders), so the crew's check-out completes it.
         row.assignment_status, row.completed_at = "completed", ctx.received_at
         live_sales_order_cache.set_assignment(row.id, assignment_status="completed", completed_at=ctx.received_at)
     return Done("checked_out", ctx.so_id, {"template_id": template["id"], "template_version": template["version"], "outcome": stop.outcome, "reason": stop.reason})
@@ -414,7 +415,7 @@ def _create_handover(ctx: Ctx, trip: Trip, *, officer_user_id: int | None, note:
 
 def _invoice_no(row, stop) -> str | None:
     """Invoice / DR number captured at check-out; a transfer order's reference is always its TO#."""
-    if transfer_orders.order_type_of(row) == "TO":
+    if order_types.is_reference_type(transfer_orders.order_type_of(row)):
         return row.salesorder_number or row.id
     return trip_state.invoice_no_of(stop)
 
@@ -427,7 +428,7 @@ def handover_payload(db: Session, handover: InvoiceHandover | None, rows: list, 
         items = db.execute(select(InvoiceHandoverItem).where(InvoiceHandoverItem.handover_id == handover.id).order_by(InvoiceHandoverItem.id)).scalars().all()
     by_id = {row.id: row for row in rows}
     return {"id": handover.id, "status": handover.status, "items": [
-        {"so_id": i.so_id, "so_number": i.so_number, "order_type": transfer_orders.order_type_of(by_id.get(i.so_id) or i.so_id), "invoice_no": i.invoice_no,
+        {"so_id": i.so_id, "so_number": i.so_number, "order_type": transfer_orders.order_type_of(by_id[i.so_id]) if i.so_id in by_id else order_types.order_type_of(i.so_id, i.so_number), "invoice_no": i.invoice_no,
          "customer_name": i.customer_name, "status": i.officer_status} for i in items]}
 
 

@@ -19,7 +19,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from models.trip import FormTemplate, FormTemplateItem, InvoiceHandover, InvoiceHandoverItem, Trip, TripEvent
-from services import day_model, driver_issues, live_sales_order_cache, trip_state, staff_directory_cache, trip_events, warehouses
+from services import day_model, driver_issues, live_sales_order_cache, order_types, trip_state, staff_directory_cache, trip_events, warehouses
 from services.staff_roles import staff_kind
 from services.trip_events import fail
 from services.trip_timeline import aware, iso, minutes_between, staff_name, users_by_id
@@ -118,7 +118,7 @@ def _batch_dict(facts: day_model.BatchFacts) -> dict:
     stops = sorted(facts.stops.values(), key=lambda s: s.sequence)
     return {
         "batch_id": facts.batch_id, "date": facts.date, "driver_id": facts.driver_id, "helper_ids": facts.helper_ids, "vehicle": facts.vehicle,
-        "sos": [{"so_id": o.so_id, "so_number": o.so_number, "customer_name": o.customer_name, "order_type": "TO" if str(o.so_id).startswith("TO:") else "SO"} for o in facts.orders],
+        "sos": [{"so_id": o.so_id, "so_number": o.so_number, "customer_name": o.customer_name, "order_type": order_types.order_type_of(str(o.so_id), o.so_number)} for o in facts.orders],
         "trip": facts.trip, "acks": facts.acks, "stops": stops, "handover": facts.handover, "items": facts.items, "facts": facts,
     }
 
