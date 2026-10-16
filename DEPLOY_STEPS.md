@@ -10,13 +10,28 @@ Create the service from the repository using `render.yaml`, or enter these setti
 - Root directory: `backend`
 - Build: `pip install -r requirements.txt`
 - Pre-deploy: `python -m alembic upgrade head`
-- Start: `python -m uvicorn main:app --host 0.0.0.0 --port $PORT --workers 1 --proxy-headers --forwarded-allow-ips="*"`
+- Start: `python -m uvicorn main:asgi_app --host 0.0.0.0 --port $PORT --workers 1 --proxy-headers --forwarded-allow-ips="*"` (`main:app` still works; `main:asgi_app` additionally guarantees CORS headers on every 500 - see "CORS, request ids and memory logging" below)
 - Health check: `/health`
 - Instances: 1; autoscaling disabled
 - Secret file: mount the staff snapshot at `/etc/secrets/staff_directory.json`
 - Set `STAFF_DIRECTORY_SNAPSHOT_PATH=/etc/secrets/staff_directory.json`.
 
-Set every `sync: false` variable in `render.yaml` in Render's Environment page. Use exact frontend origins in `ALLOWED_ORIGINS`, for example `https://<pages-project>.pages.dev,https://<custom-domain>`. Never use `*`.
+Set every `sync: false` variable in `render.yaml` in Render's Environment page. Use exact frontend origins in `CORS_ALLOWED_ORIGINS` (or the older `ALLOWED_ORIGINS`), for example `https://<pages-project>.pages.dev,https://<custom-domain>`. Never use `*`.
+
+### CORS, request ids and memory logging
+
+| Variable | Required | Value |
+| --- | --- | --- |
+| `CORS_ALLOWED_ORIGINS` | yes (or `ALLOWED_ORIGINS`) | Exact origins, comma-separated, e.g. `https://rare-logistics-frontend.rishi-315.workers.dev,https://rare-logistics-frontend.pages.dev`. Whitespace and a trailing `/` are stripped. `*` refuses to start (credentials are allowed). |
+| `ALLOWED_ORIGINS` | legacy | Read only when `CORS_ALLOWED_ORIGINS` is unset. Production still works on this name unchanged. |
+| `CORS_ALLOW_ORIGIN_REGEX` | no (default: none) | Only this exact value is accepted: `^https://([a-z0-9-]+\.)?rare-logistics-frontend\.(rishi-315\.workers|pages)\.dev$` (allows Pages preview subdomains). Any other value stops startup. |
+| `MEMORY_DEBUG_LOG` | no (default `0`) | `1` logs process RSS every 60 s and wherever code calls `memory_debug.log_rss(tag)`. `/health` always reports `rss_mb`. |
+
+Every response carries `X-Request-ID` (exposed to the browser via `Access-Control-Expose-Headers`). Unhandled errors return `500 {"detail":"Server error","code":"internal_error","request_id":...}`; the traceback is logged with the same `request_id`, never sent to the browser.
+
+If the Render dashboard has its own Start Command, it overrides `render.yaml`: change it to `main:asgi_app` there too. Leaving it on `main:app` is safe (a global exception handler adds CORS headers itself), `main:asgi_app` is the belt-and-braces option.
+
+`/ws/fleet` accepts an optional `?token=<JWT>`; an invalid/expired token closes with code 4401, a disallowed browser Origin with 4403. Sockets without a token are still accepted (the deployed frontend sends none).
 
 `backend/migrations/env.py` explicitly runs Alembic against `DATABASE_URL_DIRECT`; set that to the direct Neon connection string. Runtime queries use `DATABASE_URL`.
 

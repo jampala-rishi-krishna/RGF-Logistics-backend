@@ -6,7 +6,7 @@ services:
     plan: starter
     buildCommand: pip install -r requirements.txt
     preDeployCommand: python -m alembic upgrade head
-    startCommand: python -m uvicorn main:app --host 0.0.0.0 --port $PORT --workers 1 --proxy-headers --forwarded-allow-ips="*"
+    startCommand: python -m uvicorn main:asgi_app --host 0.0.0.0 --port $PORT --workers 1 --proxy-headers --forwarded-allow-ips="*"
     healthCheckPath: /health
     numInstances: 1
     envVars:
@@ -20,8 +20,18 @@ services:
         sync: false
       - key: JWT_EXPIRE_MINUTES
         sync: false
+      # Exact frontend origins, comma-separated, no trailing slash. CORS_ALLOWED_ORIGINS wins; ALLOWED_ORIGINS is the
+      # older name and is still read when CORS_ALLOWED_ORIGINS is unset. Never '*'.
       - key: ALLOWED_ORIGINS
         sync: false
+      - key: CORS_ALLOWED_ORIGINS
+        sync: false
+      # Optional. Only the documented Rare frontend pattern is accepted (docs/DEPLOY.md); any other value stops startup.
+      - key: CORS_ALLOW_ORIGIN_REGEX
+        sync: false
+      # 1 = log process RSS every 60 s and around cache rebuilds. Default off.
+      - key: MEMORY_DEBUG_LOG
+        value: "0"
       - key: APP_BASE_URL
         sync: false
       - key: DISPATCH_PHONE

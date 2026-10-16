@@ -15,7 +15,6 @@ from fastapi import Depends, FastAPI, WebSocket, WebSocketDisconnect
 from auth.dependencies import require_role
 from fastapi import Request
 from fastapi.responses import JSONResponse
-from sqlalchemy.exc import SQLAlchemyError
 from alembic.migration import MigrationContext
 from alembic.script import ScriptDirectory
 from alembic.config import Config
@@ -37,6 +36,8 @@ from services.fleet_health import sampler as fleet_health_sampler
 from services import fleet_static_cache, gmail_sender, staff_directory_cache, live_sales_order_cache, voice_control, whatsapp_control, zoho_so_lock, zoho_usage
 from services.cartrack_poller import poll_cartrack_and_update, report_unmatched_roster_on_startup
 from services.ws_manager import manager
+from services import http_hardening, memory_debug
+from auth.security import decode_access_token
 from auth.security import hash_password, verify_password
 import database
 from database import SessionLocal, engine
@@ -155,6 +156,7 @@ async def lifespan(app: FastAPI):
             coalesce=True,
         )
     scheduler.start()
+    memory_task = memory_debug.start_periodic_logging()  # no-op unless MEMORY_DEBUG_LOG=1
     gmail_sender.log_identity_config_at_startup()
     zoho_so_lock.log_configuration_warning()
     # Inbound Logistics email agent (replaces the n8n agent). OFF unless LOGISTICS_AGENT_ENABLED=true,
@@ -204,6 +206,8 @@ async def lifespan(app: FastAPI):
 
     yield
 
+    if memory_task is not None:
+        memory_task.cancel()
     scheduler.shutdown(wait=False)
     zoho_usage.stop()
 
@@ -219,22 +223,22 @@ async def zoho_request_context(request, call_next):
         return await call_next(request)
 
 # Any uncaught exception -> JSON 500 that still passes through CORS (this must be registered BEFORE CORSMiddleware so it sits inside it).
+# Also handles SQLAlchemyError (no raw DB error text) and WindowWarming.
 from services import safe_errors  # noqa: E402
 safe_errors.install_catch_all(app)
 safe_errors.register(app)
+# X-Request-ID on every response + a last-resort Exception handler that adds CORS headers itself, so `main:app` alone is
+# safe even if Render's dashboard start command still says main:app. Stack: ServerError -> CORS -> RequestID -> catch_all.
+http_hardening.install(app)
 
-# Single CORS configuration point for the whole app - every former Catalyst function had its
-# own (no-op) CORS handling; this is the one place it happens now.
-allowed_origins = [o.strip() for o in os.environ.get("ALLOWED_ORIGINS", "").split(",") if o.strip()]
-if not allowed_origins or "*" in allowed_origins:
-    raise RuntimeError("ALLOWED_ORIGINS must contain one or more exact origins; wildcard origins are not allowed in production.")
-logger.info("Allowed CORS origins: %s", allowed_origins)
+# Single CORS configuration point for the whole app. CORS_ALLOWED_ORIGINS (exact origins, comma-separated) falls back to
+# the older ALLOWED_ORIGINS; CORS_ALLOW_ORIGIN_REGEX optionally allows the documented Rare frontend pattern only.
+cors_settings = http_hardening.activate(http_hardening.load_cors_settings())
+allowed_origins = list(cors_settings.origins)
+logger.info("Allowed CORS origins: %s regex: %s", allowed_origins, cors_settings.origin_regex or "none")
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=allowed_origins,
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    **cors_settings.middleware_kwargs(),
 )
 
 media_root = os.path.join(os.path.dirname(os.path.abspath(__file__)), "media")
@@ -275,13 +279,14 @@ app.include_router(voice.admin_router)
 app.include_router(zoho_webhooks.router)
 
 
-@app.get("/health")
-def health():
+def health_payload():
+    """Memory-only /health body (no DB, no network, no blocking locks held across I/O)."""
     if not schema_state["ok"]:
-        return JSONResponse(status_code=503, content={"status": "schema_mismatch", **schema_state, "workers": configured_worker_count(), "instance_id": INSTANCE_ID})
+        return JSONResponse(status_code=503, content={"status": "schema_mismatch", **schema_state, "workers": configured_worker_count(), "instance_id": INSTANCE_ID, "rss_mb": memory_debug.rss_mb()})
     zoho_snapshot = zoho_usage.snapshot()
     return {
         "status": "ok",
+        "rss_mb": memory_debug.rss_mb(),
         "schema_revision": schema_state["current"],
         "workers": configured_worker_count(),
         "instance_id": INSTANCE_ID,
@@ -301,14 +306,16 @@ def health():
         "zoho_usage": zoho_snapshot,
     }
 
+
+@app.get("/health")
+async def health():
+    # async on purpose: a sync /health shares the AnyIO threadpool with blocking Zoho handlers and can hang when that
+    # pool is saturated, which makes Render restart a healthy instance. Everything in health_payload is memory-only.
+    return health_payload()
+
 # A ZohoError no route caught (e.g. the budget guard refusing a list call) -> readable 503 that keeps its CORS headers.
 from services import zoho_error_handler  # noqa: E402
 zoho_error_handler.register(app)
-
-
-@app.exception_handler(SQLAlchemyError)
-async def sqlalchemy_error_handler(request: Request, exc: SQLAlchemyError):
-    return JSONResponse(status_code=500, content={"error": "Database operation failed", "detail": str(exc)})
 
 
 @app.post("/poll-now")
@@ -320,13 +327,39 @@ async def poll_now(_user=Depends(require_role("admin", "dispatcher"))):
     return {"status": "ok"}
 
 
+WS_CLOSE_TOKEN_INVALID = 4401
+WS_CLOSE_ORIGIN_FORBIDDEN = 4403
+
+
 @app.websocket("/ws/fleet")
 async def ws_fleet(websocket: WebSocket):
-    # Unauthenticated for v1, matching every other module's existing posture of leaving
-    # read/GET-equivalent surfaces open and gating only writes.
-    await manager.connect(websocket)
+    # Always accept first, then close with an application code: a raise before accept surfaces in the browser as an
+    # opaque 1006 with no reason. Origin: browsers always send it, so a disallowed one is refused; a missing Origin
+    # (non-browser client) is allowed. Token: optional `?token=<jwt>`; when present it must be valid. When absent the
+    # socket is still allowed - the currently deployed frontend sends no token (backward compatibility, read-only feed).
+    await websocket.accept()
+    origin = websocket.headers.get("origin")
+    if origin and not http_hardening.is_origin_allowed(origin):
+        logger.warning("[WS] refused /ws/fleet from a disallowed origin")
+        await websocket.close(code=WS_CLOSE_ORIGIN_FORBIDDEN, reason="origin not allowed")
+        return
+    token = websocket.query_params.get("token")
+    if token is not None and decode_access_token(token) is None:
+        await websocket.close(code=WS_CLOSE_TOKEN_INVALID, reason="token expired")
+        return
     try:
+        if not manager.register(websocket):
+            await websocket.send_json({"type": "status", "cartrack": "unavailable"})
         while True:
             await websocket.receive_text()
     except WebSocketDisconnect:
+        pass
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("[WS] /ws/fleet closed after %s", type(exc).__name__)
+    finally:
         manager.disconnect(websocket)
+
+
+# Outermost wrapper (render.yaml starts `main:asgi_app`): adds CORS headers to the few responses that still lack them,
+# e.g. a 500 from Starlette's ServerErrorMiddleware. Never duplicates the app's own CORS headers.
+asgi_app = http_hardening.wrap(app, cors_settings)

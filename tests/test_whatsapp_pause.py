@@ -49,7 +49,7 @@ def test_restart_returns_to_default_and_records_who_and_when():
 def test_health_reports_both_switches(monkeypatch):
     import main
     monkeypatch.setitem(main.schema_state, "ok", True)
-    body = main.health()
+    body = main.health_payload()
     assert body["whatsapp_messages"] == "paused" and body["voice_calls"] == "paused"
 
 

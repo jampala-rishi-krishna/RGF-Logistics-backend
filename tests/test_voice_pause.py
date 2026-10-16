@@ -77,9 +77,9 @@ def test_set_mode_rejects_invalid_values_and_records_who_and_when():
 def test_health_reports_the_mode(monkeypatch):
     import main
     monkeypatch.setitem(main.schema_state, "ok", True)  # the schema check needs a database; irrelevant here
-    assert main.health()["voice_calls"] == "paused"
+    assert main.health_payload()["voice_calls"] == "paused"
     voice_control.set_mode("active", actor_name="Pau")
-    assert main.health()["voice_calls"] == "active"
+    assert main.health_payload()["voice_calls"] == "active"
 
 
 # ---- assignment fan-out ---------------------------------------------------------------------

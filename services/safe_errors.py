@@ -13,6 +13,7 @@ import logging
 from fastapi import Request
 from fastapi.responses import JSONResponse
 
+from services.http_hardening import REQUEST_ID_HEADER, request_id_for, server_error_body
 from services.live_sales_order_cache import WindowWarming
 
 logger = logging.getLogger("safe_errors")
@@ -23,7 +24,10 @@ async def warming_handler(request: Request, exc: WindowWarming) -> JSONResponse:
 
 
 def register(app) -> None:
+    from sqlalchemy.exc import SQLAlchemyError
+
     app.add_exception_handler(WindowWarming, warming_handler)
+    app.add_exception_handler(SQLAlchemyError, sqlalchemy_error_handler)
 
 
 def install_catch_all(app) -> None:
@@ -32,5 +36,16 @@ def install_catch_all(app) -> None:
         try:
             return await call_next(request)
         except Exception as exc:  # noqa: BLE001
-            logger.exception("[ERROR] %s %s -> 500 (%s)", request.method, request.url.path, type(exc).__name__)
-            return JSONResponse(status_code=500, content={"detail": "The server hit an unexpected error. Please try again.", "code": "internal_error", "error_type": type(exc).__name__})
+            # Full traceback goes to the log with the request id; the browser only gets the id, never the exception text.
+            request_id = request_id_for(request.scope)
+            logger.exception("[ERROR] request_id=%s %s %s -> 500 (%s)", request_id, request.method, request.url.path, type(exc).__name__)
+            return JSONResponse(status_code=500, content=server_error_body(request_id), headers={REQUEST_ID_HEADER: request_id})
+
+
+async def sqlalchemy_error_handler(request: Request, exc: Exception) -> JSONResponse:
+    """Database failures: log the details server-side, never return str(exc) (it can contain SQL, parameters and hosts)."""
+    request_id = request_id_for(request.scope)
+    logger.error("[DB] request_id=%s %s %s -> 500 (%s)", request_id, request.method, request.url.path, type(exc).__name__,
+                 exc_info=(type(exc), exc, exc.__traceback__))
+    return JSONResponse(status_code=500, content={"error": "Database operation failed", **server_error_body(request_id)},
+                        headers={REQUEST_ID_HEADER: request_id})

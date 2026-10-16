@@ -150,7 +150,7 @@ class RestartTests(UsageCase):
         main.schema_state.update(ok=True, current="x", head="x")
         with stale():                                                      # even when the baseline is stale, /health is memory-only
             for _ in range(3):
-                body = main.health()
+                body = main.health_payload()
         self.assertEqual(reads, [])
         self.assertEqual(body["zoho_calls_today"], 10)
         self.assertIn("process_started_at", body)
