@@ -29,14 +29,14 @@ GLACIER = "4489499000064711027"
 DAY = "2026-10-20"
 
 
-def po(pid, number, *, status="open", delivery=DAY, day="2026-10-10", branch=RGF, branch_name="Rare Global Food Trading Corp.", location=GLACIER, vendor="Fresh Farms Inc.", total=1500):
+def po(pid, number, *, status="issued", delivery=DAY, day="2026-10-10", branch=RGF, branch_name="Rare Global Food Trading Corp.", location=GLACIER, vendor="Fresh Farms Inc.", total=1500):
     return {"purchaseorder_id": pid, "purchaseorder_number": number, "status": status, "date": day, "delivery_date": delivery, "branch_id": branch, "branch_name": branch_name,
-            "location_id": location, "vendor_id": f"v{pid}", "vendor_name": vendor, "total": total, "last_modified_time": "2026-10-14T08:00:00+0800"}
+            "location_id": location, "vendor_id": f"v{pid}", "vendor_name": vendor, "total": total, "cf_shipment_method": "For Pickup", "created_time": "2026-10-19T14:00:59+0800", "last_modified_time": "2026-10-14T08:00:00+0800"}
 
 
 RECORDS = [
     po("1", "PO-1026-01704"),
-    po("2", "PO-1026-01703", status="billed", location=METS, vendor="Ocean Catch"),
+    po("2", "PO-1026-01703", status="issued", location=METS, vendor="Ocean Catch"),
     po("3", "SS PO-1026-12557"),  # "SS PO-": never
     po("4", "PO-1026-09999", branch=SARISUKI, branch_name="SariSuki Store Inc."),  # PO- but the SariSuki branch: never
     po("5", "PO-1026-01705", status="cancelled"),
@@ -66,6 +66,10 @@ class Zoho:
 
 @pytest.fixture
 def zoho(monkeypatch):
+    from services import pickup_rules
+    classify = pickup_rules.classify
+    monkeypatch.setattr(pickup_rules, "classify", lambda r, today=None: classify(r, date(2026,10,19)))
+    monkeypatch.setattr(purchase_orders, "fetch_vendor_contact", lambda vid: {"contact": {"shipping_address": DETAILS.get(vid[1:], {}).get("billing_address", {}), "contact_persons": [{"first_name":"Vendor", "phone":"09171234567"}]}})
     purchase_orders.reset()
     fake = Zoho()
 
@@ -121,26 +125,24 @@ def test_po_prefix_and_branch_filter(number, branch, branch_name, wanted):
 def test_pull_keeps_only_po_numbers_outside_sarisuki_and_counts_statuses(zoho):
     records, _ = purchase_orders.get_records()
     assert sorted(records, key=int) == ["1", "2", "5", "6", "7", "8", "9"]
-    assert purchase_orders.loaded_status_counts() == {"open": 2, "billed": 1, "cancelled": 1, "closed": 1, "draft": 1, "partially_received": 1}
+    assert purchase_orders.loaded_status_counts() == {"issued": 3, "cancelled": 1, "closed": 1, "draft": 1, "partially_received": 1}
 
 
-def test_default_hides_cancelled_and_closed_and_the_status_filter_shows_them(zoho):
+def test_issued_only_status_filters_cannot_bypass_pickup_eligibility(zoho):
     rows, _, _, counts = purchase_orders.list_rows(date(2026, 10, 20), date(2026, 10, 20))
-    assert sorted(r.salesorder_number for r in rows) == ["PO-1026-01703", "PO-1026-01704", "PO-1026-01707", "PO-1026-01709"]
-    assert counts == {"open": 2, "billed": 1, "cancelled": 1, "closed": 1, "draft": 1}  # before the status filter, for the tab's options
+    assert sorted(r.salesorder_number for r in rows) == ["PO-1026-01703", "PO-1026-01704", "PO-1026-01709"]
+    assert counts == {"issued": 3, "cancelled": 1, "closed": 1}  # before the status filter, for the tab's options
     rows, *_ = purchase_orders.list_rows(date(2026, 10, 20), date(2026, 10, 20), statuses=purchase_orders.parse_statuses("Cancelled,closed"))
-    assert sorted(r.salesorder_number for r in rows) == ["PO-1026-01705", "PO-1026-01706"]
+    assert sorted(r.salesorder_number for r in rows) == ["PO-1026-01703", "PO-1026-01704", "PO-1026-01709"]
     rows, *_ = purchase_orders.list_rows(date(2026, 10, 20), date(2026, 10, 20), statuses=purchase_orders.parse_statuses("all"))
-    assert len(rows) == 6
+    assert len(rows) == 3
 
 
-def test_expected_delivery_date_is_the_date_and_falls_back_to_the_po_date(zoho):
-    rows, *_ = purchase_orders.list_rows(date(2026, 10, 21), date(2026, 10, 21))
-    assert [r.salesorder_number for r in rows] == ["PO-1026-01708"]  # PO date 10-10, expected delivery 10-21
-    assert purchase_orders.list_rows(date(2026, 10, 10), date(2026, 10, 10))[0] == []  # never planned on its PO date when it has an expected date
-    rows, *_ = purchase_orders.list_rows(date(2026, 10, 20), date(2026, 10, 20))
-    flagged = {r.salesorder_number: purchase_orders.summary(r)["no_expected_date"] for r in rows}
-    assert flagged["PO-1026-01707"] is True and flagged["PO-1026-01704"] is False
+def test_only_tomorrow_and_no_missing_delivery_date(zoho):
+    assert purchase_orders.list_rows(date(2026,10,21),date(2026,10,21))[0] == []
+    assert purchase_orders.delivery_day({"date":DAY}) == (None,False)
+    rows, *_ = purchase_orders.list_rows(date(2026,10,20),date(2026,10,20))
+    assert all(not purchase_orders.summary(r)["no_expected_date"] for r in rows)
 
 
 def test_list_is_cached_date_change_costs_nothing_hard_refresh_bypasses(zoho):
@@ -153,9 +155,9 @@ def test_list_is_cached_date_change_costs_nothing_hard_refresh_bypasses(zoho):
 
 def test_details_only_for_shown_orders_and_kg(zoho):
     purchase_orders.list_rows(date(2026, 10, 20), date(2026, 10, 20))
-    assert sorted(zoho.detail_calls, key=int) == ["1", "2", "7", "9"]  # cancelled / closed / other days: no detail call
+    assert sorted(zoho.detail_calls, key=int) == ["1", "2", "9"]  # cancelled / closed / other days: no detail call
     rows, _, pending, _ = purchase_orders.list_rows(date(2026, 10, 20), date(2026, 10, 20))
-    assert pending == 0 and len(zoho.detail_calls) == 4  # nothing fetched twice
+    assert pending == 0 and len(zoho.detail_calls) == 3  # nothing fetched twice
     first = purchase_orders.summary(next(r for r in rows if r.id == "PO:1"))
     assert [p["total_weight_kg"] for p in first["products"]] == [12.0, 10.0]
     assert purchase_orders.total_weight_kg([r for r in rows if r.id in ("PO:1", "PO:2")]) == (27.0, True, [])
@@ -176,7 +178,7 @@ def test_po_row_shape_vendor_pickup_and_destination_warehouse(zoho):
     assert (one["destination_warehouse"], one["destination_warehouse_key"]) == ("Glacier Cold Storage", "glacier")  # by warehouse ID
     assert (two["destination_warehouse"], two["destination_warehouse_key"]) == ("Mets Cold Storage", "mets")
     assert one["pickup_from"] == "Fresh Farms Inc." and one["shipping_address"]["city"] == "Lipa"  # the stop = the vendor
-    assert one["total"] == 1500.0 and one["status_label"] == "Open" and one["branch_code"] == "RGF" and one["expected_delivery_date"] == DAY
+    assert one["total"] == 1500.0 and one["status_label"] == "Issued" and one["branch_code"] == "RGF" and one["expected_delivery_date"] == DAY
     assert one["zoho_lock"] is None and one["mets_qty_available_for_sale"] is None
 
 
@@ -197,15 +199,15 @@ def call_po(**overrides):
 def test_po_endpoint_shape_status_counts_search_and_refresh(zoho):
     call_po()
     body = call_po()
-    assert body["total"] == 4 and body["source"] == "zoho" and body["last_refreshed_at"] and body["hidden_by_default"] == ["cancelled", "closed"]
-    assert body["status_counts"]["cancelled"] == 1 and body["status_counts"]["open"] == 2
+    assert body["total"] == 3 and body["source"] == "zoho" and body["last_refreshed_at"] and body["hidden_by_default"] == ["cancelled", "closed"]
+    assert body["status_counts"]["cancelled"] == 1 and body["status_counts"]["issued"] == 3
     assert {i["order_type"] for i in body["items"]} == {"PO"}
     assert call_po(search="ocean")["items"][0]["id"] == "PO:2"
     assert call_po(search="po102601704")["items"][0]["id"] == "PO:1"
-    assert call_po(statuses="closed")["total"] == 1
+    assert call_po(statuses="closed")["total"] == 3
     before = zoho.list_calls
     out = load_planning.hard_refresh_purchase_orders()
-    assert zoho.list_calls == before + 1 and out["count"] == 7 and out["status_counts"]["billed"] == 1
+    assert zoho.list_calls == before + 1 and out["count"] == 7 and out["status_counts"]["issued"] == 3
 
 
 # ---- WM: the same sales-order list, split by number ------------------------------------------------------------------------
@@ -309,10 +311,10 @@ def flow(zoho, monkeypatch):
 
 
 def test_assign_po_and_wm_together_leaves_the_po_tab_and_unassign_brings_it_back(zoho, flow):
-    assert call_po()["total"] == 4
+    assert call_po()["total"] == 3
     result = flow.assign(["PO:1", "wm-1"])
     assert result["success"] is True and sorted(lc.ids_for_batch(result["assignment_batch_id"])) == ["PO:1", "wm-1"]
-    assert sorted(i["id"] for i in call_po()["items"]) == ["PO:2", "PO:7", "PO:9"]
+    assert sorted(i["id"] for i in call_po()["items"]) == ["PO:2", "PO:9"]
     assert flow.wm.assignment_status == "assigned"
     assignment.unassign_order("PO:1", flow.user, flow.db, assignment.UnassignBody(confirm=True))
     assert "PO:1" in [i["id"] for i in call_po()["items"]]

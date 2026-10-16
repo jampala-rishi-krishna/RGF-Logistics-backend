@@ -1,11 +1,10 @@
 """Zoho Inventory purchase orders (PO) for Load Planning.
 
-Rule (Rishi, 2026-10-15): ONLY numbers starting "PO-" (e.g. PO-1026-01704). "SS PO-..." numbers and anything of the SariSuki Store Inc.
-branch are dropped right after the fetch - by number prefix AND by branch. Every status is kept in memory; the PO tab hides Cancelled and
-Closed by default and has a status filter (the final status rule is still Rishi's call - see the status counts logged on every pull).
+Rule (Rishi, 2026-10-16): ONLY numbers starting "PO-" (e.g. PO-1026-01704). "SS PO-..." numbers and anything of the SariSuki Store Inc.
+branch are dropped right after the fetch - by number prefix AND by branch. The pickup list requires Issued, cf_shipment_method =
+For Pickup, delivery_date tomorrow in Manila, and creation before the cutoff (or manager Pahabol approval).
 
-Delivery date = the PO's Expected Delivery Date (Zoho "delivery_date"); when it is empty the PO date is used and the row is flagged
-"no expected date". A PO is picked up at the VENDOR and delivered to its DESTINATION warehouse (Mets / Glacier).
+Delivery date = Zoho delivery_date; missing dates are excluded, with no fallback. A PO is picked up at the VENDOR and delivered to its DESTINATION warehouse (Mets / Glacier).
 
 Live data, memory only (nothing here is written to Neon; the assignment itself is written by the existing assignment flow):
   * the list is pulled from Zoho on first load, after the TTL, and on the "Hard refresh" button (force=True);
@@ -27,11 +26,11 @@ from datetime import date, datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
 from models.inventory import SalesOrderCache
-from services import branches, memory_debug, transfer_orders, warehouses, zoho_resilience
+from services import branches, memory_debug, transfer_orders, warehouses, zoho_resilience, pickup_rules
 from services.item_weight import calculate_line_weight_kg
 from services.pack_units import is_pack_unit
 from services.serialize import row_to_dict
-from services.zoho_client import ZohoError, fetch_purchase_order_detail, fetch_purchase_orders_page
+from services.zoho_client import ZohoError, fetch_purchase_order_detail, fetch_purchase_orders_page, fetch_vendor_contact
 
 logger = logging.getLogger("purchase_orders")
 
@@ -115,10 +114,10 @@ _as_date = transfer_orders._as_date
 
 def delivery_day(record: dict) -> tuple[date | None, bool]:
     """(the date the PO is planned on, True when it is the Expected Delivery Date / False when it fell back to the PO date)."""
-    expected = _as_date(record.get("delivery_date") or record.get("expected_delivery_date"))
+    expected = _as_date(record.get("delivery_date"))
     if expected is not None:
         return expected, True
-    return _as_date(record.get("date") or record.get("purchaseorder_date")), False
+    return None, False
 
 
 def destination(record: dict) -> tuple[str | None, str]:
@@ -142,13 +141,59 @@ def destination(record: dict) -> tuple[str | None, str]:
     return None, named[0] if named else ""
 
 
+_vendor_lock = threading.RLock()
+_vendors: dict[str, tuple[float, dict]] = {}
+_decisions: dict[str, str] = {}
+
+
+def load_decisions(db):
+    from models.access_workflow import PickupDecision
+    from sqlalchemy import select
+    with _lock:
+        _decisions.update({row.decision_key: row.status for row in db.execute(select(PickupDecision)).scalars()})
+
+
+def pickup_state(record):
+    state = pickup_rules.classify(record)
+    if state == "pahabol":
+        with _lock:
+            decision = _decisions.get(pickup_rules.decision_key(record))
+        return "scheduled" if decision == "approved" else "rejected" if decision == "rejected" else state
+    return state
+
+
+def vendor_contact(record):
+    vid = _s(record.get("vendor_id"))
+    if not vid:
+        return {}
+    # Called only by the detail worker, never by rendering or the summary path.
+    with _vendor_lock:
+        hit = _vendors.get(vid)
+        if hit and time.monotonic() - hit[0] < 3600:
+            return hit[1]
+        try:
+            contact = fetch_vendor_contact(vid).get("contact") or {}
+        except ZohoError:
+            logger.warning("[PURCHASE_ORDERS] vendor shipping contact unavailable for %s", vid)
+            contact = {}
+        if len(_vendors) >= 500:
+            _vendors.pop(next(iter(_vendors)))
+        _vendors[vid] = (time.monotonic(), contact)
+        return contact
+
+
 def vendor_address(record: dict) -> dict:
-    """The vendor (pickup) address. Zoho's PO detail carries the vendor's address as billing_address; the list row has none."""
-    for key in ("vendor_address", "billing_address"):
-        value = record.get(key)
-        if isinstance(value, dict) and any(_s(v) for k, v in value.items() if k not in ("address_id",)):
-            return {**value, "company_name": value.get("company_name") or value.get("attention") or _s(record.get("vendor_name"))}
-    return {}
+    contact = record.get("vendor_contact") or {}
+    shipping = contact.get("shipping_address") or {}
+    return {**shipping, "company_name": record.get("vendor_name")} if any(shipping.get(k) for k in ("address", "street", "city")) else {}
+
+
+def vendor_person(record):
+    contact = record.get("vendor_contact") or {}
+    people = contact.get("contact_persons") or []
+    person = next((p for p in people if p.get("is_primary_contact")), people[0] if people else {})
+    return {"person": " ".join(str(person.get(k) or "") for k in ("first_name", "last_name")).strip(),
+            "phone": person.get("mobile") or person.get("phone") or contact.get("mobile") or contact.get("phone") or ""}
 
 
 # ---- list cache (memory) -----------------------------------------------------------------------------------------
@@ -292,6 +337,8 @@ def reset() -> None:
         _details.clear()
         _inflight.clear()
         _failed.clear()
+        _decisions.clear()
+        _vendors.clear()
 
 
 # ---- detail (lines) ----------------------------------------------------------------------------------------------
@@ -318,6 +365,7 @@ def fetch_detail(pid: str, record: dict | None = None) -> dict:
     detail = payload.get("purchaseorder") if isinstance(payload, dict) and isinstance(payload.get("purchaseorder"), dict) else payload
     if not isinstance(detail, dict) or not (detail.get("line_items") is not None or detail.get("purchaseorder_id") or detail.get("purchaseorder_number")):
         raise ZohoError("Zoho returned no purchase order detail.")
+    detail = {**detail, "vendor_contact": vendor_contact({**(record or {}), **detail})}
     with _lock:
         _details.pop(pid, None)  # re-insert at the end: the oldest entries are the ones dropped over the cap
         _details[pid] = (_modified(record) or _modified(detail), detail)
@@ -414,6 +462,10 @@ def build_row(record: dict, detail: dict | None = None) -> SalesOrderCache:
         "last_modified_time": _s(merged.get("last_modified_time")) or None,
         "line_items": _lines(detail, dest_name),
         "lines_loaded": detail is not None,
+        "vendor_contact": vendor_person(merged),
+        "vendor_address_missing": not bool(pickup) or not bool(vendor_person(merged)["person"] and vendor_person(merged)["phone"]),
+        "changed_after_cutoff": pickup_rules.changed_after_cutoff(merged),
+        "pickup_state": pickup_state(merged),
     }
     row = SalesOrderCache(
         id=row_id(pid), salesorder_number=number, reference_number=raw["reference_number"], customer_name=vendor, order_status=raw["status"],
@@ -428,16 +480,20 @@ def build_row(record: dict, detail: dict | None = None) -> SalesOrderCache:
 
 def list_rows(start: date, end: date, *, statuses: set[str] | None = None, force: bool = False) -> tuple[list[SalesOrderCache], datetime, int, dict[str, int]]:
     """(rows planned in [start, end] that pass the status filter, when the list was last pulled, orders whose lines are still loading,
-    status -> count of every PO- order in [start, end] before the status filter - for the tab's status options)."""
+    status -> count of every PO- order in [start, end] before eligibility filtering - diagnostic counts only)."""
     records, refreshed = get_records(force=force)
     in_range = [r for r in records.values() if (d := delivery_day(r)[0]) is not None and start <= d <= end]
     counts: dict[str, int] = {}
     for record in in_range:
         status = normalize_status(record.get("status"))
         counts[status] = counts.get(status, 0) + 1
-    shown = in_range if statuses == {"*"} else [r for r in in_range if status_visible(r, statuses)]
+    # Method/creation metadata may be absent on list rows: fill once in the background and fail closed until ready.
+    candidates = [r for r in in_range if pickup_rules.classify(r) != "excluded"]
+    pending_candidates = request_details(candidates)
+    merged = [{**r, **(cached_detail(_record_id(r), r) or {})} for r in candidates]
+    shown = [r for r in merged if pickup_state(r) == "scheduled"]
     shown.sort(key=lambda r: ((delivery_day(r)[0] or date.min).isoformat(), _number(r)))
-    pending = request_details(shown)
+    pending = pending_candidates
     rows = [build_row(r, cached_detail(_record_id(r), r)) for r in shown]
     return rows, refreshed, pending, counts
 
@@ -456,8 +512,8 @@ def ensure_row(order_id: str, *, validate: bool = False) -> SalesOrderCache:
     if detail is None:
         detail = fetch_detail(pid, record)
     base = {**(record or {}), **detail}
-    if validate and not is_wanted(base):
-        raise NotAssignable(f"{_number(base) or pid} is not a purchase order Load Planning handles (only PO- numbers, never SariSuki).")
+    if validate and (not is_wanted(base) or pickup_state(base) != "scheduled"):
+        raise NotAssignable(f"{_number(base) or pid} is not a purchase order Load Planning handles (only tomorrow, For Pickup, Issued, pre-cutoff or manager-approved; never SariSuki).")
     return build_row(record or detail, detail)
 
 
@@ -532,6 +588,10 @@ def summary(row, *, allow_fetch: bool = False) -> dict:
         branch_name=branch["name"] if branch else raw.get("branch_name"),
         branch_code=branch["code"] if branch else None,
         notes=raw.get("notes"),
+        vendor_contact=raw.get("vendor_contact"),
+        vendor_address_missing=raw.get("vendor_address_missing"),
+        changed_after_cutoff=raw.get("changed_after_cutoff"),
+        pickup_state=raw.get("pickup_state"),
         mets_qty_available_for_sale=None,
         glacier_qty_available_for_sale=None,
     )

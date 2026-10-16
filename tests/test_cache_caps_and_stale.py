@@ -95,7 +95,7 @@ class FakePO:
             budget_blocked()
         if self.behaviour == "block":
             self.release.wait(5)
-        return {"purchaseorders": [{"purchaseorder_id": "1", "purchaseorder_number": "PO-1026-01704", "status": "open", "date": "2026-10-10", "delivery_date": DAY,
+        return {"purchaseorders": [{"purchaseorder_id": "1", "purchaseorder_number": "PO-1026-01704", "status": "issued", "cf_shipment_method": "For Pickup", "created_time": "2026-10-19T14:00:59+0800", "date": "2026-10-10", "delivery_date": DAY,
                                     "branch_id": "4489499000001322444", "location_id": "4489499000064711027", "vendor_name": "Fresh Farms", "last_modified_time": "x"}],
                 "page_context": {"has_more_page": False}}
 
@@ -107,6 +107,9 @@ class InlinePool:
 
 @pytest.fixture
 def po(monkeypatch):
+    from services import pickup_rules
+    original_classify = pickup_rules.classify
+    monkeypatch.setattr(pickup_rules, "classify", lambda r, today=None: original_classify(r, date(2026,10,19)))
     purchase_orders.reset()
     fake = FakePO()
     monkeypatch.setattr(purchase_orders, "fetch_purchase_orders_page", fake.page)

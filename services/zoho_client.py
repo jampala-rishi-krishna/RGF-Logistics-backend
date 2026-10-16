@@ -406,6 +406,10 @@ def fetch_purchase_orders_page(page: int = 1, per_page: int = 200) -> dict:
     return _request_with_feature("GET", "purchaseorders", {"page": page, "per_page": min(per_page, 200), "sort_column": "date", "sort_order": "D"}, "inventory_list")
 
 
+def fetch_vendor_contact(contact_id: str) -> dict:
+    return _request_with_feature("GET", f"contacts/{contact_id}", {}, "inventory_list")
+
+
 def fetch_purchase_order_detail(purchaseorder_id: str) -> dict:
     """One purchase order with its line items (quantity, unit, item_id) and addresses. Only called for orders being shown/assigned."""
     return _request_with_feature("GET", f"purchaseorders/{purchaseorder_id}", {}, "inventory_list")

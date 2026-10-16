@@ -27,7 +27,7 @@ class SettingDef:
     key: str  # also the environment variable name used as the fallback
     label: str
     description: str
-    kind: str  # "int" | "phone"
+    kind: str  # "int" | "phone" | "emails" | "time"
     default: Any
     minimum: int | None = None
     maximum: int | None = None
@@ -35,6 +35,12 @@ class SettingDef:
 
 
 DEFINITIONS: dict[str, SettingDef] = {d.key: d for d in (
+    SettingDef("PICKUP_PROCUREMENT_TO", "Pickup: Procurement To", "Comma-separated Procurement email recipients.", "emails", ""),
+    SettingDef("PICKUP_PROCUREMENT_CC", "Pickup: Procurement CC", "Comma-separated Procurement CC recipients.", "emails", ""),
+    SettingDef("PICKUP_LOGISTICS_TO", "Pickup: Logistics To", "Comma-separated Logistics / Supply Chain email recipients.", "emails", ""),
+    SettingDef("PICKUP_LOGISTICS_CC", "Pickup: Logistics CC", "Comma-separated Logistics CC recipients.", "emails", ""),
+    SettingDef("PICKUP_EMAIL_TIME", "Pickup email time", "Daily send time in Asia/Manila (HH:MM).", "time", "14:05"),
+    SettingDef("PICKUP_EMAIL_ENABLED", "Pickup email enabled", "0 = off, 1 = on. Recipients must be configured before sending.", "int", 0, 0, 1),
     SettingDef("DISPATCH_PHONE", "Dispatch phone", "Number the driver app's 'Call dispatch' button dials. Leave empty to hide the button.", "phone", ""),
     SettingDef("DRIVER_STALE_MINUTES", "Driver stale threshold", "A driver on a trip with no action for this long is flagged stale in Driver Overview.", "int", 15, 1, 1440, "minutes"),
     SettingDef("ZOHO_DAILY_BUDGET", "Zoho daily budget", "Platform soft budget of Zoho API calls per day. Once usage reaches the cache-only percentage non-essential Zoho calls pause; at 100% everything stops except acknowledge and lock calls. Cannot exceed the organisation limit.", "int", 4500, 100, None, "calls/day"),
@@ -79,6 +85,16 @@ def _bounds(definition: SettingDef) -> tuple[int | None, int | None]:
 
 def parse(definition: SettingDef, raw: Any) -> int | str:
     """Validate and normalise a submitted value. Raises SettingError with a human message."""
+    if definition.kind in {"emails", "time"}:
+        text = "" if raw is None else str(raw).strip()
+        if definition.kind == "time" and not re.fullmatch(r"(?:[01]\d|2[0-3]):[0-5]\d", text):
+            raise SettingError("Use a Manila time in HH:MM format.")
+        if definition.kind == "emails" and text:
+            emails = [v.strip() for v in text.split(',')]
+            if any(not re.fullmatch(r"[^@\s,]+@[^@\s,]+\.[^@\s,]+", v) for v in emails):
+                raise SettingError("Enter comma-separated email addresses.")
+            text = ', '.join(dict.fromkeys(emails))
+        return text
     if definition.kind == "phone":
         text = "" if raw is None else str(raw).strip()
         if not _PHONE.match(text):
@@ -99,24 +115,14 @@ def parse(definition: SettingDef, raw: Any) -> int | str:
 
 
 def _env_or_default(definition: SettingDef) -> int | str:
-    """Environment fallback. Deliberately as permissive as the old os.environ reads: an integer is taken as it is
-    (callers apply their own floor); only the admin form enforces the tighter bounds."""
     raw = os.environ.get(definition.key)
     if raw is None:
         return definition.default
-    if definition.kind == "phone":
-        text = raw.strip()
-        if _PHONE.match(text):
-            return text
-    elif clean_number(raw):
-        try:
-            return int(clean_number(raw))
-        except ValueError:
-            pass
-    else:
+    try:
+        return int(clean_number(raw)) if definition.kind == "int" else parse(definition, raw)
+    except (SettingError, ValueError):
+        _warn_once(f"env:{definition.key}", "[SETTINGS] environment value for %s is invalid; using the built-in default (this is logged once per startup)", definition.key)
         return definition.default
-    _warn_once(f"env:{definition.key}", "[SETTINGS] environment value for %s is invalid; using the built-in default (this is logged once per startup)", definition.key)
-    return definition.default
 
 
 def get(key: str) -> int | str:
@@ -225,7 +231,7 @@ def describe_one(key: str) -> dict:
         "key": key,
         "label": definition.label,
         "description": definition.description,
-        "type": "text" if definition.kind == "phone" else "number",
+        "type": "number" if definition.kind == "int" else "text",
         "unit": definition.unit,
         "min": low,
         "max": high,

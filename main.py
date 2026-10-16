@@ -12,7 +12,7 @@ from contextlib import asynccontextmanager
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from dotenv import load_dotenv
 from fastapi import Depends, FastAPI, WebSocket, WebSocketDisconnect
-from auth.dependencies import require_role
+from auth.dependencies import require_role, workspace_access
 from fastapi import Request
 from fastapi.responses import JSONResponse
 from alembic.migration import MigrationContext
@@ -31,7 +31,7 @@ logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.getLogger("httpcore").setLevel(logging.WARNING)
 logger = logging.getLogger("main")
 
-from routers import admin, agent, alerts, assignment, auth, comms, communications, confirmed_email, dispatch, driver, driver_extra, driver_overview, driver_trip, fleet, fleet_health, gmail, load_planning, media, officer, optimization, orders, reports, routes, voice, warehouse, pipeline, zoho_webhooks
+from routers import access_workflow, pickup, admin, agent, alerts, assignment, auth, comms, communications, confirmed_email, dispatch, driver, driver_extra, driver_overview, driver_trip, fleet, fleet_health, gmail, load_planning, media, officer, optimization, orders, reports, routes, voice, warehouse, pipeline, zoho_webhooks
 from services.fleet_health import sampler as fleet_health_sampler
 from services import fleet_static_cache, gmail_sender, staff_directory_cache, live_sales_order_cache, voice_control, whatsapp_control, zoho_so_lock, zoho_usage
 from services.cartrack_poller import poll_cartrack_and_update, report_unmatched_roster_on_startup
@@ -136,6 +136,8 @@ async def lifespan(app: FastAPI):
     # so a restart doesn't lose assignment state. Updated in memory from then on.
     with SessionLocal() as db:
         live_sales_order_cache.load_assignment_state_from_history(db)
+        from services import purchase_orders
+        purchase_orders.load_decisions(db)
     # Build the Fleet cache once in the background (assigned SOs only) so the first Fleet view after a
     # deploy is instant. /vehicles shares a single-flight lock with this, so it never double-fetches.
     threading.Thread(target=fleet.warm_fleet_cache, name="fleet-cache-warmup", daemon=True).start()  # no-op under LOCAL_DISABLE_ZOHO_WARMUP
@@ -155,6 +157,8 @@ async def lifespan(app: FastAPI):
             max_instances=1,
             coalesce=True,
         )
+    from services import pickup_email
+    scheduler.add_job(pickup_email.scheduled_tick, "interval", seconds=30, id="pickup_email", max_instances=1, coalesce=True)
     scheduler.start()
     memory_task = memory_debug.start_periodic_logging()  # no-op unless MEMORY_DEBUG_LOG=1
     gmail_sender.log_identity_config_at_startup()
@@ -245,38 +249,64 @@ media_root = os.path.join(os.path.dirname(os.path.abspath(__file__)), "media")
 os.makedirs(media_root, exist_ok=True)
 app.mount("/media", StaticFiles(directory=media_root), name="media")
 
-app.include_router(auth.router)
-app.include_router(driver.router)
-app.include_router(driver_trip.router)
-app.include_router(driver_extra.router)
-app.include_router(officer.router)
-app.include_router(driver_overview.router)
-app.include_router(media.router)
-app.include_router(fleet.router)
-app.include_router(orders.router)
-app.include_router(alerts.router)
-app.include_router(routes.router)
-app.include_router(comms.router)
-app.include_router(warehouse.router)
-app.include_router(admin.router)
-app.include_router(admin.usage_router)
-app.include_router(agent.router)
-app.include_router(optimization.router)
-app.include_router(load_planning.router)
-app.include_router(confirmed_email.router)
-app.include_router(assignment.optimize_router)
-app.include_router(assignment.router)
-app.include_router(pipeline.router)
-app.include_router(fleet_health.router)
-app.include_router(reports.router)
-app.include_router(dispatch.router)
-app.include_router(communications.router)
-app.include_router(dispatch.public_router)
-app.include_router(gmail.router)
-app.include_router(voice.router)
-app.include_router(voice.webhook_router)
-app.include_router(voice.admin_router)
-app.include_router(zoho_webhooks.router)
+@app.middleware("http")
+async def protect_assignment_attribution(request: Request, call_next):
+    from services.assignment_privacy import redact
+    from auth.dependencies import _load_user
+    from fastapi.concurrency import run_in_threadpool
+    from starlette.responses import Response
+    import json
+    response = await call_next(request)
+    if "application/json" not in response.headers.get("content-type", ""):
+        return response
+    token = request.headers.get("authorization", "").removeprefix("Bearer ")
+    payload = decode_access_token(token) if token else None
+    user = await run_in_threadpool(_load_user, int(payload["sub"])) if payload else None
+    manager = bool(user and user.is_manager) and not any(part in request.url.path for part in ("/export", "/email", "/pickup"))
+    body = b"".join([chunk async for chunk in response.body_iterator])
+    try:
+        body = json.dumps(redact(json.loads(body), manager), ensure_ascii=False).encode()
+    except (ValueError, TypeError):
+        pass
+    headers = dict(response.headers)
+    headers.pop("content-length", None)
+    return Response(body, status_code=response.status_code, headers=headers, background=response.background)
+
+
+app.include_router(access_workflow.router, dependencies=[Depends(workspace_access)])
+app.include_router(pickup.router, dependencies=[Depends(workspace_access)])
+app.include_router(auth.router, dependencies=[Depends(workspace_access)])
+app.include_router(driver.router, dependencies=[Depends(workspace_access)])
+app.include_router(driver_trip.router, dependencies=[Depends(workspace_access)])
+app.include_router(driver_extra.router, dependencies=[Depends(workspace_access)])
+app.include_router(officer.router, dependencies=[Depends(workspace_access)])
+app.include_router(driver_overview.router, dependencies=[Depends(workspace_access)])
+app.include_router(media.router, dependencies=[Depends(workspace_access)])
+app.include_router(fleet.router, dependencies=[Depends(workspace_access)])
+app.include_router(orders.router, dependencies=[Depends(workspace_access)])
+app.include_router(alerts.router, dependencies=[Depends(workspace_access)])
+app.include_router(routes.router, dependencies=[Depends(workspace_access)])
+app.include_router(comms.router, dependencies=[Depends(workspace_access)])
+app.include_router(warehouse.router, dependencies=[Depends(workspace_access)])
+app.include_router(admin.router, dependencies=[Depends(workspace_access)])
+app.include_router(admin.usage_router, dependencies=[Depends(workspace_access)])
+app.include_router(agent.router, dependencies=[Depends(workspace_access)])
+app.include_router(optimization.router, dependencies=[Depends(workspace_access)])
+app.include_router(load_planning.router, dependencies=[Depends(workspace_access)])
+app.include_router(confirmed_email.router, dependencies=[Depends(workspace_access)])
+app.include_router(assignment.optimize_router, dependencies=[Depends(workspace_access)])
+app.include_router(assignment.router, dependencies=[Depends(workspace_access)])
+app.include_router(pipeline.router, dependencies=[Depends(workspace_access)])
+app.include_router(fleet_health.router, dependencies=[Depends(workspace_access)])
+app.include_router(reports.router, dependencies=[Depends(workspace_access)])
+app.include_router(dispatch.router, dependencies=[Depends(workspace_access)])
+app.include_router(communications.router, dependencies=[Depends(workspace_access)])
+app.include_router(dispatch.public_router, dependencies=[Depends(workspace_access)])
+app.include_router(gmail.router, dependencies=[Depends(workspace_access)])
+app.include_router(voice.router, dependencies=[Depends(workspace_access)])
+app.include_router(voice.webhook_router, dependencies=[Depends(workspace_access)])
+app.include_router(voice.admin_router, dependencies=[Depends(workspace_access)])
+app.include_router(zoho_webhooks.router, dependencies=[Depends(workspace_access)])
 
 
 def health_payload():

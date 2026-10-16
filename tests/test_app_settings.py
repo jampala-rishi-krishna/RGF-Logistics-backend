@@ -141,7 +141,7 @@ SECRET_WORDS = re.compile(r"SECRET|TOKEN|PASSWORD|API_KEY|ACCESS_KEY|R2_|JWT|DAT
 
 
 def test_the_whitelist_contains_no_secret_names():
-    assert sorted(app_settings.DEFINITIONS) == ["DISPATCH_PHONE", "DRIVER_STALE_MINUTES", "ZOHO_DAILY_BUDGET", "ZOHO_FAILSAFE_SO_DETAIL_CAP", "ZOHO_GUARD_CACHE_ONLY_PCT"]
+    assert sorted(app_settings.DEFINITIONS) == sorted(["DISPATCH_PHONE", "DRIVER_STALE_MINUTES", "ZOHO_DAILY_BUDGET", "ZOHO_FAILSAFE_SO_DETAIL_CAP", "ZOHO_GUARD_CACHE_ONLY_PCT", "PICKUP_PROCUREMENT_TO", "PICKUP_PROCUREMENT_CC", "PICKUP_LOGISTICS_TO", "PICKUP_LOGISTICS_CC", "PICKUP_EMAIL_TIME", "PICKUP_EMAIL_ENABLED"])
     assert [k for k in app_settings.DEFINITIONS if SECRET_WORDS.search(k)] == []
 
 
@@ -190,7 +190,7 @@ def test_reads_never_touch_the_database(env, monkeypatch):
     for _ in range(1000):
         assert app_settings.get_int("ZOHO_DAILY_BUDGET") == 5000
         assert zoho_usage.budget() == 5000
-    assert len(app_settings.describe()) == 5
+    assert len(app_settings.describe()) == 11
     assert app_settings.get_str("DISPATCH_PHONE") == ""
 
 

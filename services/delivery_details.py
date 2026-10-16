@@ -48,6 +48,8 @@ def from_order(order) -> tuple[str | None, dict | None]:
     detail = live_sales_order_cache.cached_detail(getattr(order, "id", ""))
     if detail:
         raw = {**detail, **raw}
+    if raw.get("order_type") == "PO":
+        return _text(raw.get("notes")), raw.get("vendor_contact")
     return extract(raw)
 
 
