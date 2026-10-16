@@ -20,3 +20,11 @@ def staff_kind(staff: dict) -> str:
     role = str(staff.get("role") or "").strip().upper()
     title = str(staff.get("title") or "").strip().upper()
     return "helper" if role == "HELPER" or title == "DELIVERY HELPER" else "driver"
+
+
+def crew_kind(staff: dict) -> str | None:
+    """'driver' | 'helper' (staff_kind) for a staff-directory row whose role is DRIVER / HELPER (case-insensitive) or empty. Any other role (DISPATCHER, LOGISTICS_OFFICER, ...) is None: not crew, never offered or linked."""
+    role = str(staff.get("role") or "").strip().upper()
+    if role in ("", "DRIVER", "HELPER"):
+        return staff_kind(staff)  # role HELPER or title DELIVERY HELPER (a helper made through "+ New Driver" keeps role DRIVER)
+    return None

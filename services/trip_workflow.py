@@ -140,8 +140,15 @@ def _batch(db: Session, user: CurrentUser, batch_id: str) -> dict:
     return detail
 
 
+def _actor_done_by(user: CurrentUser) -> dict:
+    return {"name": user.full_name or "Unknown", "role": user.role, "at": None}
+
+
 def _response(db: Session, user: CurrentUser, batch_id: str, *, already_done: bool, done_by: dict | None) -> dict:
-    return {"ok": True, "already_done": already_done, "replayed": False, "done_by": done_by, "batch": _batch(db, user, batch_id)}
+    """CONTRACT (first action wins): `already_done` + `done_by` = the NAME of whoever did it (string): the first crew member on a
+    duplicate, the caller on a normal success. `done_by_detail` keeps the previous object shape {"name","role","at"}."""
+    detail = done_by if done_by is not None else _actor_done_by(user)
+    return {"ok": True, "already_done": already_done, "replayed": False, "done_by": detail.get("name"), "done_by_detail": detail, "batch": _batch(db, user, batch_id)}
 
 
 def _photo_checker(db: Session, batch_id: str):
@@ -231,7 +238,7 @@ def run_action(db: Session, user: CurrentUser, batch_id: str, body: ActionBody, 
         if replay is not None:
             return replay
         fail(409, "Someone else just updated this trip. Refresh and check the new state.", "conflict")
-    result = {**_response(db, user, batch_id, already_done=False, done_by=None), **outcome.response}
+    result = {**_response(db, user, batch_id, already_done=False, done_by={**_actor_done_by(user), "at": trip_state.iso(client_ts)}), **outcome.response}
     actor = Actor(user_id=user.id, role=user.role, staff_id=user.staff_id, name=user.full_name)
     trip_events.add_event(db, trip_id=ctx.trip.id if ctx.trip else None, batch_id=batch_id, event_type=outcome.event_type, actor=actor, received_at=received_at,
                           client_ts=client_ts, gps=gps, so_id=outcome.so_id or so_id, key=body.idempotency_key, payload=outcome.payload, result=result)
@@ -492,8 +499,10 @@ def acknowledge_all(db: Session, user: CurrentUser, batch_id: str, body: Acknowl
     ordered = sorted(rows, key=driver_assignments._sort_key)
     already = [row.id for row in ordered if row.id in ctx.acks]
     todo = [row for row in ordered if row.id not in ctx.acks]
-    if not todo:  # nothing to write (natural idempotency): same answer every time
-        return {"ok": True, "acknowledged": [], "already_acknowledged": already, "replayed": False, "already_done": True, "done_by": None, "batch": _batch(db, user, batch_id)}
+    if not todo:  # nothing to write (natural idempotency): same answer every time; done_by = whoever acknowledged first
+        first_ack = min(ctx.acks.values(), key=lambda a: (trip_state.iso(a.acknowledged_at) or "", a.id or 0))
+        detail = _done_by(db, first_ack.by_user_id, first_ack.acknowledged_at, first_ack.by_role)
+        return {"ok": True, "acknowledged": [], "already_acknowledged": already, "replayed": False, "already_done": True, "done_by": detail["name"], "done_by_detail": detail, "batch": _batch(db, user, batch_id)}
     if trip is not None and trip.status != "pending":
         fail(409, "The trip has already started.", OUT_OF_ORDER)
     checked: list[tuple[str, dict, list[dict]]] = []
@@ -522,7 +531,7 @@ def acknowledge_all(db: Session, user: CurrentUser, batch_id: str, body: Acknowl
             return replay
         fail(409, "Someone else just updated this trip. Refresh and check the new state.", "conflict")
     done = [so_id for so_id, _, _ in checked]
-    result = {"ok": True, "acknowledged": done, "already_acknowledged": already, "replayed": False, "already_done": False, "done_by": None, "batch": _batch(db, user, batch_id)}
+    result = {"ok": True, "acknowledged": done, "already_acknowledged": already, "replayed": False, "already_done": False, "done_by": user.full_name or "Unknown", "done_by_detail": _actor_done_by(user), "batch": _batch(db, user, batch_id)}
     actor = Actor(user_id=user.id, role=user.role, staff_id=user.staff_id, name=user.full_name)
     for index, (so_id, template, answers) in enumerate(checked):
         first = index == 0

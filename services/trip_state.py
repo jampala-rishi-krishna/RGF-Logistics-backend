@@ -108,6 +108,19 @@ def _person(staff_id: int, role: str) -> dict:
     return {"id": staff_id, "name": staff.get("name") or f"Staff #{staff_id}", "role": role, "phone": staff.get("phone") or None}
 
 
+def crew_member(staff_id: int) -> dict:
+    """{"staff_id","name","phone"} of one crew member, from the in-memory staff directory (never a per-request fetch)."""
+    staff = staff_directory_cache.get_by_id(staff_id) or {}
+    return {"staff_id": staff_id, "name": staff.get("name") or f"Staff #{staff_id}", "phone": staff.get("phone") or None}
+
+
+def crew_object(driver_id: int | None, helper_ids) -> dict:
+    """CONTRACT (driver app + Driver Overview): {"driver": {staff_id,name,phone} | null, "helpers": [{staff_id,name,phone}]}.
+    Helpers = the stored helper set minus the driver (by value), so legacy rows with the driver inside helper_ids read fine."""
+    return {"driver": crew_member(driver_id) if driver_id is not None else None,
+            "helpers": [crew_member(h) for h in helper_ids_of(driver_id, helper_ids)]}
+
+
 def crew_of(rows: list) -> list[dict]:
     """Driver first, then the helpers (set difference, never positional)."""
     first = rows[0]

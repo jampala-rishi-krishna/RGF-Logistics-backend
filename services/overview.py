@@ -22,7 +22,7 @@ from models.trip import ISSUE_PRIORITIES, ISSUE_STATUSES, DriverIssue, FormTempl
 from services import day_model, driver_issues, live_sales_order_cache, order_types, trip_state, staff_directory_cache, trip_events, warehouses
 from services.staff_roles import helper_ids_of, staff_kind
 from services.trip_events import fail
-from services.trip_timeline import aware, iso, minutes_between, staff_name, users_by_id
+from services.trip_timeline import actor_role, aware, iso, minutes_between, staff_name, users_by_id
 
 MANILA = ZoneInfo("Asia/Manila")
 CACHE_SECONDS = 15
@@ -210,6 +210,26 @@ EVENT_LABELS = {"acknowledged": "Loaded (acknowledged) {so}", "trip_started": "S
                 "order_unassigned": "{so} removed by dispatch"}
 
 
+def _event_actor_name(event: TripEvent) -> str | None:
+    """Who did it, from the staff id recorded on the action row (memory: staff directory; no extra read)."""
+    if event.staff_id is not None:
+        return staff_name(event.staff_id)
+    return None
+
+
+def _last_action(event: TripEvent | None, so_numbers: dict) -> dict | None:
+    """The latest action of ANY crew member: {"type","at","label","by","by_role"} (by = the acting person, never assumed the driver)."""
+    if event is None:
+        return None
+    label = EVENT_LABELS.get(event.event_type, event.event_type).format(so=so_numbers.get(event.so_id, "") if event.so_id else "").strip()
+    return {"type": event.event_type, "at": iso(event.client_ts), "label": label, "by": _event_actor_name(event), "by_role": actor_role(event.role)}
+
+
+def _helpers_detail(driver_id: int | None, helper_ids) -> list[dict]:
+    """CONTRACT: [{"staff_id","name","phone"}] of the assignment's helper set (driver excluded), from the staff directory cache."""
+    return trip_state.crew_object(driver_id, helper_ids)["helpers"]
+
+
 def _batch_label(state: str, facts: day_model.BatchFacts) -> str:
     return _chip_label(state, facts.stops_done, facts.so_count)
 
@@ -225,8 +245,8 @@ def board(db: Session, day: date, warehouse: str | None, status: str | None, dri
     last_gps_event: dict[str, TripEvent] = {}
     if ids:
         for event in db.execute(select(TripEvent).where(TripEvent.batch_id.in_(ids)).order_by(TripEvent.client_ts, TripEvent.id)).scalars().all():
-            if event.event_type == "order_unassigned":
-                continue  # a dispatcher action, not the crew's last activity (it must not reset "stale")
+            if event.event_type == "order_unassigned" or event.role not in day_model.CREW_ROLES:
+                continue  # a dispatcher / officer action, not the crew's last activity (it must not reset "stale"); driver OR helper counts
             last_event[event.batch_id] = event
             if event.gps and event.gps.get("lat") is not None:
                 last_gps_event[event.batch_id] = event
@@ -252,7 +272,7 @@ def board(db: Session, day: date, warehouse: str | None, status: str | None, dri
         action = None
         if latest is not None:
             so_numbers = {so["so_id"]: so["so_number"] for _, b in entries for so in b["sos"]}
-            action = {"type": latest.event_type, "at": iso(latest.client_ts), "label": EVENT_LABELS.get(latest.event_type, latest.event_type).format(so=so_numbers.get(latest.so_id, "") if latest.so_id else "").strip()}
+            action = _last_action(latest, so_numbers)
         last_at = aware(latest.client_ts) if latest else (aware(best["trip"].started_at) if best["trip"] is not None else None)
         total = day_model.totals(facts_list)
         numbers_ = day_model.trip_numbers(facts_list)
@@ -265,13 +285,14 @@ def board(db: Session, day: date, warehouse: str | None, status: str | None, dri
                      "vehicle": ", ".join(dict.fromkeys(str(f.vehicle) for f in facts_list if f.vehicle)) or None, "batch_id": best["batch_id"], "current_stop": best_facts.stops[current.so_id].customer_name if current else None,
                      "progress": {"done": total["stops_done"], "total": total["sos"]}, "acknowledged": total["acknowledged"], "batch_count": len(entries), "kg": total["kg"], "kg_complete": total["kg_complete"], "kg_unknown_lines": total["kg_unknown_lines"], "packs": total["packs"],
                      "trips": trips, "last_action": action, "last_gps_at": iso(gps_event.client_ts) if gps_event else None,
+                     "helpers_detail": _helpers_detail(best["driver_id"], best["helper_ids"]),
                      "stale": state == "on_trip" and last_at is not None and (now - last_at) > timedelta(minutes=stale_minutes)})
     busy = set(per_person)
     for staff in _active_idle_drivers(warehouse, None):
         if staff["id"] not in busy:
             rows.append({"so_numbers": [], "staff_id": staff["id"], "name": staff.get("name") or f"Staff #{staff['id']}", "role": "driver", "warehouse": str(staff.get("warehouse") or "").upper() or None, "state": "idle", "state_label": "Idle",
                          "vehicle": None, "batch_id": None, "current_stop": None, "progress": {"done": 0, "total": 0}, "acknowledged": 0, "batch_count": 0, "kg": 0.0, "kg_complete": False, "kg_unknown_lines": 0, "packs": None, "trips": [],
-                         "last_action": None, "last_gps_at": None, "stale": False})
+                         "last_action": None, "last_gps_at": None, "stale": False, "helpers_detail": []})
     if warehouse:
         rows = [r for r in rows if r["warehouse"] == warehouse]
     if driver_id is not None:
@@ -363,7 +384,10 @@ def map_points(db: Session, start: date, end: date, warehouse: str | None, drive
 # ---- CSV export -----------------------------------------------------------------------------------------------------
 
 CSV_COLUMNS = ["date", "batch", "driver", "helpers", "vehicle", "so_number", "customer", "acknowledged_at", "acknowledged_by", "arrived_at", "distance_m", "departed_at", "invoice_dr_number", "outcome", "reason",
-               "minutes_at_stop", "trip_started", "trip_ended", "handover_status", "invoice_status", "officer", "validated_at"]
+               "minutes_at_stop", "trip_started", "trip_ended", "handover_status", "invoice_status", "officer", "validated_at",
+               # appended (helpers): who did each crew action and in which role (driver | helper), never assumed to be the driver.
+               # done_by / role = who delivered (checked out of) the stop.
+               "acknowledged_role", "arrived_by", "arrived_role", "done_by", "role"]
 
 
 def _local(value: datetime | None) -> str:
@@ -388,7 +412,14 @@ def export_csv(db: Session, start: date, end: date, warehouse: str | None, drive
     else:
         data = Data(db, start, end)
         batches = data.filtered(warehouse, driver_id)
-    users = users_by_id(db, [a.by_user_id for b in batches for a in b["acks"].values()] + [b["handover"].officer_acknowledged_by_user_id for b in batches if b["handover"]] + [i.officer_user_id for b in batches for i in b["items"]])
+    users = users_by_id(db, [a.by_user_id for b in batches for a in b["acks"].values()] + [b["handover"].officer_acknowledged_by_user_id for b in batches if b["handover"]] + [i.officer_user_id for b in batches for i in b["items"]]
+                        + [u for b in batches for s in b["stops"] for u in (s.checkin_by_user_id, s.checkout_by_user_id)])
+
+    def who(user_id, fallback_role=None) -> tuple[str, str]:
+        if user_id is None:
+            return "", ""
+        found = users.get(user_id, {})
+        return found.get("name") or f"User #{user_id}", actor_role(found.get("role") or fallback_role) or ""
     buffer = io.StringIO()
     writer = csv.writer(buffer, quoting=csv.QUOTE_MINIMAL, lineterminator="\r\n")
     writer.writerow(CSV_COLUMNS)
@@ -406,7 +437,8 @@ def export_csv(db: Session, start: date, end: date, warehouse: str | None, drive
                 _local(ack.acknowledged_at) if ack else "", users.get(ack.by_user_id, {}).get("name", "") if ack else "",
                 _local(stop.checkin_at) if stop else "", "" if not stop or stop.checkin_distance_m is None else stop.checkin_distance_m, _local(stop.checkout_at) if stop else "",
                 (trip_state.invoice_no_of(stop) if stop else "") or "", (stop.outcome if stop else "") or "", (stop.reason if stop else "") or "", "" if not stop or minutes_between(stop.checkin_at, stop.checkout_at) is None else minutes_between(stop.checkin_at, stop.checkout_at),
-                _local(trip.started_at) if trip else "", _local(trip.ended_at) if trip else "", handover.status if handover else "", item.officer_status if item else "", officer or "", validated]])
+                _local(trip.started_at) if trip else "", _local(trip.ended_at) if trip else "", handover.status if handover else "", item.officer_status if item else "", officer or "", validated,
+                who(ack.by_user_id, ack.by_role)[1] if ack else "", *who(stop.checkin_by_user_id if stop else None), *who(stop.checkout_by_user_id if stop else None)]])
     return b"\xef\xbb\xbf" + buffer.getvalue().encode("utf-8")
 
 
@@ -585,7 +617,16 @@ def _trip_row(batch: dict, number: tuple[int, int], now: datetime, stale_minutes
         "attention": day_model.attention_flags(f, now, stale_minutes, events=events, open_issues=issues, photo_rules=rules),
         "last_crew_activity_at": iso(day_model.last_crew_activity(events)), "duration_minutes": minutes,
         "so_numbers": [o.so_number for o in f.orders], "invoice_nos": _invoice_nos(f), "customers": list(dict.fromkeys(o.customer_name for o in f.orders if o.customer_name)),
+        # ---- helpers (additive) ----
+        "helpers_detail": _helpers_detail(batch["driver_id"], batch["helper_ids"]), "crew_detail": trip_state.crew_object(batch["driver_id"], batch["helper_ids"]),
+        "last_action": _last_action(_latest_crew_event(events), {o.so_id: o.so_number for o in f.orders}),
     }
+
+
+def _latest_crew_event(events: list) -> TripEvent | None:
+    """Same rule as the stale flag (day_model.last_crew_activity): the newest driver OR helper action."""
+    crew = [e for e in events if e.event_type != day_model.UNASSIGNED and e.role in day_model.CREW_ROLES and e.client_ts is not None]
+    return max(crew, key=lambda e: (aware(e.client_ts), e.id or 0), default=None)
 
 
 def _row_matches(row: dict, needle: str) -> bool:

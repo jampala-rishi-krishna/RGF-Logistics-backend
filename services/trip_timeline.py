@@ -256,6 +256,7 @@ def build_timeline(db: Session, batch_id: str, extras: dict | None = None) -> di
         "batch": {"batch_id": batch_id, "delivery_date": delivery_date.isoformat() if delivery_date else None, "vehicle": vehicle, "so_count": len(orders), "warehouse": trip.warehouse if trip else None, "assigned_at": iso(first.assigned_at) if first is not None else None},
         "trip": trip_block,
         "crew": crew,
+        "crew_detail": trip_state.crew_object(driver_id, helper_ids),  # CONTRACT object {"driver","helpers"} (same shape as the driver app's `crew`)
         "orders": orders,
         "handover": handover_block,
         "events": [_event_payload(e, users, number_by_so) for e in events],
@@ -272,8 +273,28 @@ def _day(value):
         return None
 
 
+ACTOR_ROLES = {"driver": "driver", "helper": "helper", "logistics_officer": "officer", "officer": "officer", "dispatcher": "dispatcher", "admin": "admin"}
+
+
+def actor_role(role: str | None) -> str | None:
+    """CONTRACT: "driver" | "helper" | "officer" | "dispatcher" | "admin" (the role stored on the action row; never assumed)."""
+    key = str(role or "").strip().lower()
+    return ACTOR_ROLES.get(key, key or None)
+
+
+def actor_name(users: dict[int, dict], user_id: int | None, staff_id: int | None = None) -> str | None:
+    """Name of the acting login (users already read for the timeline), else the staff-directory name of its staff id (memory)."""
+    found = users.get(int(user_id)) if user_id is not None else None
+    if found and found.get("name"):
+        return found["name"]
+    if staff_id is not None:
+        return staff_name(staff_id)
+    return f"User #{user_id}" if user_id is not None else None
+
+
 def _event_payload(e: TripEvent, users: dict[int, dict], number_by_so: dict[str, str]) -> dict:
-    out = {"type": e.event_type, "at": iso(e.client_ts), "received_at": iso(e.received_at), "by": _by(users, e.user_id, e.role), "so_number": number_by_so.get(e.so_id) if e.so_id else None, "gps": e.gps}
+    out = {"type": e.event_type, "at": iso(e.client_ts), "received_at": iso(e.received_at), "by": _by(users, e.user_id, e.role), "so_number": number_by_so.get(e.so_id) if e.so_id else None, "gps": e.gps,
+           "actor_name": actor_name(users, e.user_id, e.staff_id), "actor_role": actor_role(e.role)}
     if e.event_type == UNASSIGNED:  # contract 9: shown even after the order left the batch
         from services import dispatch_changes  # lazy: dispatch_changes -> trip_state -> ... keeps this module import-light
 

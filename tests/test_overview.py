@@ -219,7 +219,8 @@ def test_csv_export_quoting_bom_and_local_times(env):
     rows = list(csv.reader(io.StringIO(response.content.decode("utf-8-sig"))))
     header, body = rows[0], rows[1:]
     assert header == ["date", "batch", "driver", "helpers", "vehicle", "so_number", "customer", "acknowledged_at", "acknowledged_by", "arrived_at", "distance_m", "departed_at", "invoice_dr_number", "outcome", "reason",
-                      "minutes_at_stop", "trip_started", "trip_ended", "handover_status", "invoice_status", "officer", "validated_at"]
+                      "minutes_at_stop", "trip_started", "trip_ended", "handover_status", "invoice_status", "officer", "validated_at",
+                      "acknowledged_role", "arrived_by", "arrived_role", "done_by", "role"]
     assert len(body) == 10 and all(len(r) == len(header) for r in body)
     by_so = {r[5]: dict(zip(header, r)) for r in body}
     assert by_so["SO-X1"]["customer"] == 'Acme, "Best" Foods\nMakati'  # round-trips through proper quoting

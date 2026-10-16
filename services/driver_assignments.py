@@ -219,7 +219,12 @@ def _batch_payload(rows: list, lines: dict[str, list], driver_id: int, *, with_o
         "stop_order_set": source == "optimized" or facts["started"],
         "details_loading": any(order["details_loading"] for order in orders),
         "trip": trip_summary,
-        "crew": crew,
+        # CONTRACT (helpers in the driver app): {"driver": {staff_id,name,phone}|null, "helpers": [{staff_id,name,phone}]}.
+        # The previous list shape ([{id,name,role,phone}], driver first) is kept as `crew_members`.
+        "crew": trip_state.crew_object(first.driver_id, first.helper_ids),
+        "crew_members": crew,
+        # The viewer's own role ON THIS TRIP (a staff id is the driver of the batch or one of its helpers).
+        "viewer_role": "driver" if first.driver_id is not None and first.driver_id == driver_id else "helper",
         "step": day_model.driver_step(shared),  # the 3-step rail: the same function as the Driver Overview tiles
         "invoice_handover_items": _handover_items(shared, {row.id: row for row in rows}),
     }

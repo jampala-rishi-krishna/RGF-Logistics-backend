@@ -41,6 +41,11 @@ def can_act(user: CurrentUser) -> bool:
     return user.role in CREW_ROLES
 
 
+def viewer_role(user: CurrentUser, staff: dict) -> str:
+    """CONTRACT: "driver" | "helper" - the login's crew role; an admin viewing someone gets that staff record's kind."""
+    return user.role if user.role in CREW_ROLES else staff_kind(staff)
+
+
 def _dispatch_phone() -> str | None:
     from services import app_settings
 
@@ -56,7 +61,7 @@ def me(driver_id: int | None = Query(None), user: CurrentUser = Depends(require_
     batches = driver_assignments.today_batches(db, who, can_act(user))
     crew: dict[int, dict] = {}
     for batch in batches:
-        for person in batch.get("crew") or []:
+        for person in batch.get("crew_members") or []:
             if person["id"] != who:
                 crew.setdefault(person["id"], person)
     return {
@@ -66,6 +71,7 @@ def me(driver_id: int | None = Query(None), user: CurrentUser = Depends(require_
         "crew_today": list(crew.values()),
         "driver_id": who,
         "role": user.role if own else staff_kind(staff),
+        "viewer_role": viewer_role(user, staff),
         "name": staff.get("name") or (user.full_name if own else f"Staff #{who}"),
         "title": staff.get("title"),
         "warehouse": staff.get("warehouse"),
@@ -85,6 +91,7 @@ def today(driver_id: int | None = Query(None), user: CurrentUser = Depends(requi
     return {
         "date": driver_assignments.manila_today().isoformat(),
         "driver": {"id": who, "name": staff.get("name")},
+        "viewer_role": viewer_role(user, staff),
         "summary": driver_assignments.day_summary(batches, driver_issues.count_open(db, user_id=user.id) if user.role in CREW_ROLES else 0),
         "batches": batches,
         "dispatch_changes": view["dispatch_changes"],

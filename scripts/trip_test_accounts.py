@@ -536,8 +536,8 @@ def run_trip_e2e(Session, *, password: str, n_orders: int = 3, cleanup: bool = F
                 r = get("/api/driver/today", dt)
                 mine = next((b for b in (r.json().get("batches", []) if r.status_code == 200 else []) if b["batch_id"] == batch_id), None)
                 report.require("GET /api/driver/today lists the fake batch", mine is not None and mine["so_count"] == n_orders and mine["trip"]["chip"] == "to_acknowledge",
-                               _brief(r) if mine is None else f"{mine['so_count']} SOs, chip {mine['trip']['chip']}, crew {[c['role'] for c in mine['crew']]}")
-                report.check("batch crew = driver + helper", sorted(c["role"] for c in mine["crew"]) == ["driver", "helper"])
+                               _brief(r) if mine is None else f"{mine['so_count']} SOs, chip {mine['trip']['chip']}, crew {[c['role'] for c in mine['crew_members']]}")
+                report.check("batch crew = driver + helper", sorted(c["role"] for c in mine["crew_members"]) == ["driver", "helper"])
                 r = get("/api/driver/templates", dt)
                 report.require("GET /api/driver/templates (active ack + checkout templates)", r.status_code == 200 and r.json().get("acknowledge_checklist") and r.json().get("delivery_checkout"), _brief(r))
                 templates = r.json()
@@ -557,14 +557,14 @@ def run_trip_e2e(Session, *, password: str, n_orders: int = 3, cleanup: bool = F
                 report.check("the replay wrote nothing (event count unchanged)", event_count() == events_before)
                 r = post(batch_url(f"orders/{so_ids[0]}/acknowledge"), ht, **_action_body(template_id=templates["acknowledge_checklist"]["id"], answers=build_ack_answers(templates["acknowledge_checklist"])))
                 body = r.json() if r.status_code == 200 else {}
-                report.check("helper repeating the driver's acknowledge -> already_done", body.get("already_done") is True and (body.get("done_by") or {}).get("role") == "driver", _brief(r))
+                report.check("helper repeating the driver's acknowledge -> already_done", body.get("already_done") is True and (body.get("done_by_detail") or {}).get("role") == "driver", _brief(r))
 
                 # ---- start -------------------------------------------------------------------------------------------
                 r = post(batch_url("start"), dt, **_action_body())
                 report.require("driver starts the trip", r.status_code == 200 and r.json()["batch"]["trip"]["chip"] == "on_trip", _brief(r))
                 r = post(batch_url("start"), ht, **_action_body())
                 body = r.json() if r.status_code == 200 else {}
-                report.check("helper repeating start -> already_done (not 409)", body.get("already_done") is True and (body.get("done_by") or {}).get("role") == "driver", _brief(r))
+                report.check("helper repeating start -> already_done (not 409)", body.get("already_done") is True and (body.get("done_by_detail") or {}).get("role") == "driver", _brief(r))
 
                 # ---- every stop: check-in then check-out -------------------------------------------------------------
                 r = get(batch_url("route"), dt)

@@ -541,6 +541,16 @@ def assignment_options(salesorder_id: str, extra_ids: str | None = Query(None, d
     return result
 
 
+MAX_HELPERS_PER_TRUCK = 1
+
+
+def _require_one_helper(driver_id: int | None, selected_ids: list[int]) -> None:
+    """Load Planning rule: one truck = one driver + ONE helper. Applies to new selections only; stored assignments with more
+    helpers keep reading (and resending) fine."""
+    if len(helper_ids_of(driver_id, selected_ids)) > MAX_HELPERS_PER_TRUCK:
+        raise HTTPException(400, "Only one helper per truck")
+
+
 @router.post("/send-assignment-email")
 def send_assignment_email_route(body: AssignmentEmailBody, current_user: CurrentUser = Depends(require_role("admin", "dispatcher")), db: Session = Depends(get_db)):
     return send_assignment_email(body, current_user, db)
@@ -592,6 +602,7 @@ def assign_order(salesorder_id: str, body: AssignmentBody, current_user: Current
     primary_driver_id = body.primary_driver_id()
     if body.helper_ids and primary_driver_id is None:
         raise HTTPException(400, "Pick a driver before adding helpers.")
+    _require_one_helper(primary_driver_id, driver_ids)
     for driver_id in driver_ids:
         if not staff_directory_cache.get_by_id(driver_id):
             raise HTTPException(404, "Driver was not found.")
@@ -754,6 +765,7 @@ def send_assignment_email(body: AssignmentEmailBody, current_user: CurrentUser =
     orders = [o for o in (live_sales_order_cache.find_cached(oid) or live_sales_order_cache.ensure_zoho_data(oid) for oid in ids) if o is not None]
     driver_ids = body.all_driver_ids()
     primary_id = body.primary_driver_id()
+    from_stored = False
     if (body.resend or body.email_only or first_send) and ids:
         # Send / Resend / Retry: who is the driver and who are the helpers comes from the stored assignment, never from the
         # order of the ids the caller listed.
@@ -761,6 +773,9 @@ def send_assignment_email(body: AssignmentEmailBody, current_user: CurrentUser =
         if stored.get("driver_id") is not None:
             primary_id = stored["driver_id"]
             driver_ids = list(dict.fromkeys([primary_id, *(stored.get("helper_ids") or [])]))
+            from_stored = True  # an assignment stored before the one-helper rule may list more helpers: it still sends
+    if not from_stored:
+        _require_one_helper(primary_id, driver_ids)
     driver_rows = [staff_directory_cache.get_by_id(driver_id) for driver_id in driver_ids]
     profile = db.execute(select(Vehicle).where(Vehicle.plate_no == body.vehicle_id)).scalar_one_or_none()
     manual_profile = _manual_vehicle_profile(body.manual_vehicle, body.vehicle_id)

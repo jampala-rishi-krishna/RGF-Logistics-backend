@@ -17,7 +17,7 @@ from database import get_db
 from models.user import User
 from services import app_settings, gmail_sender, memory_tables, staff_directory_cache, user_cache, user_invites, zoho_usage
 from services.phone_numbers import ph_phone_digits
-from services.staff_roles import staff_kind
+from services.staff_roles import crew_kind
 from services.audit import list_audit_log as _list_audit_log
 
 logger = logging.getLogger("admin")
@@ -142,9 +142,23 @@ def upsert_integration_state(provider: str, body: IntegrationStateBody):
     return memory_tables.upsert_integration_status(provider, body.state)
 
 
+# staff_id -> user id of the login linked to it, remembered from the users the admin Users page already reads (list_users) and from
+# create_user. GET /api/admin/staff-options answers linked_user_id from this map only: it adds no database read of its own (null =
+# not known yet in this process; create_user still refuses a second login for a staff record with its own existing check).
+_linked_staff: dict[int, int] = {}
+
+
+def _remember_links(users) -> None:
+    for u in users:
+        if getattr(u, "staff_id", None) is not None:
+            _linked_staff[int(u.staff_id)] = int(u.id)
+
+
 @router.get("/users")
 def list_users(db: Session = Depends(get_db)):
     users = db.execute(select(User).order_by(User.id)).scalars().all()
+    _linked_staff.clear()
+    _remember_links(users)
     states = user_invites.invite_states(db, [u.id for u in users])
     return [
         {
@@ -392,12 +406,15 @@ def create_user(body: CreateUserBody, db: Session = Depends(get_db), admin: Curr
     staff = None
     if role in ("driver", "helper"):
         if staff_id is None:
-            raise HTTPException(400, f"A {role} login must be linked to a staff record (staff_id).")
+            raise HTTPException(400, "Choose a staff record")
         staff = staff_directory_cache.get_by_id(staff_id)
         if not staff:
             raise HTTPException(400, f"Staff record {staff_id} was not found in the staff directory.")
-        if staff_kind(staff) != role:
-            raise HTTPException(400, f"Staff record {staff_id} is a {staff_kind(staff)}, so its login role must be {staff_kind(staff)}.")
+        kind = crew_kind(staff)
+        if kind is None:
+            raise HTTPException(400, f"Staff record {staff_id} is not a driver or helper.")
+        if kind != role:
+            raise HTTPException(400, f"Staff record {staff_id} is a {kind}, so its login role must be {kind}.")
         if db.execute(select(User.id).where(User.staff_id == staff_id)).first() is not None:
             raise HTTPException(409, f"Staff record {staff_id} already has a login.")
     else:
@@ -435,7 +452,29 @@ def create_user(body: CreateUserBody, db: Session = Depends(get_db), admin: Curr
         db.rollback()
         raise HTTPException(exc.status_code, f"The login details email could not be sent: {exc}") from exc
     logger.info("[AUTH] user_id=%s created with role=%s by admin_id=%s", user.id, role, admin.id)
+    _remember_links([user])
     return _user_row(user)
+
+
+STAFF_OPTION_ROLES = ("driver", "helper")
+
+
+@usage_router.get("/staff-options")
+def staff_options(role: str):
+    """Add User picker (admin only): staff-directory records of one kind, from the in-memory staff directory cache (no n8n call,
+    no database read). Kind = services.staff_roles.crew_kind (role DRIVER / HELPER, case-insensitive)."""
+    wanted = (role or "").strip().lower()
+    if wanted not in STAFF_OPTION_ROLES:
+        raise HTTPException(400, "role must be driver or helper.")
+    options = []
+    for staff in staff_directory_cache.all_staff():
+        if staff.get("id") is None or staff.get("active") is False or crew_kind(staff) != wanted:
+            continue
+        staff_id = int(staff["id"])
+        options.append({"staff_id": staff_id, "name": staff.get("name") or f"Staff #{staff_id}", "role": wanted, "phone": staff.get("phone") or None,
+                        "linked_user_id": _linked_staff.get(staff_id)})
+    options.sort(key=lambda o: str(o["name"]).casefold())
+    return options
 
 
 class ManagerBody(BaseModel):

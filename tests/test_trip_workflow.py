@@ -160,7 +160,7 @@ def test_full_trip_flow_and_chips(env, crew):
     assert d["orders"][0]["workflow"]["can_acknowledge"] is True
     # today payload for a batch with no trip row
     today = env.client.get("/api/driver/today", headers=h).json()["batches"][0]
-    assert today["trip"]["chip"] == "to_acknowledge" and today["trip"]["total"] == 2 and [c["role"] for c in today["crew"]] == ["driver"]
+    assert today["trip"]["chip"] == "to_acknowledge" and today["trip"]["total"] == 2 and [c["role"] for c in today["crew_members"]] == ["driver"]
     r = ack(env, h, "s1")
     assert r.status_code == 200 and r.json()["batch"]["trip"]["acknowledged"] == 1 and r.json()["already_done"] is False
     ack(env, h, "s2")
@@ -232,13 +232,13 @@ def test_duplicate_by_helper_returns_already_done_with_done_by(env):
     hd, hh = H(drv), H(hlp, "helper")
     assert ack(env, hd, "s1").status_code == 200
     again = ack(env, hh, "s1").json()
-    assert again["already_done"] is True and again["done_by"]["name"] == "Drv" and again["done_by"]["role"] == "driver"
+    assert again["already_done"] is True and again["done_by"] == "Drv" and again["done_by_detail"]["role"] == "driver"
     env.client.post(url("start"), headers=hh, json=body())
     dup = env.client.post(url("start"), headers=hd, json=body()).json()
-    assert dup["already_done"] and dup["done_by"]["name"] == "Hlp"
+    assert dup["already_done"] and dup["done_by"] == "Hlp"
     env.client.post(url("orders/s1/check-in"), headers=hd, json=body())
     dup = env.client.post(url("orders/s1/check-in"), headers=hh, json=body()).json()
-    assert dup["already_done"] and dup["done_by"]["name"] == "Drv"
+    assert dup["already_done"] and dup["done_by"] == "Drv"
     c = counts(env)
     assert c["so_acknowledgements"] == 1 and c["trip_events"] == 3
 
@@ -459,7 +459,7 @@ def test_helper_sees_batch_and_id_1_does_not_match_17(env):
     assert [b["batch_id"] for b in env.client.get("/api/driver/today", headers=h17).json()["batches"]] == ["b1"]
     assert [b["batch_id"] for b in env.client.get("/api/driver/today", headers=h1).json()["batches"]] == ["b2"]
     assert env.client.get("/api/driver/assignments/b1", headers=h1).status_code == 404
-    assert env.client.get("/api/driver/assignments/b1", headers=h17).json()["crew"] == [
+    assert env.client.get("/api/driver/assignments/b1", headers=h17).json()["crew_members"] == [
         {"id": 9, "name": "Emert", "role": "driver", "phone": "0948"}, {"id": 17, "name": "Raymond", "role": "helper", "phone": "017"}]
     add_order(env, "old", batch="b0", day=driver_assignments.manila_today() - timedelta(days=2), helper_ids=[9, 17])
     hist = env.client.get("/api/driver/history?days=7", headers=h17).json()["batches"]
