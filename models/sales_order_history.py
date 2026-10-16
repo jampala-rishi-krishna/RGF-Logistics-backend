@@ -52,6 +52,7 @@ class SalesOrderHistory(TimestampedBase):
     manifest_id: Mapped[int | None] = mapped_column(Integer, index=True)
     assigned_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     assigned_by: Mapped[int | None] = mapped_column(Integer)
+    assigned_by_name: Mapped[str | None] = mapped_column(Text)
     assignment_status: Mapped[str] = mapped_column(String(24), nullable=False, default="assigned", index=True)
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
     helper_ids: Mapped[list | None] = mapped_column(JSONB)

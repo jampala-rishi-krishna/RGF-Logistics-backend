@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass
 
-from fastapi import Depends, HTTPException, status
+from fastapi import Depends, HTTPException, Request, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
 from auth.security import decode_access_token
@@ -27,6 +27,7 @@ class CurrentUser:
     status: str | None
     must_change_password: bool = False
     staff_id: int | None = None
+    is_manager: bool = False
 
 
 def _load_user(user_id: int) -> CurrentUser | None:
@@ -43,7 +44,7 @@ def _load_user(user_id: int) -> CurrentUser | None:
         user = db.get(User, user_id)
         if user is None or user.status not in (None, "active"):
             return None
-        current = CurrentUser(id=user.id, email=user.email, role=user.role, full_name=user.full_name, status=user.status, must_change_password=user.must_change_password, staff_id=user.staff_id)
+        current = CurrentUser(id=user.id, email=user.email, role=user.role, full_name=user.full_name, status=user.status, must_change_password=user.must_change_password, staff_id=user.staff_id, is_manager=user.is_manager)
     user_cache.put(user_id, asdict(current))
     return current
 
@@ -75,9 +76,38 @@ def require_role(*allowed_roles: str):
     that demo-mode fallback was explicitly documented as insecure and is superseded by real
     JWT auth here; a missing/invalid token is now always a hard 401/403."""
 
-    def dependency(current_user: CurrentUser = Depends(get_current_user)) -> CurrentUser:
-        if ROLE_ALIASES.get(current_user.role, current_user.role) not in allowed_roles:
+    def dependency(current_user: CurrentUser = Depends(get_current_user), request: Request = None) -> CurrentUser:
+        # Sales / Wet Market may read order lists and details only, never mutate them.
+        readonly = current_user.role in {"sales", "wet_market"} and request is not None and request.method == "GET" and (
+            request.url.path.startswith("/orders") or request.url.path.startswith("/api/orders") or
+            request.url.path.startswith("/api/load-planning/inventory/sales-orders") or
+            request.url.path.startswith("/api/load-planning/inventory/export/") or
+            request.url.path == "/api/load-planning/inventory/branches")
+        if not readonly and ROLE_ALIASES.get(current_user.role, current_user.role) not in allowed_roles:
             raise HTTPException(status.HTTP_403_FORBIDDEN, "Forbidden")
         return current_user
 
     return dependency
+
+
+def require_manager(current_user: CurrentUser = Depends(get_current_user)) -> CurrentUser:
+    if not current_user.is_manager or current_user.role not in {"admin", "planner", "dispatcher"}:
+        raise HTTPException(403, "Manager permission required")
+    return current_user
+
+
+def workspace_access(request: Request, user: CurrentUser | None = Depends(get_current_user_optional)):
+    if user is None:
+        return
+    path = request.url.path
+    if user.role in {"sales", "wet_market"}:
+        allowed = path.startswith("/auth/") or path.startswith("/api/access/") or (request.method == "GET" and (
+            path.startswith("/orders") or path.startswith("/api/orders") or
+            path.startswith("/api/load-planning/inventory/sales-orders") or
+            path.startswith("/api/load-planning/inventory/export/") or path == "/api/load-planning/inventory/branches"))
+        if not allowed:
+            raise HTTPException(403, "Orders read-only access")
+    if user.role in {"planner", "dispatcher"} and (path.startswith("/api/fleet-health") or
+            path.startswith("/api/admin") or path.startswith("/api/officer") or
+            path in {"/users", "/roles", "/audit-log", "/integrations", "/warehouse-events"}):
+        raise HTTPException(403, "Administrator access required")

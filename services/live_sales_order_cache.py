@@ -295,6 +295,7 @@ def load_assignment_state_from_history(db) -> None:
                 "assignment_status": r.assignment_status,
                 "assigned_at": r.assigned_at,
                 "assigned_by": r.assigned_by,
+                "assigned_by_name": getattr(r, "assigned_by_name", None),
                 "completed_at": r.completed_at,
                 "route_id": r.route_id,
                 "manifest_id": r.manifest_id,

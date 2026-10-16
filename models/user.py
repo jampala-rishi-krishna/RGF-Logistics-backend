@@ -8,12 +8,19 @@ from sqlalchemy.orm import Mapped, mapped_column
 from database import TimestampedBase
 
 
+def _manager_default(context):
+    values = context.get_current_parameters()
+    return values.get("role") == "admin" or str(values.get("email") or "").lower() in {
+        "pau@rareglobalfood.com", "jed@rareglobalfood.com"}
+
+
 class User(TimestampedBase):
     __tablename__ = "users"
 
     full_name: Mapped[str] = mapped_column(Text, nullable=False)
     email: Mapped[str] = mapped_column(Text, nullable=False, unique=True)
-    phone: Mapped[int] = mapped_column(BigInteger, nullable=False, unique=True)
+    phone: Mapped[int | None] = mapped_column(BigInteger, nullable=True, unique=True)
+    is_manager: Mapped[bool] = mapped_column(Boolean, nullable=False, default=_manager_default, server_default="false")
     role: Mapped[str | None] = mapped_column(Text)
     status: Mapped[str | None] = mapped_column(Text)
     profile_photo_url: Mapped[str | None] = mapped_column(Text)

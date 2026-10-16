@@ -34,11 +34,11 @@ class LoginBody(BaseModel):
 
 
 def _public_user(user: User) -> dict:
-    return {"id": user.id, "fullName": user.full_name, "email": user.email, "role": user.role, "status": user.status, "mustChangePassword": user.must_change_password, "staffId": user.staff_id}
+    return {"id": user.id, "fullName": user.full_name, "email": user.email, "role": user.role, "status": user.status, "mustChangePassword": user.must_change_password, "staffId": user.staff_id, "is_manager": user.is_manager}
 
 
 def _public_user_from_current(current_user: CurrentUser) -> dict:
-    return {"id": current_user.id, "fullName": current_user.full_name, "email": current_user.email, "role": current_user.role, "status": current_user.status, "mustChangePassword": current_user.must_change_password, "staffId": current_user.staff_id}
+    return {"id": current_user.id, "fullName": current_user.full_name, "email": current_user.email, "role": current_user.role, "status": current_user.status, "mustChangePassword": current_user.must_change_password, "staffId": current_user.staff_id, "is_manager": current_user.is_manager}
 
 
 def client_ip(request: Request) -> str:

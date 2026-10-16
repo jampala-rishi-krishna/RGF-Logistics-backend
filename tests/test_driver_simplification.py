@@ -43,7 +43,13 @@ def world(env, monkeypatch):
     monkeypatch.setattr(live_sales_order_cache, "invalidate_windows", lambda: None)
     monkeypatch.setattr(live_sales_order_cache, "_assignment_state", {})
     env.orders = orders
-    env.dispatcher = make_user(env, "dispatcher", None, "Dina Dispatch")
+    from models.access_workflow import UnassignRequest
+    from models.user import User
+    UnassignRequest.__table__.create(env.engine)
+    env.dispatcher = make_user(env, "planner", None, "Dina Dispatch")
+    with env.Session() as db:
+        db.get(User, env.dispatcher).is_manager = True
+        db.commit()
     return env
 
 
@@ -213,7 +219,7 @@ def test_unassign_removes_the_order_from_the_driver_payload_at_once(world):
     assert removed.status_code == 409 and removed.json()["detail"] == {"code": "order_removed", "message": "This order was removed by dispatch"}
     with env.Session() as db:
         event = db.execute(select(TripEvent).where(TripEvent.event_type == "order_unassigned")).scalar_one()
-        assert (event.batch_id, event.so_id, event.user_id, event.role, event.gps, event.idempotency_key) == ("b1", "s2", env.dispatcher, "dispatcher", None, None)
+        assert (event.batch_id, event.so_id, event.user_id, event.role, event.gps, event.idempotency_key) == ("b1", "s2", env.dispatcher, "planner", None, None)
         assert event.result["previous_state"] == "assigned" and event.result["by_name"] == "Dina Dispatch" and event.result["order_type"] == "SO"
 
 

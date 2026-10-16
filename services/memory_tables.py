@@ -100,8 +100,9 @@ def list_integration_status() -> list[dict]:
 # --- Admin: roles (static reference data, never written) ---
 ROLES = [
     {"id": 1, "name": "admin", "description": "Full access to every tab"},
-    {"id": 2, "name": "dispatcher", "description": "Assignment, dispatch, and communications"},
-    {"id": 3, "name": "warehouse", "description": "Warehouse loading and manifest operations"},
+    {"id": 2, "name": "planner", "description": "Control Tower, Fleet, Orders, Load Planning, Routes, Driver Overview, Communications, Reports"},
+    {"id": 3, "name": "sales", "description": "Orders and Confirmed Orders, read-only; final rules TBD"},
+    {"id": 7, "name": "wet_market", "description": "Orders and Confirmed Orders, read-only; final rules TBD"},
     {"id": 4, "name": "driver", "description": "Driver app: own assignments only"},
     {"id": 5, "name": "helper", "description": "Driver app as a delivery helper: assigned batches only"},
     {"id": 6, "name": "logistics_officer", "description": "Officer app: invoice handover validation and outstanding invoices"},

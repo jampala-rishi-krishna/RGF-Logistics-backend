@@ -18,7 +18,7 @@ _MIRRORED_COLUMNS = [
     "customer_po_number", "billing_address", "shipping_address",
     "payment_terms_label", "mode_of_transport", "synced_at",
     "vehicle_id", "driver_id", "route_id", "manifest_id", "assigned_at",
-    "assigned_by", "assignment_status", "completed_at",
+    "assigned_by", "assigned_by_name", "assignment_status", "completed_at",
 ]
 
 _REEFER_TERMS = ("reefer", "frozen", "chilled", "cold chain", "cold-chain")
@@ -44,7 +44,7 @@ def sync_history_row(db: Session, order: SalesOrderCache) -> None:
         history = SalesOrderHistory(id=order.id)
         db.add(history)
     for column in _MIRRORED_COLUMNS:
-        setattr(history, column, getattr(order, column))
+        setattr(history, column, getattr(order, column, None) if column == "assigned_by_name" else getattr(order, column))
     kind = order_types.order_type_of(order)
     is_transfer = order_types.is_reference_type(kind)  # TO / PO: no branch stock; their two ends are kept in source/destination_warehouse
     history.order_type = kind  # SO | WM | PO | TO

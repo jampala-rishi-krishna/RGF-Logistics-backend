@@ -38,6 +38,7 @@ class SalesOrderCache(TimestampedBase):
     manifest_id: Mapped[int | None] = mapped_column(Integer, index=True)
     assigned_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     assigned_by: Mapped[int | None] = mapped_column(Integer)
+    assigned_by_name: Mapped[str | None] = mapped_column(Text)
     assignment_status: Mapped[str] = mapped_column(String(24), nullable=False, default="unassigned", index=True)
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
 

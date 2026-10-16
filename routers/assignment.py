@@ -17,7 +17,7 @@ from pydantic import BaseModel
 from sqlalchemy import select, func
 from sqlalchemy.orm import Session
 
-from auth.dependencies import CurrentUser, require_role
+from auth.dependencies import CurrentUser, require_role, require_manager
 from database import get_db
 from types import SimpleNamespace
 from models.dispatch_pipeline import ClientDeliveryConstraint
@@ -414,11 +414,15 @@ def _record_unassign(db: Session, user: CurrentUser, row: dict) -> None:
     batch = row["_batch_id"]
     remaining = len(live_sales_order_cache.ids_for_batch(batch)) if batch else 0
     dispatch_changes.add_unassign_event(db, user=user, row=row, remaining=remaining)
+    from models.access_workflow import UnassignRequest
+    from sqlalchemy import update
+    db.execute(update(UnassignRequest).where(UnassignRequest.order_id == row["id"], UnassignRequest.status == "pending").values(
+        status="approved", resolved_by=user.id, resolved_at=datetime.now(timezone.utc), result_read=False))
 
 
 # Registered before "/{salesorder_id}" so "unassign-preview" is not taken for an order id.
 @router.post("/unassign-preview")
-def unassign_preview(body: UnassignPreviewBody, current_user: CurrentUser = Depends(require_role("admin", "dispatcher")), db: Session = Depends(get_db)):
+def unassign_preview(body: UnassignPreviewBody, current_user: CurrentUser = Depends(require_manager), db: Session = Depends(get_db)):
     """Contract 6: what unassigning these orders would undo (acknowledged / trip started / checked in -> confirm; delivered -> blocked).
     Memory first; the Neon sales_orders rows only for ids not in memory, plus the trip rows of the selected batches. Never Zoho."""
     ids = list(dict.fromkeys(str(value).strip() for value in body.order_ids if str(value).strip()))
@@ -439,7 +443,7 @@ def unassign_preview(body: UnassignPreviewBody, current_user: CurrentUser = Depe
 
 # Registered before "/{salesorder_id}" (like "new-driver") so "bulk-unassign" is not taken for an order id.
 @router.post("/bulk-unassign")
-def bulk_unassign(body: BulkUnassignBody, current_user: CurrentUser = Depends(require_role("admin", "dispatcher")), db: Session = Depends(get_db)):
+def bulk_unassign(body: BulkUnassignBody, current_user: CurrentUser = Depends(require_manager), db: Session = Depends(get_db)):
     """Confirmed Orders > "Unassign selected": returns every selected SO/TO to its source tab (Inventory / Load Planning). Orders that cannot be
     unassigned (delivered, completed, on a manifest, not assigned) are skipped and listed with the reason; the rest are done. The email status of
     the touched batches is cleared: the unassigned orders lose it, and any order left on the same batch goes back to not_sent (its email no longer
@@ -545,8 +549,17 @@ def send_assignment_email_route(body: AssignmentEmailBody, current_user: Current
 @router.post("/{salesorder_id}")
 def assign_order(salesorder_id: str, body: AssignmentBody, current_user: CurrentUser = Depends(require_role("admin", "dispatcher")), db: Session = Depends(get_db)):
     order_ids = body.salesorder_ids or [salesorder_id]
+    from services import purchase_orders
+    for oid in order_ids:
+        if purchase_orders.is_po_id(oid):
+            try:
+                purchase_orders.ensure_row(oid, validate=True)
+            except purchase_orders.NotAssignable as exc:
+                raise HTTPException(409, str(exc)) from exc
     orders = [o for o in (live_sales_order_cache.find_cached(oid) or live_sales_order_cache.ensure_zoho_data(oid) for oid in order_ids) if o is not None]
     order = live_sales_order_cache.find_cached(salesorder_id) or live_sales_order_cache.ensure_zoho_data(salesorder_id)
+    if any(item.assignment_status == "assigned" for item in orders) and not getattr(current_user, "is_manager", False):
+        raise HTTPException(403, "Manager permission required to edit an assignment")
     profile = db.execute(select(Vehicle).where(Vehicle.plate_no == body.vehicle_id)).scalar_one_or_none()
     manual_profile = _manual_vehicle_profile(body.manual_vehicle, body.vehicle_id)
     profile = profile or manual_profile
@@ -592,10 +605,11 @@ def assign_order(salesorder_id: str, body: AssignmentBody, current_user: Current
         item.helper_ids = driver_ids
         item.assigned_at = assigned_at
         item.assigned_by = current_user.id
+        item.assigned_by_name = current_user.full_name
         item.assignment_status = "assigned"
         # helper_ids is kept in the live state too (as it is when loaded back from history): Send / Resend / Retry resolve the people to
         # notify from the stored assignment, so without it a fresh assignment would only ever notify the driver.
-        live_sales_order_cache.set_assignment(item.id, vehicle_id=body.vehicle_id, driver_id=primary_driver_id, helper_ids=driver_ids, assigned_at=assigned_at, assigned_by=current_user.id, assignment_status="assigned", expected_shipment_date=item.expected_shipment_date)
+        live_sales_order_cache.set_assignment(item.id, vehicle_id=body.vehicle_id, driver_id=primary_driver_id, helper_ids=driver_ids, assigned_at=assigned_at, assigned_by=current_user.id, assigned_by_name=current_user.full_name, assignment_status="assigned", expected_shipment_date=item.expected_shipment_date)
         sync_history_row(db, item)
     db.commit()
     live_sales_order_cache.bump_assignment_generation()
@@ -628,7 +642,7 @@ def assign_order(salesorder_id: str, body: AssignmentBody, current_user: Current
 
 
 @router.post("/{salesorder_id}/unassign")
-def unassign_order(salesorder_id: str, current_user: CurrentUser = Depends(require_role("admin", "dispatcher")), db: Session = Depends(get_db), body: UnassignBody | None = None):
+def unassign_order(salesorder_id: str, current_user: CurrentUser = Depends(require_manager), db: Session = Depends(get_db), body: UnassignBody | None = None):
     """Contract 7: delivered / checked out -> 409 code "delivered"; acknowledged / trip started / checked in without
     {"confirm": true} -> 409 code "confirm_required" (nothing done). The unassign and its audit event are ONE commit (contract 8)."""
     order = live_sales_order_cache.find_cached(salesorder_id) or live_sales_order_cache.ensure_zoho_data(salesorder_id)
@@ -664,6 +678,7 @@ def _apply_unassign(order, db: Session) -> None:
     order.manifest_id = None
     order.assigned_at = None
     order.assigned_by = None
+    order.assigned_by_name = None
     order.assignment_status = "unassigned"
     live_sales_order_cache.set_assignment(
         order.id,
@@ -673,6 +688,7 @@ def _apply_unassign(order, db: Session) -> None:
         manifest_id=None,
         assigned_at=None,
         assigned_by=None,
+        assigned_by_name=None,
         assignment_status="unassigned",
     )
     sync_history_row(db, order)
@@ -798,8 +814,6 @@ def send_assignment_email(body: AssignmentEmailBody, current_user: CurrentUser =
             "vehicleId": body.vehicle_id,
             "truckPlate": profile.plate_no,
             "warehouse": warehouse,
-            "assignedBy": assigned_by,
-            "assignedAt": assigned_at,
             "salesOrders": sales_orders_payload,
             "driverSubject": body.subject or driver_subject,
             "driverHtmlBody": driver_html,

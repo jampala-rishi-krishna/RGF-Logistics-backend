@@ -151,7 +151,7 @@ def list_users(db: Session = Depends(get_db)):
             "id": u.id,
             "full_name": u.full_name,
             "email": u.email,
-            "phone": u.phone,
+            "phone": u.phone, "is_manager": u.is_manager,
             "role": u.role,
             "status": u.status,
             "profile_photo_url": u.profile_photo_url,
@@ -282,13 +282,13 @@ def set_user_status(user_id: int, body: UserStatusBody, db: Session = Depends(ge
 
 # --- Create a login (admin only). The user gets an unusable password; share an invite link afterwards. ---
 
-CREATABLE_ROLES = ("logistics_officer", "driver", "helper", "dispatcher", "planner", "warehouse")  # never admin
+CREATABLE_ROLES = ("admin", "planner", "driver", "sales", "wet_market", "helper", "logistics_officer")
 
 
 class CreateUserBody(BaseModel):
     full_name: str
     email: str
-    phone: str
+    phone: str | None = None
     role: str
     staff_id: int | None = None
     password: str | None = None
@@ -296,7 +296,7 @@ class CreateUserBody(BaseModel):
 
 
 def _user_row(u: User) -> dict:
-    return {"id": u.id, "full_name": u.full_name, "email": u.email, "phone": u.phone, "role": u.role, "status": u.status,
+    return {"id": u.id, "full_name": u.full_name, "email": u.email, "phone": u.phone, "is_manager": u.is_manager, "role": u.role, "status": u.status,
             "profile_photo_url": u.profile_photo_url, "staff_id": u.staff_id, "must_change_password": u.must_change_password, "invite_state": "none"}
 
 
@@ -386,7 +386,7 @@ def create_user(body: CreateUserBody, db: Session = Depends(get_db), admin: Curr
         if problem:
             raise HTTPException(400, problem)
     phone = ph_phone_digits(body.phone)
-    if phone is None:
+    if (body.phone or "").strip() and phone is None:
         raise HTTPException(400, "phone must be a Philippine mobile number (09XXXXXXXXX or +639XXXXXXXXX).")
     staff_id = body.staff_id
     staff = None
@@ -404,7 +404,7 @@ def create_user(body: CreateUserBody, db: Session = Depends(get_db), admin: Curr
         staff_id = None  # only drivers / helpers are linked to the staff directory
     if db.execute(select(User.id).where(User.email == email)).first() is not None:
         raise HTTPException(409, "A user with this email already exists.")
-    if db.execute(select(User.id).where(User.phone == phone)).first() is not None:
+    if phone is not None and db.execute(select(User.id).where(User.phone == phone)).first() is not None:
         raise HTTPException(409, "A user with this phone number already exists.")
     if body.send_login_email:
         if not gmail_sender.configured():
@@ -415,6 +415,7 @@ def create_user(body: CreateUserBody, db: Session = Depends(get_db), admin: Curr
         email=email,
         phone=phone,
         role=role,
+        is_manager=role == "admin" or email in {"pau@rareglobalfood.com", "jed@rareglobalfood.com"},
         status="active",
         staff_id=staff_id,
         password_hash=hash_password(initial_password) if initial_password else unusable_password_hash(),
@@ -435,3 +436,16 @@ def create_user(body: CreateUserBody, db: Session = Depends(get_db), admin: Curr
         raise HTTPException(exc.status_code, f"The login details email could not be sent: {exc}") from exc
     logger.info("[AUTH] user_id=%s created with role=%s by admin_id=%s", user.id, role, admin.id)
     return _user_row(user)
+
+
+class ManagerBody(BaseModel):
+    is_manager: bool
+
+
+@usage_router.patch("/users/{user_id}/manager")
+def set_manager(user_id: int, body: ManagerBody, db: Session = Depends(get_db)):
+    user = _user_or_404(db, user_id)
+    user.is_manager = body.is_manager
+    db.commit()
+    user_cache.invalidate(user.id)
+    return {"ok": True, "is_manager": user.is_manager}
