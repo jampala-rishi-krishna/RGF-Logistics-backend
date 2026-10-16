@@ -27,7 +27,7 @@ from datetime import date, datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
 from models.inventory import SalesOrderCache
-from services import branches, transfer_orders, warehouses
+from services import branches, memory_debug, transfer_orders, warehouses, zoho_resilience
 from services.item_weight import calculate_line_weight_kg
 from services.pack_units import is_pack_unit
 from services.serialize import row_to_dict
@@ -154,12 +154,19 @@ def vendor_address(record: dict) -> dict:
 # ---- list cache (memory) -----------------------------------------------------------------------------------------
 
 _lock = threading.RLock()
-_fetch_lock = threading.Lock()
-_list: dict = {"records": None, "at": 0.0, "refreshed_at": None, "status_counts": {}}
+_list: dict = {"records": None, "at": 0.0, "refreshed_at": None, "status_counts": {}, "failed_at": 0.0, "failed_since": None, "error": None}
 _details: dict[str, tuple[str, dict]] = {}
 _inflight: set[str] = set()
 _failed: dict[str, float] = {}
 _pool = ThreadPoolExecutor(max_workers=3, thread_name_prefix="po-detail")
+_flight = zoho_resilience.SingleFlight("purchase-orders")
+# Line-item details kept in memory: only orders still in the latest list, at most this many (oldest dropped first).
+DETAIL_CACHE_MAX = int(os.environ.get("PURCHASE_ORDER_DETAIL_CACHE_MAX", "500"))
+LIST_FAILURE_BACKOFF_SECONDS = 60  # after a failed list pull, serve the last good list for this long before asking Zoho again
+
+
+class Warming(Exception):
+    """The first PO list pull is still running after the request deadline; it keeps filling the cache in the background."""
 
 
 def _pull() -> tuple[dict[str, dict], dict[str, int]]:
@@ -194,24 +201,77 @@ def _pull() -> tuple[dict[str, dict], dict[str, int]]:
     return wanted, statuses
 
 
-def get_records(*, force: bool = False) -> tuple[dict[str, dict], datetime]:
-    """The PO- records (every status). Fetched from Zoho when there is none, when the TTL passed, or when `force` (Hard refresh)."""
-    def fresh() -> bool:
-        return _list["records"] is not None and time.monotonic() - _list["at"] < LIST_TTL_SECONDS
+def _prune_details_locked(keep: set[str] | None = None) -> None:
+    """Drop line details of orders no longer in the list (when `keep` is given), expired failure marks, then the oldest over the cap."""
+    if keep is not None:
+        for pid in [pid for pid in _details if pid not in keep]:
+            del _details[pid]
+    now = time.monotonic()
+    for pid in [pid for pid, at in _failed.items() if now - at >= FAILURE_BACKOFF_SECONDS or (keep is not None and pid not in keep)]:
+        del _failed[pid]
+    while len(_details) > DETAIL_CACHE_MAX:
+        del _details[next(iter(_details))]
 
-    with _lock:
-        if not force and fresh():
-            return _list["records"], _list["refreshed_at"]
-    with _fetch_lock:  # single flight: concurrent first loads share one pull
-        with _lock:
-            if not force and fresh():
-                return _list["records"], _list["refreshed_at"]
+
+def _pull_and_store(force: bool) -> tuple[dict[str, dict], datetime]:
+    """One upstream pull (runs on the single-flight thread). Success replaces the list; a failure is remembered for the backoff."""
+    try:
         records, statuses = _pull()
-        now = datetime.now(timezone.utc)
+    except Exception as exc:
         with _lock:
-            _list.update(records=records, at=time.monotonic(), refreshed_at=now, status_counts=statuses)
-        logger.info("[PURCHASE_ORDERS] list %s: %d PO- order(s)", "hard-refreshed" if force else "loaded", len(records))
-        return records, now
+            _list.update(failed_at=time.monotonic(), failed_since=_list["failed_since"] or datetime.now(timezone.utc), error=zoho_resilience.light_error(exc))
+        logger.warning("[PURCHASE_ORDERS] list pull failed (%s): %s", type(exc).__name__, exc)
+        raise
+    now = datetime.now(timezone.utc)
+    with _lock:
+        _list.update(records=records, at=time.monotonic(), refreshed_at=now, status_counts=statuses, failed_at=0.0, failed_since=None, error=None)
+        _prune_details_locked(set(records))
+    logger.info("[PURCHASE_ORDERS] list %s: %d PO- order(s)", "hard-refreshed" if force else "loaded", len(records))
+    memory_debug.log_rss(f"po-list-pulled records={len(records)} details={len(_details)}")
+    return records, now
+
+
+def _serve_stale(reason: str) -> tuple[dict[str, dict], datetime]:
+    with _lock:
+        records, refreshed, since = _list["records"], _list["refreshed_at"], _list["failed_since"]
+    zoho_resilience.note_stale(since or refreshed, reason)
+    return records, refreshed
+
+
+def get_records(*, force: bool = False, deadline: float | None = None) -> tuple[dict[str, dict], datetime]:
+    """The PO- records (every status). Fetched from Zoho when there is none, when the TTL passed, or when `force` (Hard refresh).
+
+    With a list in memory, a failed or too-slow pull answers with that list and marks the request stale (zoho_resilience.track_stale)
+    instead of failing. After a failure the list is not pulled again for LIST_FAILURE_BACKOFF_SECONDS (Hard refresh still may).
+    Concurrent pulls - first loads and Hard refreshes alike - share ONE upstream pull. A request waits at most `deadline` seconds
+    (default zoho_resilience.REQUEST_DEADLINE_SECONDS); the pull keeps running and fills the cache for the next request."""
+    now = time.monotonic()
+    with _lock:
+        has_data = _list["records"] is not None
+        if not force and has_data and now - _list["at"] < LIST_TTL_SECONDS:
+            return _list["records"], _list["refreshed_at"]
+        remembered = _list["error"]
+        backing_off = not force and remembered is not None and now - _list["failed_at"] < LIST_FAILURE_BACKOFF_SECONDS
+    if backing_off:
+        if has_data:
+            return _serve_stale("zoho_budget" if zoho_resilience.is_budget_error(remembered) else "zoho_failed")
+        raise zoho_resilience.light_error(remembered)
+    try:
+        return _flight.run(lambda: _pull_and_store(force), timeout=zoho_resilience.REQUEST_DEADLINE_SECONDS if deadline is None else deadline)
+    except zoho_resilience.DeadlineExceeded:
+        if has_data:
+            return _serve_stale("zoho_slow")
+        raise Warming("Purchase orders are loading from Zoho. Try again in a few seconds.") from None
+    except ZohoError as exc:
+        with _lock:
+            has_data = _list["records"] is not None
+        if has_data:
+            return _serve_stale("zoho_budget" if zoho_resilience.is_budget_error(exc) else "zoho_failed")
+        raise
+
+
+def is_refreshing() -> bool:
+    return _flight.running()
 
 
 def last_refreshed_at() -> datetime | None:
@@ -228,7 +288,7 @@ def loaded_status_counts() -> dict[str, int]:
 def reset() -> None:
     """Test hook."""
     with _lock:
-        _list.update(records=None, at=0.0, refreshed_at=None, status_counts={})
+        _list.update(records=None, at=0.0, refreshed_at=None, status_counts={}, failed_at=0.0, failed_since=None, error=None)
         _details.clear()
         _inflight.clear()
         _failed.clear()
@@ -259,8 +319,10 @@ def fetch_detail(pid: str, record: dict | None = None) -> dict:
     if not isinstance(detail, dict) or not (detail.get("line_items") is not None or detail.get("purchaseorder_id") or detail.get("purchaseorder_number")):
         raise ZohoError("Zoho returned no purchase order detail.")
     with _lock:
+        _details.pop(pid, None)  # re-insert at the end: the oldest entries are the ones dropped over the cap
         _details[pid] = (_modified(record) or _modified(detail), detail)
         _failed.pop(pid, None)
+        _prune_details_locked()
     return detail
 
 
@@ -282,6 +344,7 @@ def request_details(records: list[dict]) -> int:
     waiting = 0
     start: list[dict] = []
     with _lock:
+        _prune_details_locked()
         for record in records:
             pid = _record_id(record)
             if cached_detail(pid, record) is not None:

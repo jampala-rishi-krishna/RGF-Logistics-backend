@@ -130,6 +130,7 @@ _inflight: set[str] = set()
 _failed: dict[str, float] = {}
 _pool = ThreadPoolExecutor(max_workers=3, thread_name_prefix="to-detail")
 FAILURE_BACKOFF_SECONDS = 60
+DETAIL_CACHE_MAX = int(os.environ.get("TRANSFER_ORDER_DETAIL_CACHE_MAX", "500"))  # line details kept in memory (oldest dropped first)
 
 
 def _pull() -> dict[str, dict]:
@@ -180,6 +181,7 @@ def get_records(*, force: bool = False) -> tuple[dict[str, dict], datetime]:
         now = datetime.now(timezone.utc)
         with _lock:
             _list.update(records=records, at=time.monotonic(), refreshed_at=now)
+            _prune_details_locked(set(records))
         logger.info("[TRANSFER_ORDERS] list %s: %d Draft Mets<->Glacier order(s)", "hard-refreshed" if force else "loaded", len(records))
         return records, now
 
@@ -216,10 +218,25 @@ def cached_detail(tid: str, record: dict | None = None) -> dict | None:
     return hit[1]
 
 
+def _prune_details_locked(keep: set[str] | None = None) -> None:
+    """Drop line details of orders no longer in the list (when `keep` is given), expired failure marks, then the oldest over the cap.
+    An assigned TO keeps its lines on its row in live_sales_order_cache, so dropping its detail here costs at most one re-fetch."""
+    if keep is not None:
+        for tid in [tid for tid in _details if tid not in keep]:
+            del _details[tid]
+    now = time.monotonic()
+    for tid in [tid for tid, at in _failed.items() if now - at >= FAILURE_BACKOFF_SECONDS or (keep is not None and tid not in keep)]:
+        del _failed[tid]
+    while len(_details) > DETAIL_CACHE_MAX:
+        del _details[next(iter(_details))]
+
+
 def _store_detail(tid: str, modified: str, detail: dict) -> None:
     with _lock:
+        _details.pop(tid, None)  # re-insert at the end: the oldest entries are the ones dropped over the cap
         _details[tid] = (modified, detail)
         _failed.pop(tid, None)
+        _prune_details_locked()
 
 
 def fetch_detail(tid: str, record: dict | None = None) -> dict:
@@ -251,6 +268,7 @@ def request_details(records: list[dict]) -> int:
     waiting = 0
     start: list[dict] = []
     with _lock:
+        _prune_details_locked()
         for record in records:
             tid = _record_id(record)
             if cached_detail(tid, record) is not None:

@@ -15,7 +15,7 @@ from fastapi import HTTPException
 
 from models.inventory import SalesOrderCache
 from services.zoho_client import ZohoError, fetch_sales_order_detail, fetch_sales_orders, fetch_sales_orders_by_shipment_date
-from services import branches, order_types, purchase_orders, text_repair, transfer_orders, zoho_acquisition
+from services import branches, memory_debug, order_types, purchase_orders, text_repair, transfer_orders, zoho_acquisition, zoho_resilience
 
 logger = logging.getLogger("live_sales_order_cache")
 
@@ -44,14 +44,71 @@ def bump_assignment_generation() -> None:
     global _assignment_generation
     with _state_lock:
         _assignment_generation += 1
+ASSIGNED_ZOHO_MAX = int(os.environ.get("ZOHO_ASSIGNED_CACHE_MAX", "500"))  # rows of orders NOT in an active assignment
+ASSIGNED_ZOHO_TTL_SECONDS = int(os.environ.get("ZOHO_ASSIGNED_CACHE_TTL_SECONDS", "1800"))
+
+
+class _OrderRowCache(dict):
+    """order id -> row. Rows of orders in an active assignment (any status but unassigned) are never evicted: they are the working set
+    Fleet / capacity / Confirmed read, and re-fetching them would cost Zoho calls. Every other row (a drawer opened on an unassigned
+    order, an order that was unassigned again) is dropped after ASSIGNED_ZOHO_TTL_SECONDS, and the oldest go first once there are more
+    than ASSIGNED_ZOHO_MAX of them. Memory only; pruning runs on insert, so a read never pays for it."""
+
+    def __init__(self):
+        super().__init__()
+        self._at: dict[str, float] = {}
+        self._guard = threading.RLock()
+
+    def __setitem__(self, key, value):
+        with self._guard:
+            super().pop(key, None)  # re-insert at the end: insertion order is age order
+            super().__setitem__(key, value)
+            self._at[key] = time.monotonic()
+            self._prune()
+
+    def __delitem__(self, key):
+        with self._guard:
+            super().__delitem__(key)
+            self._at.pop(key, None)
+
+    def pop(self, key, *default):
+        with self._guard:
+            self._at.pop(key, None)
+            return super().pop(key, *default)
+
+    def clear(self):
+        with self._guard:
+            super().clear()
+            self._at.clear()
+
+    def _prune(self) -> None:
+        now = time.monotonic()
+        with _state_lock:
+            active = {oid for oid in self if (_assignment_state.get(oid) or {}).get("assignment_status") not in (None, "unassigned")}
+        evictable = [oid for oid in self if oid not in active]  # oldest first
+        expired = [oid for oid in evictable if now - self._at.get(oid, now) >= ASSIGNED_ZOHO_TTL_SECONDS]
+        overflow = max(0, len(evictable) - len(expired) - ASSIGNED_ZOHO_MAX)
+        expired_set = set(expired)
+        remaining = [oid for oid in evictable if oid not in expired_set]
+        for oid in expired + remaining[:overflow]:
+            super().pop(oid, None)
+            self._at.pop(oid, None)
+
+
 # Zoho business data (customer, weight, raw_json) for every id currently in _assignment_state,
 # fetched live from Zoho (not Neon) and kept warm regardless of which date window is cached.
-_assigned_zoho: dict[str, SalesOrderCache] = {}
+# Also holds orders whose drawer was opened (publish_zoho_data); those are bounded, see _OrderRowCache.
+_assigned_zoho: dict[str, SalesOrderCache] = _OrderRowCache()
 # Ids (-> number) of orders found to belong to a branch RareChain does not handle. Memory only.
 _excluded_ids: dict[str, str | None] = {}
 
-# --- Ordinary Inventory/unassigned windows: short-TTL cache of whatever Zoho returned for a
-# given (start, end) date range. ---
+# --- Ordinary Inventory/unassigned windows: cache of whatever Zoho returned for a given (start, end)
+# date range. The current wide window (today-1 .. today+14) is the shared one: it is served from memory
+# and kept fresh by refresh_shared_window(), never evicted. Any other range (a past date, a far-future
+# range, yesterday's wide window after midnight) is dropped once nobody has read it for
+# WINDOW_TTL_SECONDS, and at most WINDOW_CACHE_MAX ranges are held (least recently used dropped first).
+# Each entry is (last read, rows). ---
+WINDOW_CACHE_MAX = int(os.environ.get("ZOHO_WINDOW_CACHE_MAX", "4"))
 _window_lock = threading.Lock()
 _windows: dict[tuple[str, str], tuple[float, dict[str, SalesOrderCache]]] = {}
 _windows_unhydrated: dict[tuple[str, str], tuple[float, dict[str, SalesOrderCache]]] = {}
@@ -567,6 +624,60 @@ def _wide_bounds(today: date | None = None) -> tuple[date, date]:
     return today - timedelta(days=WIDE_WINDOW_PAST_DAYS), today + timedelta(days=WIDE_WINDOW_FUTURE_DAYS)
 
 
+def _wide_key() -> tuple[str, str]:
+    start, end = _wide_bounds()
+    return start.isoformat(), end.isoformat()
+
+
+def _prune_windows_locked(cache: dict, now: float | None = None) -> None:
+    """Caller holds _window_lock. Never drops the current wide window (see the comment on WINDOW_CACHE_MAX)."""
+    now = time.monotonic() if now is None else now
+    wide = _wide_key()
+    for key in [key for key, (used, _) in cache.items() if key != wide and now - used >= WINDOW_TTL_SECONDS]:
+        del cache[key]
+    while len(cache) > WINDOW_CACHE_MAX:
+        victim = next((key for key in cache if key != wide), None)  # insertion order = least recently used first
+        if victim is None:
+            break
+        del cache[victim]
+
+
+def _store_window_locked(cache: dict, key: tuple[str, str], rows: dict) -> None:
+    cache.pop(key, None)
+    cache[key] = (time.monotonic(), rows)
+    _prune_windows_locked(cache)
+
+
+def _read_window_locked(cache: dict, key: tuple[str, str], now: float) -> dict | None:
+    entry = cache.pop(key, None)
+    if entry is None:
+        return None
+    cache[key] = (now, entry[1])  # most recently used
+    return entry[1]
+
+
+def _covering_rows_locked(start: date, end: date) -> dict | None:
+    """Rows of any cached hydrated window that covers [start, end] (memory only) - the last good data to show while the exact window
+    is loading or Zoho is failing."""
+    lo, hi = start.isoformat(), end.isoformat()
+    for (key_start, key_end), (_, rows) in _windows.items():
+        if key_start <= lo and hi <= key_end:
+            return rows
+    return None
+
+
+def cached_rows_overlapping(start: date, end: date) -> list[SalesOrderCache]:
+    """Rows shipping in [start, end] from every window already in memory. Never calls Zoho."""
+    with _window_lock:
+        caches = [rows for cache in (_windows, _windows_unhydrated) for _, rows in cache.values()]
+    found: dict[str, SalesOrderCache] = {}
+    for rows in caches:
+        for rid, row in rows.items():
+            if row.expected_shipment_date is not None and start <= row.expected_shipment_date <= end:
+                found.setdefault(rid, row)
+    return [_apply_assignment(row) for row in found.values()]
+
+
 def _within_wide_window(start: date, end: date) -> bool:
     wide_start, wide_end = _wide_bounds()
     return wide_start <= start and end <= wide_end
@@ -722,17 +833,19 @@ def _start_background_warm(token: tuple, work) -> None:
     with _warm_lock:
         failed = _warm_failed.get(token)
         if failed is not None and time.monotonic() - failed[0] < WARM_FAILURE_TTL_SECONDS:
-            raise failed[1]
+            raise zoho_resilience.light_error(failed[1])  # a fresh copy: re-raising the stored one would re-attach a traceback to it
         _warm_failed.pop(token, None)
+        for stale in [key for key, (at, _) in _warm_failed.items() if time.monotonic() - at >= WARM_FAILURE_TTL_SECONDS]:
+            del _warm_failed[stale]
         if token in _warming and _warming[token].is_alive():
             return
 
         def run():
             try:
                 work()
-            except Exception as exc:  # noqa: BLE001 - remembered for the next caller
+            except Exception as exc:  # noqa: BLE001 - remembered for the next caller (without its traceback: it would pin every frame)
                 with _warm_lock:
-                    _warm_failed[token] = (time.monotonic(), exc)
+                    _warm_failed[token] = (time.monotonic(), zoho_resilience.light_error(exc))
                 logger.warning("[LiveSalesOrderCache] background fill %s failed: %s", token[0], exc)
             finally:
                 with _warm_lock:
@@ -744,33 +857,58 @@ def _start_background_warm(token: tuple, work) -> None:
     logger.info("[LiveSalesOrderCache] %s not in memory: filling it in the background, this request answers 503 'loading'", token[0])
 
 
-def get_window(start: date, end: date, *, hydrate: bool = False, block: bool = True) -> list[SalesOrderCache]:
+def _rows_between(rows: dict, start: date, end: date) -> list[SalesOrderCache]:
+    return [_apply_assignment(row) for row in rows.values() if row.expected_shipment_date is not None and start <= row.expected_shipment_date <= end]
+
+
+def get_window(start: date, end: date, *, hydrate: bool = True, block: bool = True) -> list[SalesOrderCache]:
     """Shared live window. The list pull hydrates SO details only for records whose
     last_modified_time is new or changed, then serves unchanged records from memory.
 
+    hydrate=False (a caller that needs only list fields, e.g. the city options) skips the per-order detail fetch for a range outside
+    the wide window; such a range is kept apart (_windows_unhydrated) so nobody else is served rows without line items. A range inside
+    the wide window is always the shared, hydrated wide window.
+
     block=False (Load Planning's list endpoints): when the window is not in memory yet, start ONE background fill and raise WindowWarming
-    instead of holding the request through a long cold Zoho pull (which the browser reports as a bare CORS / network error)."""
+    instead of holding the request through a long cold Zoho pull (which the browser reports as a bare CORS / network error). While that
+    fill runs or after it failed, a cached window that covers the range is served instead (the request is marked stale)."""
     block = block or _blocking_reads_forced()
     epoch = zoho_acquisition.generation()
     wide_start, wide_end = _wide_bounds()
-    key = (wide_start.isoformat(), wide_end.isoformat()) if _within_wide_window(start, end) else (start.isoformat(), end.isoformat())
-    cache = _windows
+    wide_key = (wide_start.isoformat(), wide_end.isoformat())
+    key = wide_key if _within_wide_window(start, end) else (start.isoformat(), end.isoformat())
+    hydrate = hydrate or key == wide_key
+    now = time.monotonic()
     with _window_lock:
-        entry = cache.get(key)
-        if entry is not None:
-            rows = [row for row in entry[1].values() if row.expected_shipment_date is not None and start <= row.expected_shipment_date <= end]
-            return [_apply_assignment(row) for row in rows]
+        for cache in ((_windows,) if hydrate else (_windows, _windows_unhydrated)):
+            _prune_windows_locked(cache, now)
+            rows = _read_window_locked(cache, key, now)
+            if rows is not None:
+                return _rows_between(rows, start, end)
     if not block:
-        _start_background_warm(("window", *key), lambda: get_window(start, end, hydrate=hydrate))
+        failure: Exception | None = None
+        try:
+            _start_background_warm(("window" if hydrate else "window-lite", *key), lambda: get_window(start, end, hydrate=hydrate))
+        except Exception as exc:  # noqa: BLE001 - a remembered failure: answer from a covering window when there is one
+            failure = exc
+        with _window_lock:
+            covering = _covering_rows_locked(start, end)
+        if covering is not None:
+            zoho_resilience.note_stale(None, "zoho_failed" if failure is not None else "warming")
+            return _rows_between(covering, start, end)
+        if failure is not None:
+            raise failure
         raise WindowWarming("Sales orders are loading from Zoho. Try again in a few seconds.")
-    raw = _pull_window(wide_start, wide_end) if key == (wide_start.isoformat(), wide_end.isoformat()) else _pull_window(start, end)
-    _hydrate_details(raw)
+    raw = _pull_window(wide_start, wide_end) if key == wide_key else _pull_window(start, end)
+    if hydrate:
+        _hydrate_details(raw)
     rows = {rid: _build_transient(record) for rid, record in raw.items()}
     with zoho_acquisition.publication(epoch) as current:
         if current:
             with _window_lock:
-                cache[key] = (time.monotonic(), rows)
-    return [_apply_assignment(row) for row in rows.values() if row.expected_shipment_date is not None and start <= row.expected_shipment_date <= end]
+                _store_window_locked(_windows if hydrate else _windows_unhydrated, key, rows)
+    memory_debug.log_rss(f"window-built {key[0]}..{key[1]} rows={len(rows)} windows={len(_windows)}")
+    return _rows_between(rows, start, end)
 
 
 def refresh_shared_window(*, force_full: bool = False) -> int:
@@ -797,7 +935,8 @@ def refresh_shared_window(*, force_full: bool = False) -> int:
         current = dict((existing[1] if existing else {}).items())
         for rid, record in raw.items():
             current[rid] = _build_transient(record)
-        _windows[key] = (time.monotonic(), current)
+        _store_window_locked(_windows, key, current)
+    memory_debug.log_rss(f"wide-window-refreshed {'full' if do_full else 'delta'} rows={len(current)} details={len(_details)} assigned_rows={len(_assigned_zoho)}")
     _wide_window_last_sync = now
     if do_full:
         _wide_window_last_full = mono
@@ -863,12 +1002,12 @@ def mark_acknowledged(order_id: str, acknowledged: bool) -> None:
     assigned = _assigned_zoho.get(order_id)
     if assigned is not None:
         patch(assigned)
-    with _detail_lock:
-        if acknowledged:
-            modified = str((assigned.raw_json if assigned is not None and isinstance(assigned.raw_json, dict) else {}).get("last_modified_time") or f"ack:{time.monotonic()}")
-            _details[str(order_id)] = (modified, {"current_sub_status": sub_status, "order_sub_status": sub_status})
-        else:
-            _details.pop(order_id, None)
+    if acknowledged:
+        modified = str((assigned.raw_json if assigned is not None and isinstance(assigned.raw_json, dict) else {}).get("last_modified_time") or f"ack:{time.monotonic()}")
+        _remember_detail(str(order_id), modified, {"current_sub_status": sub_status, "order_sub_status": sub_status})  # bounded like every other entry
+    else:
+        with _detail_lock:
+            _details.pop(str(order_id), None)
 
 
 def apply_salesorder_webhook(record: dict) -> bool:

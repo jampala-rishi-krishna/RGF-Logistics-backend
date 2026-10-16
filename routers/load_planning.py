@@ -21,7 +21,7 @@ from models.inventory import SalesOrderCache
 from models.sales_order_history import SalesOrderHistory
 from models.sales_order_lines import SalesOrderLine
 from services import branches as branch_service, staff_directory_cache, live_sales_order_cache
-from services import order_types as order_type_rules, purchase_orders, transfer_orders, zoho_acquisition
+from services import order_types as order_type_rules, purchase_orders, transfer_orders, zoho_acquisition, zoho_resilience
 from services.serialize import row_to_dict
 from services.zoho_client import (
     ZohoError,
@@ -40,7 +40,7 @@ from services import item_detail_cache
 from services.warehouse_stock import cached_item_stock, fetch_item_stock, stock_branch_id, stock_for_orders_cached
 from services.sales_order_location import address_object, find_city, shipping_city
 from fastapi.concurrency import run_in_threadpool
-from fastapi.responses import StreamingResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from services import gmail_sender
 
 router = APIRouter(prefix="/api/load-planning", tags=["load-planning"], dependencies=[Depends(require_role("admin", "dispatcher", "warehouse"))])
@@ -69,10 +69,12 @@ def _line_item_id(item: dict) -> str | None:
     return str(value) if value else None
 
 
+ACK_VIEW_MAX_PAGES = int(os.environ.get("ZOHO_ACK_VIEW_MAX_PAGES", "20"))  # 200 per page; a runaway view never pages forever
+
+
 def _fetch_acknowledged_ids_from_zoho() -> set[str]:
     ids: set[str] = set()
-    page = 1
-    while True:
+    for page in range(1, ACK_VIEW_MAX_PAGES + 1):
         payload = fetch_sales_orders_by_customview(ACKNOWLEDGED_CUSTOMVIEW_ID, page=page, per_page=200)
         records = payload.get("salesorders") or []
         for record in records:
@@ -85,7 +87,8 @@ def _fetch_acknowledged_ids_from_zoho() -> set[str]:
             has_more = has_more.strip().lower() == "true"
         if not payload.get("raw_count", len(records)) or not has_more:  # raw_count: page size before the branch filter
             break
-        page += 1
+    else:
+        logger.warning("[ACK_VIEW] Acknowledged view still had more pages after %d pages; using the %d ids read so far", ACK_VIEW_MAX_PAGES, len(ids))
     return ids
 
 
@@ -97,9 +100,11 @@ ACK_IDS_TTL_SECONDS = 120
 # How long a local acknowledge/remove result keeps winning over Zoho's view if the view never
 # catches up (it normally does within seconds, at which point the override is dropped).
 ACK_OVERRIDE_TTL_SECONDS = 600
+ACK_FAILURE_BACKOFF_SECONDS = 60  # after a failed view read, the last good set is served this long before Zoho is asked again
 _ack_lock = Lock()
-_ack_cache: dict = {"ids": None, "at": 0.0}
+_ack_cache: dict = {"ids": None, "at": 0.0, "failed_at": 0.0, "failed_since": None, "error": None}
 _ack_overrides: dict[str, tuple[bool, float]] = {}
+_ack_flight = zoho_resilience.SingleFlight("acknowledged-view")
 
 
 def _with_overrides(zoho_ids: set[str]) -> tuple[set[str], dict[str, bool]]:
@@ -118,15 +123,54 @@ def _with_overrides(zoho_ids: set[str]) -> tuple[set[str], dict[str, bool]]:
     return result, live
 
 
-def _ack_snapshot() -> tuple[set[str], dict[str, bool]]:
-    """(Zoho Acknowledged-view ids with local changes applied, the still-live local overrides)."""
-    with _ack_lock:
-        fresh = _ack_cache["ids"] is not None and time.monotonic() - _ack_cache["at"] < ACK_IDS_TTL_SECONDS
-        zoho_ids = set(_ack_cache["ids"]) if fresh else None
-    if zoho_ids is None:
-        zoho_ids = _fetch_acknowledged_ids_from_zoho()
+def _refresh_ack_ids() -> set[str]:
+    """One read of the Acknowledged view (runs on the single-flight thread); success replaces the cached set, a failure is remembered."""
+    try:
+        ids = _fetch_acknowledged_ids_from_zoho()
+    except Exception as exc:
         with _ack_lock:
-            _ack_cache.update(ids=set(zoho_ids), at=time.monotonic())
+            _ack_cache.update(failed_at=time.monotonic(), failed_since=_ack_cache["failed_since"] or datetime.now(timezone.utc), error=zoho_resilience.light_error(exc))
+        logger.warning("[ACK_VIEW] Acknowledged view read failed (%s): %s", type(exc).__name__, exc)
+        raise
+    with _ack_lock:
+        _ack_cache.update(ids=set(ids), at=time.monotonic(), failed_at=0.0, failed_since=None, error=None)
+    return ids
+
+
+def _ack_snapshot() -> tuple[set[str], dict[str, bool]]:
+    """(Zoho Acknowledged-view ids with local changes applied, the still-live local overrides).
+
+    Concurrent requests share one view read; a request waits at most zoho_resilience.REQUEST_DEADLINE_SECONDS for it. When the read
+    fails or is too slow the last good set is used (the request is marked stale) and, after a failure, Zoho is not asked again for
+    ACK_FAILURE_BACKOFF_SECONDS. With no set in memory yet the failure is raised (the route answers 503)."""
+    now = time.monotonic()
+    with _ack_lock:
+        last_good = set(_ack_cache["ids"]) if _ack_cache["ids"] is not None else None
+        fresh = last_good is not None and now - _ack_cache["at"] < ACK_IDS_TTL_SECONDS
+        remembered = _ack_cache["error"]
+        backing_off = remembered is not None and now - _ack_cache["failed_at"] < ACK_FAILURE_BACKOFF_SECONDS
+        failed_since = _ack_cache["failed_since"]
+    if fresh:
+        return _with_overrides(last_good)
+    if backing_off:
+        if last_good is None:
+            raise zoho_resilience.light_error(remembered)
+        zoho_resilience.note_stale(failed_since, "zoho_failed")
+        return _with_overrides(last_good)
+    try:
+        zoho_ids = set(_ack_flight.run(_refresh_ack_ids))
+    except zoho_resilience.DeadlineExceeded:
+        if last_good is None:
+            raise live_sales_order_cache.WindowWarming("Sales orders are loading from Zoho. Try again in a few seconds.") from None
+        zoho_resilience.note_stale(None, "zoho_slow")
+        zoho_ids = last_good
+    except ZohoError:
+        if last_good is None:
+            raise
+        with _ack_lock:
+            failed_since = _ack_cache["failed_since"]
+        zoho_resilience.note_stale(failed_since, "zoho_failed")
+        zoho_ids = last_good
     return _with_overrides(zoho_ids)
 
 
@@ -140,8 +184,9 @@ def _set_acknowledged(order_id: str, acknowledged: bool) -> None:
 
 
 def _invalidate_ack_cache() -> None:
+    """Refresh button: the next read asks Zoho again. The last good set is kept only as the fallback if that read fails."""
     with _ack_lock:
-        _ack_cache.update(ids=None, at=0.0)
+        _ack_cache.update(at=0.0, failed_at=0.0, failed_since=None, error=None)
 
 
 def _explicit_sub_status(row) -> str:
@@ -366,7 +411,12 @@ def list_sales_orders(
     per_page: int = Query(25, ge=1, le=100),
     db: Session = Depends(get_db),
 ):
-    all_branch_rows = _rows_any_branch(db, date_from, date_to, status, search, assignment, cities, vehicle, customer, delivery_status, order_types=order_types)
+    # Zoho failing / slow: answer from the last good data in memory with stale: true; with nothing in memory, a 503 that says so.
+    with zoho_resilience.track_stale() as stale:
+        try:
+            all_branch_rows = _rows_any_branch(db, date_from, date_to, status, search, assignment, cities, vehicle, customer, delivery_status, order_types=order_types)
+        except ZohoError as exc:
+            return _zoho_unavailable(exc)
     wanted_branches = branch_service.parse_ids(branches)
     # Per-branch counts of everything the other filters leave, so the Branch filter can show how many
     # orders each option would give. Rows with no branch info (Neon history) are not counted.
@@ -403,7 +453,19 @@ def list_sales_orders(
         "branches": branch_service.all_options(list(seen_branches.values())),
         "total_weight_kg": total_weight,
         "weight_complete": weight_complete and waiting == 0,
+        **zoho_resilience.stale_fields(stale),
     }
+
+
+def _zoho_unavailable(exc: BaseException) -> JSONResponse:
+    """503 when Zoho failed and nothing is in memory to show; the budget guard gets its own code ("zoho_budget")."""
+    body = zoho_resilience.unavailable_body(exc)
+    logger.warning("[ZOHO] list unavailable code=%s error=%s", body["code"], type(exc).__name__)
+    return JSONResponse(status_code=503, content=body)
+
+
+def _zoho_warming() -> JSONResponse:
+    return JSONResponse(status_code=503, content=dict(zoho_resilience.WARMING_BODY), headers={"Retry-After": "5"})
 
 
 def _to_search_match(row, needle: str) -> bool:
@@ -499,16 +561,21 @@ def list_purchase_orders(
     needle = (search or "").strip().lower()
     waiting = 0
     status_counts: dict[str, int] = {}
+    stale: dict = {}
     if assignment == "assigned":
         rows = _rows_any_branch(db, date_from, date_to, None, search, "assigned", order_types="PO")
         refreshed, pending = purchase_orders.last_refreshed_at(), 0
         total_weight, weight_complete = _total_weight_kg(rows, db)
     else:
-        try:
-            all_rows, refreshed, pending, status_counts = live_sales_order_cache.purchase_order_rows(start, end, statuses=purchase_orders.parse_statuses(statuses))
-        except ZohoError as exc:
-            raise HTTPException(502, str(exc)) from exc
-        rows = [row for row in all_rows if (row.assignment_status or "unassigned") == "unassigned" and (not needle or _po_search_match(row, needle))]
+        # Zoho failing / slow: the last good PO list with stale: true (HTTP 200); with no list in memory yet, 503 (warming / unavailable).
+        with zoho_resilience.track_stale() as stale:
+            try:
+                all_rows, refreshed, pending, status_counts = live_sales_order_cache.purchase_order_rows(start, end, statuses=purchase_orders.parse_statuses(statuses))
+            except purchase_orders.Warming:
+                return _zoho_warming()
+            except ZohoError as exc:
+                return _zoho_unavailable(exc)
+        rows =[row for row in all_rows if (row.assignment_status or "unassigned") == "unassigned" and (not needle or _po_search_match(row, needle))]
         total_weight, weight_complete, missing_items = purchase_orders.total_weight_kg(rows)
         if missing_items:
             waiting = item_detail_cache.request_refresh(missing_items)
@@ -527,18 +594,26 @@ def list_purchase_orders(
         "status_counts": status_counts,
         "hidden_by_default": sorted(purchase_orders.HIDDEN_BY_DEFAULT - {"canceled"}),
         "source": "zoho",
+        **zoho_resilience.stale_fields(stale),
     }
 
 
 @router.post("/inventory/purchase-orders/refresh")
 def hard_refresh_purchase_orders():
     """The PO tab's "Hard refresh": re-reads the PO list from Zoho now, bypassing the cache (counts toward the Zoho budget). Line items
-    already known are kept until Zoho reports a newer last_modified_time."""
-    try:
-        records, refreshed = purchase_orders.get_records(force=True)
-    except ZohoError as exc:
-        raise HTTPException(502, str(exc)) from exc
-    return {"refreshed_at": refreshed.isoformat(), "count": len(records), "status_counts": purchase_orders.loaded_status_counts()}
+    already known are kept until Zoho reports a newer last_modified_time. Concurrent clicks share one Zoho pull. When Zoho fails or is
+    too slow and a list is in memory, that list is kept and the answer says stale: true; with no list, 503."""
+    with zoho_resilience.track_stale() as stale:
+        try:
+            records, refreshed = purchase_orders.get_records(force=True)
+        except purchase_orders.Warming:
+            return _zoho_warming()
+        except ZohoError as exc:
+            return _zoho_unavailable(exc)
+    body = {"refreshed_at": refreshed.isoformat() if refreshed else None, "count": len(records), "status_counts": purchase_orders.loaded_status_counts()}
+    if stale["stale"]:
+        body.update(zoho_resilience.stale_fields(stale), detail=zoho_resilience.ZOHO_DOWN_MESSAGE, code="zoho_budget" if stale["reason"] == "zoho_budget" else "zoho_unavailable")
+    return body
 
 
 _address_object = address_object
@@ -563,11 +638,16 @@ def list_sales_order_cities(date_from: str | None = Query(None), date_to: str | 
     # window has no orders. The date range is applied when filtering the cards.
     # No unbounded "all SOs ever" query any more - Zoho is the source, live-cached
     # per window (services/live_sales_order_cache.py). Defaults to a 2-week span when no
-    # range is given. hydrate=False: city only needs shipping_address, not full line_items -
-    # skips the expensive per-order Zoho detail fetch.
+    # range is given.
+    # Memory only: the cities come from the shared wide window (today-1 .. today+14, the one every
+    # Load Planning list already uses; asked for here only so a cold start begins filling it) plus
+    # any other window already in memory. A range outside those is never pulled from Zoho just for
+    # city options (it used to build and hydrate a whole second window).
     start = _date(date_from) or (datetime.now(PHT).date() - timedelta(days=7))
     end = _date(date_to) or (datetime.now(PHT).date() + timedelta(days=7))
-    rows = live_sales_order_cache.get_window(start, end, hydrate=False, block=False)
+    wide_start, wide_end = live_sales_order_cache._wide_bounds()
+    live_sales_order_cache.get_window(wide_start, wide_end, block=False)
+    rows = live_sales_order_cache.cached_rows_overlapping(start, end)
     return {"cities": sorted({_shipping_city(row) for row in rows if _shipping_city(row)}, key=str.casefold)}
 
 

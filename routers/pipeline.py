@@ -39,6 +39,17 @@ _dashboard_last_good: dict[str, dict] = {}
 _zoho_date_cache: dict[str, tuple[float, dict[str, dict], dict]] = {}
 _zoho_detail_cache: dict[str, tuple[str, dict]] = {}
 _zoho_cache_lock = threading.Lock()
+# Memory bounds (insertion order = age; the oldest entries are dropped first). Dates: the dashboard is read for a handful of days.
+DASHBOARD_DATES_MAX = 14
+DETAIL_CACHE_MAX = 500
+
+
+def _remember(cache: dict, key, value, limit: int) -> None:
+    """Insert as the newest entry and drop the oldest over `limit`. Caller holds _zoho_cache_lock."""
+    cache.pop(key, None)
+    cache[key] = value
+    while len(cache) > limit:
+        del cache[next(iter(cache))]
 
 def _zoho_date_records(target: date_type, force: bool) -> tuple[dict[str, dict], dict]:
     epoch = zoho_acquisition.generation()
@@ -70,7 +81,7 @@ def _zoho_date_records(target: date_type, force: bool) -> tuple[dict[str, dict],
     with zoho_acquisition.publication(epoch) as current:
         if current:
             with _zoho_cache_lock:
-                _zoho_date_cache[key] = (time.monotonic(), dict(records), dict(stats))
+                _remember(_zoho_date_cache, key, (time.monotonic(), dict(records), dict(stats)), DASHBOARD_DATES_MAX)
     return records, stats
 
 def _clean_text(value: object) -> str:
@@ -230,7 +241,8 @@ def dispatch_dashboard(date: str | None = None, refresh: bool = False, db: Sessi
                 merged = {**record, **(detail.get("salesorder") or detail)}
                 with zoho_acquisition.publication(epoch) as current:
                     if current:
-                        _zoho_detail_cache[oid] = (modified, merged)
+                        with _zoho_cache_lock:
+                            _remember(_zoho_detail_cache, oid, (modified, merged), DETAIL_CACHE_MAX)
                 return oid, merged
             except Exception:
                 return oid, _zoho_detail_cache.get(oid, (modified, record))[1]
@@ -242,7 +254,7 @@ def dispatch_dashboard(date: str | None = None, refresh: bool = False, db: Sessi
         rows = []
         for oid, record in records.items():
             if live_sales_order_cache._normalized_order_status(record) in {"void", "draft"}: continue
-            detail_record = _zoho_detail_cache.get(oid, ("", record))[1]
+            detail_record = record if oid in detail_jobs else _zoho_detail_cache.get(oid, ("", record))[1]  # just hydrated: `record` is the merged detail
             row = live_sales_order_cache._build_transient(detail_record)
             if oid in history_by_id:
                 history = history_by_id[oid]
@@ -297,7 +309,8 @@ def dispatch_dashboard(date: str | None = None, refresh: bool = False, db: Sessi
         payload["zoho_api_calls"] = zoho_client.api_call_count()
         payload["zoho_diagnostics"] = {**zoho_stats, "rows_after_void_draft": len(records), "detail_hydrations": len(detail_jobs), "detail_cache_hits": detail_cache_hits, "shipment_date_count": len(records), "order_date_count": sum(live_sales_order_cache._as_date(r.get("date") or r.get("order_date")) == target for r in records.values()), "status_counts": status_counts, "neon_queries": payload["neon_queries"], "elapsed_ms": int((time.monotonic() - started) * 1000)}
         logger.info("[DISPATCH_DASHBOARD] date=%s neon_queries=%s orders=%s", key, payload["neon_queries"], len(order_rows))
-        _dashboard_last_good[key] = payload
+        with _zoho_cache_lock:
+            _remember(_dashboard_last_good, key, payload, DASHBOARD_DATES_MAX)
         return payload
     except Exception as exc:
         previous = _dashboard_last_good.get(key)

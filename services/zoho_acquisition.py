@@ -119,7 +119,10 @@ def acquire(key: tuple, loader, *, reusable: bool = False, valid=lambda value: T
         if owner:
             future = Future()
             future.acquisition_id = logical_id
+            future.waiters = 0
             _inflight[full_key] = future
+        else:
+            future.waiters += 1  # counted under _lock, before the owner can unpublish the future
         event("cache_miss" if owner else "coalesced_waiter", logical_id=logical_id, owner_id=future.acquisition_id, generation=epoch, **meta)
     if not owner:
         value = future.result()
@@ -129,15 +132,23 @@ def acquire(key: tuple, loader, *, reusable: bool = False, valid=lambda value: T
         return deepcopy(value)
     try:
         value = loader(logical_id)
-        with _lock:
-            if completed is not None and epoch == _generation and valid(value):
-                completed[full_key] = deepcopy(value)
-        future.set_result(deepcopy(value))
-        return value
     except BaseException as exc:
-        future.set_exception(exc)
-        raise
-    finally:
         with _lock:
             if _inflight.get(full_key) is future:
                 del _inflight[full_key]
+        future.set_exception(exc)
+        raise
+    with _lock:
+        if completed is not None and epoch == _generation and valid(value):
+            completed[full_key] = deepcopy(value)
+        # Unpublish first: once the future is gone nobody new can join, so `waiters` is final. Only waiters need their own copy
+        # (the owner may mutate `value`); with none - the common case - the response is not deep-copied at all.
+        if _inflight.get(full_key) is future:
+            del _inflight[full_key]
+        waiters = future.waiters
+    try:
+        future.set_result(deepcopy(value) if waiters else None)
+    except BaseException as exc:  # never leave a waiter blocked
+        if not future.done():
+            future.set_exception(exc)
+    return value
