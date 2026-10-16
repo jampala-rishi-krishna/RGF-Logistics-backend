@@ -150,12 +150,13 @@ def timeline_entry(event: TripEvent, actor_name: str | None) -> dict:
             "actor_name": actor_name or result.get("by_name")}
 
 
-def driver_changes(db: Session, staff_id: int, today: date, current_batch_ids: set[str]) -> list[dict]:
+def driver_changes(db: Session, staff_id: int, today: date, current_batch_ids: set[str], also: tuple[date, ...] = ()) -> list[dict]:
     """Contract 3 `dispatch_changes`: today's unassigns on this crew member's batches. A batch that has no order left for them
     is ONE trip_removed entry; otherwise one order_removed entry per removed order. Newest first."""
     since = now_utc() - timedelta(days=LOOKBACK_DAYS)
     events = db.execute(select(TripEvent).where(TripEvent.event_type == EVENT, TripEvent.received_at >= since).order_by(TripEvent.received_at, TripEvent.id)).scalars().all()
-    mine = [e for e in events if staff_id in _crew_ids(e) and (e.payload or {}).get("delivery_date") == today.isoformat()]
+    days = {today.isoformat(), *(d.isoformat() for d in also)}  # the driver app lists today + tomorrow (same query, wider filter)
+    mine = [e for e in events if staff_id in _crew_ids(e) and (e.payload or {}).get("delivery_date") in days]
     out: list[dict] = []
     gone: dict[str, TripEvent] = {}
     for event in mine:

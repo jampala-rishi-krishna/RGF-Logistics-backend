@@ -46,6 +46,23 @@ def manila_today() -> date:
     return manila_now().date()
 
 
+def day_label(delivery: date | None, today: date | None = None) -> str | None:
+    """CONTRACT `day` of a batch relative to Manila today: "today" | "tomorrow" | "overdue" (earlier) | "later" (after tomorrow).
+    Dispatch assigns tomorrow's orders today: the crew acknowledges them today and starts the trip on the delivery day."""
+    if delivery is None:
+        return None
+    today = today or manila_today()
+    if delivery == today:
+        return "today"
+    if delivery == today + timedelta(days=1):
+        return "tomorrow"
+    return "overdue" if delivery < today else "later"
+
+
+def not_today_message(delivery: date) -> str:
+    return f"This trip is for {delivery.isoformat()}; start it on that day"
+
+
 # ---- helpers ------------------------------------------------------------------------------------------------
 
 
@@ -195,6 +212,12 @@ def _batch_payload(rows: list, lines: dict[str, list], driver_id: int, *, with_o
     orders = [_order_payload(row, lines.get(row.id, [])) for row in rows]
     crew = trip_state.crew_of(rows)
     trip_summary, facts = trip_state.summarize(batch_id, rows, data, can_act=can_act, order_source_optimized=source == "optimized")
+    today = manila_today()
+    if first.expected_shipment_date is not None and first.expected_shipment_date > today and trip_summary["status"] == "pending" and can_act:
+        # A next-day assignment: acknowledge now, Start trip only on its delivery day (the start endpoint answers 400 not_today).
+        trip_summary["can_start"] = False
+        if trip_summary["blocker"] is None:
+            trip_summary["blocker"] = not_today_message(first.expected_shipment_date)
     shared = day_model.facts_for_rows(batch_id, rows, lines, data, items_by_handover=data.handover_items)  # THE numbers (same function Driver Overview uses)
     helpers = [_person(hid) for hid in helper_ids_of(first.driver_id if first.driver_id is not None else driver_id, first.helper_ids)]
     emails = [row.email_status for row in rows if row.email_status]
@@ -202,6 +225,7 @@ def _batch_payload(rows: list, lines: dict[str, list], driver_id: int, *, with_o
     batch = {
         "batch_id": batch_id,
         "delivery_date": first.expected_shipment_date.isoformat() if first.expected_shipment_date else None,
+        "day": day_label(first.expected_shipment_date, today),
         "vehicle": first.vehicle_id,
         "so_count": shared.so_count,
         "total_kg": shared.kg,
@@ -232,6 +256,12 @@ def _batch_payload(rows: list, lines: dict[str, list], driver_id: int, *, with_o
         so_numbers = {row.id: (row.salesorder_number or row.id) for row in rows}
         for row, order in zip(rows, orders):
             order["workflow"] = trip_state.order_workflow(row, facts, trip_summary, data, can_act=can_act, so_numbers=so_numbers)
+            # CONTRACT (crew picks the delivery order): `stop_id` = the id the check-in / check-out URLs take (the SO id);
+            # `status` = the stop's state (pending | checked_in | checked_out; pending before Start trip); `is_active` = checked in now.
+            stop = facts["stops"].get(row.id)
+            order["stop_id"] = row.id
+            order["status"] = stop.status if stop is not None else "pending"
+            order["is_active"] = stop is not None and stop.status == "checked_in"
             order["checkout_prefill"] = _checkout_prefill(checkout_template, row, order["address_text"], crew)
         batch["orders"] = orders
     return batch
@@ -267,7 +297,7 @@ def today_batches(db: Session, driver_id: int, can_act: bool = True) -> list[dic
 
 
 def today_view(db: Session, driver_id: int, can_act: bool = True) -> dict:
-    """{"batches", "dispatch_changes"} of today, cached in memory per (assignment generation, trip-event generation): an unassign
+    """{"batches", "dispatch_changes"} of today AND tomorrow (next-day assignments are acknowledged the day before), cached in memory per (assignment generation, trip-event generation): an unassign
     bumps both, so a removed order leaves the payload at once and the change is listed."""
     today = manila_today()
     key = (driver_id, today.isoformat(), can_act)
@@ -277,8 +307,11 @@ def today_view(db: Session, driver_id: int, can_act: bool = True) -> dict:
         hit = _today_cache.get(key)
         if hit is not None and hit[1] == generation and time.monotonic() - hit[0] < TTL_SECONDS:
             return hit[2]
-    batches = build_batches(db, rows_for_driver(db, driver_id, today, today), driver_id, can_act=can_act)
-    changes = dispatch_changes.driver_changes(db, driver_id, today, {b["batch_id"] for b in batches})
+    tomorrow = today + timedelta(days=1)
+    batches = build_batches(db, rows_for_driver(db, driver_id, today, tomorrow), driver_id, can_act=can_act)  # ONE query, widened range
+    # today first, then tomorrow (build_batches sorts newest day first; keep its trip numbering order within a day)
+    batches.sort(key=lambda b: 0 if b["day"] == "today" else 1)
+    changes = dispatch_changes.driver_changes(db, driver_id, today, {b["batch_id"] for b in batches}, also=(tomorrow,))
     view = {"batches": batches, "dispatch_changes": changes}
     with _cache_lock:
         for stale in [k for k in _today_cache if k[1] != today.isoformat()]:

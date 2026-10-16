@@ -300,6 +300,9 @@ def _start(ctx: Ctx):
     trip = ctx.trip
     if trip is not None and trip.status != "pending":
         return Duplicate(_done_by(ctx.db, trip.started_by_user_id, trip.started_at))
+    delivery = ctx.rows[0].expected_shipment_date
+    if delivery is not None and delivery > driver_assignments.manila_today():
+        fail(400, driver_assignments.not_today_message(delivery), "not_today")  # next-day assignment: acknowledge today, start on the day
     if ctx.acked < ctx.total:
         fail(409, trip_state.start_blocker(ctx.total, ctx.acked), OUT_OF_ORDER)
     trip = _ensure_trip(ctx)

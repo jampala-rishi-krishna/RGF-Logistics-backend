@@ -58,7 +58,7 @@ def me(driver_id: int | None = Query(None), user: CurrentUser = Depends(require_
     staff = staff_directory_cache.get_by_id(who) or {}
     now = driver_assignments.manila_now()
     own = user.role in CREW_ROLES
-    batches = driver_assignments.today_batches(db, who, can_act(user))
+    batches = [b for b in driver_assignments.today_batches(db, who, can_act(user)) if b.get("day") != "tomorrow"]  # today's truck / crew only
     crew: dict[int, dict] = {}
     for batch in batches:
         for person in batch.get("crew_members") or []:
@@ -92,7 +92,9 @@ def today(driver_id: int | None = Query(None), user: CurrentUser = Depends(requi
         "date": driver_assignments.manila_today().isoformat(),
         "driver": {"id": who, "name": staff.get("name")},
         "viewer_role": viewer_role(user, staff),
-        "summary": driver_assignments.day_summary(batches, driver_issues.count_open(db, user_id=user.id) if user.role in CREW_ROLES else 0),
+        # KPI tiles count today's work only; tomorrow's batches (day == "tomorrow") are listed for acknowledgement.
+        "summary": driver_assignments.day_summary([b for b in batches if b.get("day") != "tomorrow"], driver_issues.count_open(db, user_id=user.id) if user.role in CREW_ROLES else 0),
+        "tomorrow": (driver_assignments.manila_today() + timedelta(days=1)).isoformat(),
         "batches": batches,
         "dispatch_changes": view["dispatch_changes"],
         **_flags(db),
