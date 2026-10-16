@@ -210,7 +210,7 @@ def test_out_of_order_rejections(env, crew):
     assert second.status_code == 200  # crew may switch stops: s1 goes back to pending, s2 is now the open stop
     end = env.client.post(url("end"), headers=h, json=body())
     assert end.status_code == 409 and end.json()["detail"]["message"] == "2 stops are not checked out yet."
-    assert env.client.get("/api/driver/assignments/b1", headers=h).json()["orders"][1]["workflow"]["blocker"].startswith("Check out of SO-s1")
+    assert env.client.get("/api/driver/assignments/b1", headers=h).json()["orders"][0]["workflow"]["can_check_in"] is True  # s1 reopened
     assert env.zoho_calls == []
 
 
