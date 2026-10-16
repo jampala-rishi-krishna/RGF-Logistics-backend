@@ -17,6 +17,11 @@ from tests import trip_test_support as t
 JPEG = b"\xff\xd8\xff\xe0" + b"\x00" * 64
 PNG = b"\x89PNG\r\n\x1a\n" + b"\x00" * 64
 WEBP = b"RIFF\x00\x00\x00\x00WEBP" + b"\x00" * 32
+@pytest.fixture(autouse=True)
+def _isolate_mocked_r2_provider(monkeypatch):
+    monkeypatch.setenv("MEDIA_STORAGE", "r2")
+
+
 R2 = {"R2_ACCOUNT_ID": "acct123", "R2_ACCESS_KEY_ID": "AKIATESTKEY", "R2_SECRET_ACCESS_KEY": "test-secret-value-not-real", "R2_BUCKET": "trip-photos"}
 
 

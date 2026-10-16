@@ -14,6 +14,11 @@ from routers import driver as driver_router, driver_extra, driver_overview, driv
 from services import media_storage, overview
 from tests import trip_test_support as t
 
+@pytest.fixture(autouse=True)
+def _isolate_mocked_r2_provider(monkeypatch):
+    monkeypatch.setenv("MEDIA_STORAGE", "r2")
+
+
 R2 = {"R2_ACCOUNT_ID": "acct123", "R2_ACCESS_KEY_ID": "AKIATESTKEY", "R2_SECRET_ACCESS_KEY": "not-a-real-secret", "R2_BUCKET": "trip-photos"}
 JPEG = b"\xff\xd8\xff\xe0" + b"\x00" * 64
 
