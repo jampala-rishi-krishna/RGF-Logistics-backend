@@ -207,7 +207,7 @@ def test_out_of_order_rejections(env, crew):
     assert env.client.post(url("orders/s1/check-out"), headers=h, json=checkout_body()).json()["detail"]["message"] == "Check in at this stop first."
     env.client.post(url("orders/s1/check-in"), headers=h, json=body())
     second = env.client.post(url("orders/s2/check-in"), headers=h, json=body())
-    assert second.status_code == 409 and "Check out of SO-s1" in second.json()["detail"]["message"]
+    assert second.status_code == 200  # crew may switch stops: s1 goes back to pending, s2 is now the open stop
     end = env.client.post(url("end"), headers=h, json=body())
     assert end.status_code == 409 and end.json()["detail"]["message"] == "2 stops are not checked out yet."
     assert env.client.get("/api/driver/assignments/b1", headers=h).json()["orders"][1]["workflow"]["blocker"].startswith("Check out of SO-s1")

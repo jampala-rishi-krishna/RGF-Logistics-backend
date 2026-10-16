@@ -89,14 +89,16 @@ def test_crew_delivers_stop_3_before_stop_1(env):
     assert again.status_code == 200 and again.json()["already_done"] is True
 
 
-def test_one_open_stop_at_a_time_still_enforced(env):
+def test_switching_stop_reopens_the_previous_one(env):
     for i, so in enumerate(("s1", "s2")):
         t.add_so(env, so, batch="b1", driver=DRIVER, helpers=(HELPER,), offset=i)
     ack_all(env, "b1", ("s1", "s2"))
     post(env, "helper", "b1", "start")
     assert post(env, "helper", "b1", "orders/s2/check-in").status_code == 200
-    blocked = post(env, "helper", "b1", "orders/s1/check-in")
-    assert blocked.status_code == 409 and blocked.json()["detail"]["code"] == "out_of_order"
+    assert post(env, "helper", "b1", "orders/s1/check-in").status_code == 200
+    orders = orders_of(env, "b1")
+    assert orders["s1"]["status"] == "checked_in" and orders["s2"]["status"] == "pending"
+    assert [so for so, o in orders.items() if o["is_active"]] == ["s1"]
 
 
 # ---- change 2: tomorrow's assignments ---------------------------------------------------------------------------------------

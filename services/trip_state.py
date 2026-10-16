@@ -205,10 +205,7 @@ def order_workflow(row, facts: dict, trip_summary: dict, data: TripData, *, can_
             blocker = "Start the trip first."
     elif status == "on_trip" and stop is not None:
         if stop.status == "pending":
-            if current_id is not None:
-                blocker = f"Check out of {so_numbers.get(current_id, 'the current stop')} first."
-            else:
-                can_in = True
+            can_in = True  # the crew picks the order; arriving here reopens any other reached stop
         elif stop.status == "checked_in":
             can_out = True
     if not can_act:

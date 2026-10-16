@@ -334,9 +334,12 @@ def _check_in(ctx: Ctx):
         _not_on_trip(ctx.trip, "checking in")
     if stop is None:
         fail(409, "This order is not part of the started trip.", OUT_OF_ORDER)
-    open_stop = next((s for s in ctx.stops.values() if s.status == "checked_in"), None)
-    if open_stop is not None:
-        fail(409, f"Check out of {open_stop.so_number or open_stop.so_id} before arriving at another stop.", OUT_OF_ORDER)
+    # The crew chooses the delivery order and may switch: arriving at another stop puts an open (reached, not yet
+    # delivered) stop back to pending, so only one stop is ever open.
+    for open_stop in (s for s in ctx.stops.values() if s.status == "checked_in"):
+        open_stop.status = "pending"
+        open_stop.checkin_at = open_stop.checkin_received_at = open_stop.checkin_by_user_id = open_stop.checkin_gps = None
+        open_stop.checkin_distance_m = open_stop.checkin_far = None
     distance = trip_events.distance_between(ctx.gps, stop.lat, stop.lng)
     stop.status = "checked_in"
     stop.checkin_at, stop.checkin_received_at, stop.checkin_by_user_id, stop.checkin_gps = ctx.client_ts, ctx.received_at, ctx.user.id, ctx.gps
