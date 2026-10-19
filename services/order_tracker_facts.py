@@ -111,3 +111,18 @@ def current(batch):
     if value and value["generation"] == trip_events.generation() and value["assignment_generation"] == live_sales_order_cache.assignment_generation():
         return value
     return None
+
+
+def capture_issues(db, items):
+    from services import trip_events, live_sales_order_cache
+    from services.order_tracker import safe_text
+    grouped = {}
+    for item in items:
+        if item.get("so_id"):
+            grouped.setdefault(str(item["so_id"]), []).append({k: safe_text(item.get(k), 600) for k in (
+                "reference", "status", "category", "description", "response", "created_at", "responded_at")})
+    pending = db.info.setdefault("order_tracker_reads", {})
+    for oid, issues in grouped.items():
+        pending["issues|" + oid] = {"generation": trip_events.generation(),
+                                  "assignment_generation": live_sales_order_cache.assignment_generation(),
+                                  "as_of": stamp(datetime.now(timezone.utc)), "issues": issues[:10]}

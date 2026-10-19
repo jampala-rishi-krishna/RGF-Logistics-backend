@@ -774,6 +774,8 @@ def _issue_payloads(db: Session, rows: list[DriverIssue]) -> list[dict]:
         item["photos"] = day_model.issue_photos(row)
         out.append(item)
     day_model.photo_capture_times(db, [p for item in out for p in item["photos"]])
+    from services.order_tracker_facts import capture_issues
+    capture_issues(db, out)
     return out
 
 

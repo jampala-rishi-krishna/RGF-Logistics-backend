@@ -227,6 +227,7 @@ def order_card(row):
     stop = snapshot.get("stops", {}).get(row["id"], {}) if snapshot else {}
     ack = snapshot.get("acks", {}).get(row["id"]) if snapshot else None
     invoice = snapshot.get("invoices", {}).get(row["id"]) if snapshot else None
+    invoice = {k: safe_text(v) for k, v in invoice.items()} if invoice else None
     at = snapshot.get("as_of") if snapshot else None
     answers = answer_map(stop.get("answers"))
     bucket = day_model.outcome_bucket(stop.get("outcome"))
