@@ -295,7 +295,7 @@ def test_admin_can_create_driver_with_initial_password_and_email_details(env, mo
     assert login(env, "09482834802", "driver-pass-123").status_code == 200
     assert len(sent) == 1
     assert sent[0]["to"] == "emert@example.test"
-    assert "Your IntelliFleet login details" in sent[0]["subject"]
+    assert "Your RareChain login details" in sent[0]["subject"]
     assert "driver-pass-123" in sent[0]["html"] and "09482834802" in sent[0]["html"]
     assert "MC RIDER" in sent[0]["html"] and "GLACIER" in sent[0]["html"]
 

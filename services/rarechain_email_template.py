@@ -3,6 +3,21 @@ from __future__ import annotations
 from html import escape
 
 
+def render_account_email(headline: str, subtext: str, role: str, body_html: str) -> str:
+    """Account emails use the same branding and imagery as dispatch assignments."""
+    return render_rarechain_email(
+        "ACCOUNT ACCESS / RARE GLOBAL FOOD",
+        headline,
+        subtext,
+        "https://images.pexels.com/photos/7464230/pexels-photo-7464230.jpeg?auto=compress&cs=tinysrgb&w=1200",
+        [{"label": "APPLICATION", "value": "RareChain"},
+         {"label": "ACCOUNT ROLE", "value": role.replace("_", " ").title()}],
+        "https://images.pexels.com/photos/6169056/pexels-photo-6169056.jpeg?auto=compress&cs=tinysrgb&w=1800",
+        "Connected operations across the RareChain network.",
+        body_html,
+    )
+
+
 def render_rarechain_email(category_label: str, headline: str, subtext: str, hero_image_url: str, stats: list[dict], second_image_url: str, caption: str, body_html: str) -> str:
     stat_cells = "".join(f'<td style="padding:14px 0;width:{100 / max(len(stats), 1):.2f}%;"><div style="font-family:\'DM Mono\',monospace;font-size:10px;letter-spacing:.1em;text-transform:uppercase;color:#77787B;">{escape(str(stat.get("label", "")))}</div><strong style="display:block;margin-top:4px;font-size:{20 if len(stats) == 1 else 13}px;color:#0B0B0B;">{escape(str(stat.get("value", "")))}</strong></td>' for stat in stats)
     return f'''<div style="margin:0;background:#FAFAF8;color:#0B0B0B;font-family:'DM Sans',Arial,sans-serif;line-height:1.5;">

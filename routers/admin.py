@@ -18,6 +18,7 @@ from models.user import User
 from services import app_settings, gmail_sender, memory_tables, staff_directory_cache, user_cache, user_invites, zoho_usage
 from services.phone_numbers import ph_phone_digits
 from services.staff_roles import crew_kind
+from services.rarechain_email_template import render_account_email
 from services.audit import list_audit_log as _list_audit_log
 
 logger = logging.getLogger("admin")
@@ -240,20 +241,26 @@ def create_invite_link(user_id: int, body: InviteBody, request: Request, db: Ses
 def _invite_email(user: User, link: str, purpose: str) -> tuple[str, str, str]:
     name = escape((user.full_name or "").strip() or "there")
     if purpose == "reset":
-        subject, lead = "Reset your IntelliFleet password", "A password reset was requested for your IntelliFleet account."
+        subject, lead = "Reset your RareChain password", "A password reset was requested for your RareChain account."
+        headline, action = "Reset your password.", "Reset my password"
     else:
-        subject, lead = "Your IntelliFleet driver login", "An IntelliFleet driver account has been created for you."
-    button = "display:inline-block;background:#0b5fff;color:#ffffff;text-decoration:none;font-weight:700;padding:12px 22px;border-radius:8px;font-size:15px;"
-    html = (
-        "<div style='font-family:Arial,Helvetica,sans-serif;font-size:15px;line-height:1.5;color:#1f2933;max-width:520px;'>"
-        f"<p>Hi {name},</p><p>{lead} Tap the button to choose your password. The link works once and expires in 24 hours.</p>"
-        f"<p style='margin:22px 0;'><a href='{escape(link, quote=True)}' style='{button}'>Set my password</a></p>"
+        subject, lead = "Your RareChain account invitation", "A RareChain account has been created for you."
+        headline, action = "Welcome to RareChain.", "Set my password"
+    button = "display:inline-block;background:#0B0B0B;border:1px solid #0B0B0B;color:#FFFFFF;text-decoration:none;font-weight:700;padding:14px 24px;font-size:15px;"
+    safe_link = escape(link, quote=True)
+    body_html = (
+        f"<p style='margin:0 0 16px;'>Hi {name},</p><p>{lead} Choose your password to continue.</p>"
+        "<p>The link works once and expires in <strong>24 hours</strong>.</p>"
+        f"<p style='margin:24px 0;'><a href='{safe_link}' style='{button}'>{action}</a></p>"
+        "<p style='font-size:13px;color:#77787B;'>If the button does not open, copy and paste this link into your browser:</p>"
+        f"<p style='font-size:13px;word-break:break-all;overflow-wrap:anywhere;'><a href='{safe_link}' style='color:#0B0B0B;'>{safe_link}</a></p>"
         "<p>Then log in with your email or your mobile number.</p>"
-        "<p style='color:#52606d;font-size:13px;'>If you did not expect this email, ignore it - nothing changes until the link is used.</p></div>"
+        "<p style='color:#77787B;font-size:13px;'>Keep this link private. If you did not expect this email, ignore it - nothing changes until the link is used.</p>"
     )
+    html = render_account_email(headline, "Your account access, connected to the RareChain operations network.", user.role or "", body_html)
     text = (
         f"Hi {user.full_name or 'there'},\n\n{lead} Open this link to choose your password (works once, expires in 24 hours):\n{link}\n\n"
-        "Then log in with your email or your mobile number.\nIf you did not expect this email, ignore it."
+        "Then log in with your email or your mobile number.\nKeep this link private. If you did not expect this email, ignore it.\n\nRareChain Logistics Team\nRare Global Food Trading Corp."
     )
     return subject, html, text
 
@@ -343,30 +350,26 @@ def _login_details_email(user: User, password: str, staff: dict | None) -> tuple
         rows.append(("Warehouse", warehouse))
     row_html = "".join(
         "<tr>"
-        f"<td style='padding:10px 12px;border-bottom:1px solid #e5e7eb;color:#6b7280;font-size:13px;'>{label}</td>"
-        f"<td style='padding:10px 12px;border-bottom:1px solid #e5e7eb;font-weight:700;color:#111827;'>{value}</td>"
+        f"<td style='padding:10px 12px;border-bottom:1px solid #E4E3DF;color:#77787B;font-size:13px;'>{label}</td>"
+        f"<td style='padding:10px 12px;border-bottom:1px solid #E4E3DF;font-weight:700;color:#0B0B0B;overflow-wrap:anywhere;word-break:break-word;'>{value}</td>"
         "</tr>"
         for label, value in rows
     )
-    subject = "Your IntelliFleet login details"
-    html = (
-        "<div style='font-family:Arial,Helvetica,sans-serif;font-size:15px;line-height:1.5;color:#1f2933;max-width:560px;'>"
-        "<div style='border-bottom:3px solid #111827;padding-bottom:12px;margin-bottom:20px;'>"
-        "<div style='font-size:12px;letter-spacing:.14em;text-transform:uppercase;color:#6b7280;'>Rare Global Food Trading Corp.</div>"
-        "<h1 style='font-size:26px;line-height:1.1;margin:8px 0 0;color:#111827;'>IntelliFleet login</h1>"
-        "</div>"
-        f"<p>Hi {name},</p>"
-        "<p>Your IntelliFleet account is ready. Use the details below to sign in on the driver portal.</p>"
-        "<table role='presentation' cellspacing='0' cellpadding='0' style='width:100%;border:1px solid #e5e7eb;border-collapse:collapse;margin:18px 0;'>"
+    subject = "Your RareChain login details"
+    body_html = (
+        f"<p style='margin:0 0 16px;'>Hi {name},</p>"
+        "<p>Your RareChain account is ready. Open the application link provided by your supervisor and sign in with your email or mobile number and the password below.</p>"
+        "<table role='presentation' cellspacing='0' cellpadding='0' style='width:100%;border:1px solid #E4E3DF;border-collapse:collapse;margin:18px 0;background:#FAFAF8;table-layout:fixed;'>"
         f"{row_html}</table>"
-        "<p style='color:#6b7280;font-size:13px;'>Keep this email private. If you did not expect this login, contact dispatch before signing in.</p>"
-        "</div>"
+        "<p>After signing in, change your password using the account password controls.</p>"
+        "<p style='color:#77787B;font-size:13px;'>Keep this email private. If you did not expect this login, contact dispatch before signing in.</p>"
     )
+    html = render_account_email("Your account is ready.", "Everything you need to sign in to RareChain.", user.role or "", body_html)
     text = "\n".join(
         [
             f"Hi {user.full_name or 'there'},",
             "",
-            "Your IntelliFleet account is ready. Use these details to sign in:",
+            "Your RareChain account is ready. Open the application link provided by your supervisor and sign in with your email or mobile number:",
             f"Login email: {user.email}",
             f"Login phone: {_display_phone(user.phone)}",
             f"Password: {password}",
@@ -375,7 +378,11 @@ def _login_details_email(user: User, password: str, staff: dict | None) -> tuple
             *( [f"Title: {(staff or {}).get('title')}"] if title else [] ),
             *( [f"Warehouse: {(staff or {}).get('warehouse')}"] if warehouse else [] ),
             "",
+            "After signing in, change your password using the account password controls.",
             "Keep this email private. If you did not expect this login, contact dispatch before signing in.",
+            "",
+            "RareChain Logistics Team",
+            "Rare Global Food Trading Corp.",
         ]
     )
     return subject, html, text
