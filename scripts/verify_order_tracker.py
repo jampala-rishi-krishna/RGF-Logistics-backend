@@ -63,7 +63,7 @@ def main():
                              "checkout": (card["sections"]["times"]["value"].get("checkout_at"), (source_stop.get("checkout") or {}).get("at")),
                              "outcome": (card["sections"]["delivery_result"]["value"].get("outcome"), (source_stop.get("checkout") or {}).get("outcome"))}
                     for key, (value, expected) in pairs.items():
-                        checks.append({"field": key, "result": "match" if value == expected and expected is not None else "not recorded in comparison source" if expected is None else "mismatch"})
+                        checks.append({"field": key, "result": "match" if value == expected and expected is not None else "not recorded in both" if expected is None and value is None else "mismatch"})
                     report["orders"].append({"order": number, "status": card["status"], "overview_available": bool(source),
                         "comparisons": checks, "sections": {k: {"state": v["state"], "as_of": v["as_of"]} for k, v in card["sections"].items()}})
                 if len(report["orders"]) < 3:
