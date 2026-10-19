@@ -106,7 +106,7 @@ def add_so(env, so_id, *, number=None, customer=None, batch="batch-1", driver=9,
     with env.Session() as db:
         db.add(SalesOrderHistory(id=so_id, salesorder_number=number or f"SO-{so_id}", customer_name=customer or f"Customer {so_id}", expected_shipment_date=day, synced_at=datetime.now(timezone.utc),
                                  shipping_address={"address": f"{so_id} Main St", "city": "Makati"}, vehicle_id=vehicle, driver_id=driver, helper_ids=[driver, *helpers],
-                                 assigned_at=datetime(2026, 10, 12, 1, 0, tzinfo=timezone.utc) + timedelta(minutes=offset), assignment_status=status, assignment_batch_id=batch))
+                                 assigned_at=utc(day, 9) + timedelta(minutes=offset), assignment_status=status, assignment_batch_id=batch))
         db.commit()
 
 
