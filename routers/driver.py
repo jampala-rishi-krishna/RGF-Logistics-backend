@@ -10,10 +10,11 @@ from auth.dependencies import CurrentUser, require_role
 from database import get_db
 from services import driver_assignments, driver_issues, staff_directory_cache
 from services.staff_roles import staff_kind
+from services.order_tracker_facts import publish_existing_reads
 
 # Driver app API (drivers AND helpers). Reads Neon (history rows written at assignment, trip workflow rows) and memory only -
 # no Zoho call anywhere in this module. Every handler resolves ONE staff id first (resolve_driver_id) and passes it to every query.
-router = APIRouter(prefix="/api/driver", tags=["driver"], dependencies=[Depends(require_role("driver", "helper", "admin"))])
+router = APIRouter(prefix="/api/driver", tags=["driver"], dependencies=[Depends(require_role("driver", "helper", "admin")), Depends(publish_existing_reads)])
 
 CREW_ROLES = ("driver", "helper")
 

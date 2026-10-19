@@ -166,10 +166,19 @@ def _stream_drive(file_id: str, thumb: bool, if_none_match: str | None) -> Respo
 
 @router.get("/api/media/{photo_id}")
 def get_media(photo_id: int, size: str = Query("full", pattern="^(full|thumb)$"), if_none_match: str | None = Header(None),
-              user: CurrentUser = Depends(require_role("driver", "helper", "logistics_officer", "admin", "dispatcher")), db: Session = Depends(get_db)):
+              user: CurrentUser = Depends(require_role("driver", "helper", "logistics_officer", "admin", "dispatcher", "sales", "wet_market")), db: Session = Depends(get_db)):
     photo = db.get(TripPhoto, photo_id)
     if photo is None:
         fail(404, "Photo not found.", "not_found")
+    if user.role in {"sales", "wet_market"}:
+        from services import order_tracker
+        # No new DB lookup: use the photo already loaded by this existing path.
+        row = live_sales_order_for_photo(photo)
+        if row is None or not order_tracker.allowed(user, row):
+            fail(404, "Photo not found.", "not_found")
+        card = order_tracker.order_card(row)
+        if photo.id not in {p["photo_id"] for p in card["sections"]["proof"]["value"]["photos"]}:
+            fail(404, "Photo not found.", "not_found")
     if ROLE_ALIASES.get(user.role, user.role) in ("driver", "helper"):
         if photo.batch_id == ISSUE_BATCH:
             if photo.uploaded_by_user_id != user.id:
@@ -188,3 +197,9 @@ def get_media(photo_id: int, size: str = Query("full", pattern="^(full|thumb)$")
     if not media_storage.r2_configured():  # an R2 photo (plain key or "r2:<key>") resolves through R2 whatever MEDIA_STORAGE says
         fail(503, "Photo storage is not set up yet.", "storage_disabled")
     return RedirectResponse(media_storage.presign_get(media_storage.r2_object_key(photo.storage_key), 600), status_code=302, headers={"Cache-Control": "private, no-store"})
+
+
+def live_sales_order_for_photo(photo):
+    from services import live_sales_order_cache, order_tracker
+    row = live_sales_order_cache.find_cached(str(photo.so_id)) if photo.so_id else None
+    return order_tracker.project(row) if row is not None else None

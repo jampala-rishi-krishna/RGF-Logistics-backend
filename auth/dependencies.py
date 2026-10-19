@@ -101,7 +101,8 @@ def workspace_access(request: Request, user: CurrentUser | None = Depends(get_cu
         return
     path = request.url.path
     if user.role in {"sales", "wet_market"}:
-        allowed = path.startswith("/auth/") or path.startswith("/api/access/") or (request.method == "GET" and (
+        tracker_access = (request.method == "GET" and (path.startswith("/api/order-tracker/") or path.startswith("/api/media/"))) or (request.method == "POST" and path in {"/api/order-tracker/ask", "/api/order-tracker/feedback"})
+        allowed = tracker_access or path.startswith("/auth/") or path.startswith("/api/access/") or (request.method == "GET" and (
             path.startswith("/orders") or path.startswith("/api/orders") or
             path.startswith("/api/load-planning/inventory/sales-orders") or
             path.startswith("/api/load-planning/inventory/export/") or path == "/api/load-planning/inventory/branches"))

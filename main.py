@@ -31,7 +31,7 @@ logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.getLogger("httpcore").setLevel(logging.WARNING)
 logger = logging.getLogger("main")
 
-from routers import access_workflow, pickup, admin, agent, alerts, assignment, auth, comms, communications, confirmed_email, dispatch, driver, driver_extra, driver_overview, driver_trip, fleet, fleet_health, gmail, load_planning, media, officer, optimization, orders, reports, routes, voice, warehouse, pipeline, zoho_webhooks
+from routers import access_workflow, pickup, admin, agent, alerts, assignment, auth, comms, communications, confirmed_email, dispatch, driver, driver_extra, driver_overview, driver_trip, fleet, fleet_health, gmail, load_planning, media, officer, optimization, orders, reports, routes, voice, warehouse, pipeline, zoho_webhooks, order_tracker
 from services.fleet_health import sampler as fleet_health_sampler
 from services import fleet_static_cache, gmail_sender, staff_directory_cache, live_sales_order_cache, voice_control, whatsapp_control, zoho_so_lock, zoho_usage
 from services.cartrack_poller import poll_cartrack_and_update, report_unmatched_roster_on_startup
@@ -274,6 +274,7 @@ async def protect_assignment_attribution(request: Request, call_next):
 
 
 app.include_router(access_workflow.router, dependencies=[Depends(workspace_access)])
+app.include_router(order_tracker.router, dependencies=[Depends(workspace_access)])
 app.include_router(pickup.router, dependencies=[Depends(workspace_access)])
 app.include_router(auth.router, dependencies=[Depends(workspace_access)])
 app.include_router(driver.router, dependencies=[Depends(workspace_access)])

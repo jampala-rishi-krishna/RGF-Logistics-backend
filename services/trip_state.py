@@ -89,6 +89,8 @@ def load(db: Session, batch_ids: list[str], *, names: bool) -> TripData:
     if user_ids:
         for row in db.execute(select(User.id, User.full_name, User.role).where(User.id.in_(user_ids))).all():
             data.users[row.id] = {"name": row.full_name, "role": row.role}
+    from services.order_tracker_facts import capture
+    capture(db, batch_ids, data)
     return data
 
 

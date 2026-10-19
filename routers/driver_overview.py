@@ -13,8 +13,9 @@ from auth.dependencies import CurrentUser, require_role
 from database import get_db
 from services import driver_issues, overview, reconcile
 from services.trip_events import fail
+from services.order_tracker_facts import publish_existing_reads
 
-router = APIRouter(prefix="/api/driver-overview", tags=["driver-overview"], dependencies=[Depends(require_role("admin", "dispatcher"))])
+router = APIRouter(prefix="/api/driver-overview", tags=["driver-overview"], dependencies=[Depends(require_role("admin", "dispatcher")), Depends(publish_existing_reads)])
 
 BOARD_STATES = ("idle", "to_acknowledge", "ready", "on_trip", "returned", "handover_pending", "closed")
 
