@@ -72,7 +72,7 @@ def test_delivery_result_and_receiver_quantities(tracker_env, outcome, status):
     result = card["sections"]["delivery_result"]["value"]
     assert result["receiver"] == "Maria" and result["invoice_dr"] == "000123"
     assert result["rejected_items"][0]["quantity"] == "2"
-    assert card["sections"]["proof"]["value"]["photos"][0]["url"] == "/api/media/41"
+    assert card["sections"]["proof"]["value"]["photos"][0]["url"] == "/api/media/41?read_only=true"
     assert card["sections"]["location"]["state"] == "not_recorded"
 
 
@@ -214,3 +214,19 @@ def test_existing_manifest_and_customer_rule_evidence(tracker_env):
     card = tracker.get_order(env.user, "SO-100", env.day, env.day)
     assert card["sections"]["loading_check"]["value"]["warehouse_loading"]["cargo_count_verified"] is True
     assert card["sections"]["customer_rules"]["value"]["recorded_rules"]["receiving_cutoff_time"] == "16:00"
+
+
+@pytest.mark.parametrize("role,read_only", [("sales", False), ("admin", True), ("planner", True)])
+def test_tracker_drive_view_never_retries_metadata_writes(tracker_env, monkeypatch, role, read_only):
+    from fastapi.responses import Response
+    from routers import media
+    env = tracker_env; env.user.role = role
+    env.snapshot["stops"]["one"]["answers"] = [{"key": "delivery_photo", "value": 41}]; env.save()
+    photo = SimpleNamespace(id=41, so_id="one", batch_id="batch-1", storage_key="gdrive:test")
+    monkeypatch.setattr(media, "live_sales_order_for_photo", lambda p: tracker.project(env.rows[0]))
+    monkeypatch.setattr(media.gdrive_storage, "configured", lambda: True)
+    monkeypatch.setattr(media.media_storage, "retry_pending", lambda *a: pytest.fail("Read-only photo requests must not write Drive metadata"))
+    monkeypatch.setattr(media, "_stream_drive", lambda *a: Response(b"fixture", media_type="image/jpeg"))
+    response = media.get_media(41, "full", None, env.user, SimpleNamespace(get=lambda *a: photo), read_only)
+    assert response.headers["Cache-Control"] == "private, no-store"
+    assert response.headers["Vary"] == "Authorization"

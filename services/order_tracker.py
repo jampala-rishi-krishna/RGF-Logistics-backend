@@ -242,7 +242,7 @@ def order_card(row):
     photos = []
     for key, value in answers.items():
         if key.endswith("photo") and str(value).isdigit():
-            photos.append({"photo_id": int(value), "url": f"/api/media/{int(value)}", "order": row["number"],
+            photos.append({"photo_id": int(value), "url": f"/api/media/{int(value)}?read_only=true", "order": row["number"],
                            "captured_at": stop.get("checkout_at"), "timestamp_basis": "checkout time; capture metadata may differ", "result": safe_text(stop.get("outcome"))})
     proof = fact("trip_stops.form_answers / authenticated media", at, {"photos": photos, "officer_invoice": invoice},
                  None if photos else "Not recorded - no proof photo is available in the current read snapshot. Ask Logistics.")

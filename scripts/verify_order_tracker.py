@@ -26,7 +26,9 @@ def main():
         health = client.get("/health"); health.raise_for_status()
         payload = health.json()
         report["health"] = {k: payload.get(k) for k in ("status", "rss_mb", "instance_id", "workers")}
-        report["tracker_api_present"] = "/api/order-tracker/orders" in client.get("/openapi.json").json().get("paths", {})
+        paths = client.get("/openapi.json").json().get("paths", {})
+        report["tracker_api_present"] = "/api/order-tracker/orders" in paths
+        report["media_read_only_supported"] = any(p.get("name") == "read_only" for p in paths.get("/api/media/{photo_id}", {}).get("get", {}).get("parameters", []))
         if not report["tracker_api_present"]:
             report["blocked"] = "Tracker API deployment has not reached this instance."
         elif not env.get("SEED_ADMIN_EMAIL") or not env.get("SEED_ADMIN_PASSWORD"):

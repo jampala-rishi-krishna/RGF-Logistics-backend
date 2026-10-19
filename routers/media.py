@@ -166,7 +166,7 @@ def _stream_drive(file_id: str, thumb: bool, if_none_match: str | None) -> Respo
 
 @router.get("/api/media/{photo_id}")
 def get_media(photo_id: int, size: str = Query("full", pattern="^(full|thumb)$"), if_none_match: str | None = Header(None),
-              user: CurrentUser = Depends(require_role("driver", "helper", "logistics_officer", "admin", "dispatcher", "sales", "wet_market")), db: Session = Depends(get_db)):
+              user: CurrentUser = Depends(require_role("driver", "helper", "logistics_officer", "admin", "dispatcher", "sales", "wet_market")), db: Session = Depends(get_db), read_only: bool = Query(False)):
     photo = db.get(TripPhoto, photo_id)
     if photo is None:
         fail(404, "Photo not found.", "not_found")
@@ -192,8 +192,14 @@ def get_media(photo_id: int, size: str = Query("full", pattern="^(full|thumb)$")
         if not gdrive_storage.configured():
             fail(503, "Photo storage is not set up yet.", "storage_disabled")
         file_id = media_storage.drive_file_id(photo.storage_key)
-        media_storage.retry_pending(file_id)  # a Drive name / description update that failed after check-out: try again (off the request)
-        return _stream_drive(file_id, size == "thumb", if_none_match)
+        tracker_read = read_only is True or user.role in {"sales", "wet_market"}
+        if not tracker_read:
+            media_storage.retry_pending(file_id)  # legacy crew/office reads may retry a failed name / description update
+        response = _stream_drive(file_id, size == "thumb", if_none_match)
+        if tracker_read:
+            response.headers["Cache-Control"] = "private, no-store"
+            response.headers["Vary"] = "Authorization"
+        return response
     if not media_storage.r2_configured():  # an R2 photo (plain key or "r2:<key>") resolves through R2 whatever MEDIA_STORAGE says
         fail(503, "Photo storage is not set up yet.", "storage_disabled")
     return RedirectResponse(media_storage.presign_get(media_storage.r2_object_key(photo.storage_key), 600), status_code=302, headers={"Cache-Control": "private, no-store"})
