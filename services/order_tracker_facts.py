@@ -40,7 +40,7 @@ class ByteCache:
             if key in self.items:
                 self.size -= len(self.items.pop(key)[1])
             while self.items and (self.size + len(packed) > self.max_bytes or len(self.items) >= self.max_entries):
-                self.size -= len(self.items.popitem(last=False)[1])
+                self.size -= len(self.items.popitem(last=False)[1][1])
             self.items[key] = (time.monotonic(), packed)
             self.size += len(packed)
         return True
@@ -68,17 +68,30 @@ def stamp(value):
     return str(value)
 
 
-def capture(db, batch_ids, data):
+def queue(db, key, value):
+    if not hasattr(db, "info"):
+        return  # Lightweight existing reader fakes have no session-local storage.
+    packed = json.dumps(value, ensure_ascii=False, separators=(",", ":")).encode()
+    if len(packed) > 65536:
+        return
+    pending = db.info.setdefault("order_tracker_reads", {})
+    pending.pop(key, None)
+    while pending and (len(pending) >= 32 or sum(len(v) for v in pending.values()) + len(packed) > 262144):
+        pending.pop(next(iter(pending)))
+    pending[key] = packed
+
+
+def capture(db, batch_ids, data, epoch=None):
     """Queue a projection; the GET dependency publishes only after the handler succeeds."""
     from services import trip_events, live_sales_order_cache
-    pending = db.info.setdefault("order_tracker_reads", {})
+    event_gen, assignment_gen = epoch or (trip_events.generation(), live_sales_order_cache.assignment_generation())
     for batch in batch_ids[:512]:
         trip = data.trips.get(batch)
         trip_id = trip.id if trip else None
         acks, stops = data.acks.get(trip_id, {}), data.stops.get(trip_id, {})
         handover = data.handovers.get(batch)
-        pending[batch] = {
-            "generation": trip_events.generation(), "assignment_generation": live_sales_order_cache.assignment_generation(),
+        projection = {
+            "generation": event_gen, "assignment_generation": assignment_gen,
             "as_of": stamp(datetime.now(timezone.utc)),
             "trip": {"status": trip.status, "vehicle": trip.vehicle,
                      "started_at": stamp(trip.started_at), "ended_at": stamp(trip.ended_at)} if trip else {"status": "pending"},
@@ -92,10 +105,13 @@ def capture(db, batch_ids, data):
                                       "note": item.officer_note, "checked_at": stamp(item.officer_checked_at)}
                          for item in data.handover_items.get(handover.id, [])} if handover else {},
         }
+        queue(db, batch, projection)
 
 
 def publish(db):
     for batch, projection in db.info.pop("order_tracker_reads", {}).items():
+        if isinstance(projection, bytes):
+            projection = json.loads(projection)
         facts.put(batch, projection)
 
 
@@ -121,8 +137,21 @@ def capture_issues(db, items):
         if item.get("so_id"):
             grouped.setdefault(str(item["so_id"]), []).append({k: safe_text(item.get(k), 600) for k in (
                 "reference", "status", "category", "description", "response", "created_at", "responded_at")})
-    pending = db.info.setdefault("order_tracker_reads", {})
     for oid, issues in grouped.items():
-        pending["issues|" + oid] = {"generation": trip_events.generation(),
+        queue(db, "issues|" + oid, {"generation": trip_events.generation(),
                                   "assignment_generation": live_sales_order_cache.assignment_generation(),
-                                  "as_of": stamp(datetime.now(timezone.utc)), "issues": issues[:10]}
+                                  "as_of": stamp(datetime.now(timezone.utc)), "issues": issues[:10]})
+
+
+def capture_loading(manifest_id, checklist):
+    """Called only with the payload of the existing manifest checklist workflow."""
+    keys = ("cargo_count_verified", "cargo_count_expected", "cargo_count_actual", "seal_number",
+            "departure_temp_c", "departure_temp_zone_count", "driver_acknowledged", "checklist_completed", "completed_at")
+    facts.put("loading|" + str(manifest_id), {"as_of": stamp(datetime.now(timezone.utc)),
+                                           "checklist": {k: checklist.get(k) for k in keys}})
+
+
+def capture_rules(customer, rules):
+    from services.order_tracker import norm, safe_text
+    facts.put("rules|" + norm(customer), {"as_of": stamp(datetime.now(timezone.utc)),
+              "rules": {k: safe_text(v) if isinstance(v, str) else v for k, v in (rules or {}).items()}})

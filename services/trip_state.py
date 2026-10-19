@@ -65,6 +65,8 @@ def load(db: Session, batch_ids: list[str], *, names: bool) -> TripData:
     data = TripData()
     if not batch_ids:
         return data
+    from services import trip_events, live_sales_order_cache
+    tracker_epoch = (trip_events.generation(), live_sales_order_cache.assignment_generation())
     trips = db.execute(select(Trip).where(Trip.batch_id.in_(batch_ids))).scalars().all()
     data.trips = {trip.batch_id: trip for trip in trips}
     trip_ids = [trip.id for trip in trips]
@@ -90,7 +92,7 @@ def load(db: Session, batch_ids: list[str], *, names: bool) -> TripData:
         for row in db.execute(select(User.id, User.full_name, User.role).where(User.id.in_(user_ids))).all():
             data.users[row.id] = {"name": row.full_name, "role": row.role}
     from services.order_tracker_facts import capture
-    capture(db, batch_ids, data)
+    capture(db, batch_ids, data, tracker_epoch)
     return data
 
 

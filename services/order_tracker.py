@@ -11,6 +11,7 @@ import re
 import threading
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
+from itertools import chain
 from urllib.parse import quote
 from zoneinfo import ZoneInfo
 
@@ -75,6 +76,7 @@ def project(row, historical=False):
             "vehicle": state.get("vehicle_id") or getattr(row, "vehicle_id", None),
             "batch": state.get("assignment_batch_id") or getattr(row, "assignment_batch_id", None),
             "assignment_status": state.get("assignment_status") or getattr(row, "assignment_status", None),
+            "manifest_id": state.get("manifest_id") or getattr(row, "manifest_id", None),
             "as_of": snapshots.stamp(getattr(row, "synced_at", None) or getattr(row, "updated_at", None)),
             "po_number": safe_text(getattr(row, "customer_po_number", None) or raw.get("customer_po_number") or raw.get("reference_number")),
             "notes": safe_text(raw.get("notes") or getattr(row, "delivery_notes", None)),
@@ -95,7 +97,8 @@ def live_rows(start, end):
     for row in live.cached_assigned_records():
         if row.expected_shipment_date and start <= row.expected_shipment_date <= end:
             found[str(row.id)] = row
-    return [project(r) for r in found.values()]
+    # Stream projections: don't duplicate every order's line items for one request.
+    return (project(r) for r in found.values())
 
 
 def historical_rows(db, start, end):
@@ -137,8 +140,8 @@ def rows_for(user, start, end, db=None):
     if start < today():
         if db is None:
             raise HTTPException(503, "Historical records are unavailable.")
-        result += historical_rows(db, start, min(end, today() - timedelta(days=1)))
-    return [r for r in result if allowed(user, r)]
+        result = chain(result, historical_rows(db, start, min(end, today() - timedelta(days=1))))
+    return (r for r in result if allowed(user, r))
 
 
 def fact(source, at, value=None, missing=None):
@@ -192,7 +195,7 @@ def location(row, snapshot, stop):
     except (TypeError, ValueError):
         fresh = False
     if not fresh:
-        return fact("Cartrack GPS fix", fix, {"plate": safe_text(plate), "stale": True}, "GPS is stale or its fix time is unknown. Call Logistics for the current location.")
+        return fact("Cartrack GPS fix", fix, {"plate": safe_text(plate), "stale": True}, "Not recorded as a current location - GPS is stale or its fix time is unknown. Call Logistics.")
     lat, lng = gps.get("lat"), gps.get("lng")
     if not isinstance(lat, (int, float)) or not isinstance(lng, (int, float)) or not math.isfinite(lat) or not math.isfinite(lng) or not -90 <= lat <= 90 or not -180 <= lng <= 180:
         return fact("Cartrack GPS fix", fix, missing="Not recorded - GPS coordinates are invalid.")
@@ -247,6 +250,8 @@ def order_card(row):
         proof["message"] = "Photo records exist, but storage is not configured or available. Contact Logistics."
     checked = {k: safe_text(v) for k, v in answer_map((ack or {}).get("answers")).items() if not re.search("phone|mobile|contact|signature|photo", k, re.I)}
     received = safe_text(answers.get("receiver_name"))
+    loading = snapshots.facts.get("loading|" + str(row.get("manifest_id"))) if row.get("manifest_id") else None
+    rules = snapshots.facts.get("rules|" + norm(row["customer"]))
     issues_snapshot = snapshots.current("issues|" + row["id"])
     issues = issues_snapshot.get("issues") if issues_snapshot else None
     sections = {
@@ -283,6 +288,13 @@ def order_card(row):
         "problems": fact("driver_issues / Logistics reply (existing read snapshot)", issues_snapshot.get("as_of") if issues_snapshot else None,
                          issues, None if issues else "Not recorded in current memory - ask Logistics to check reported issues."),
     }
+    if loading:
+        sections["loading_check"]["value"]["warehouse_loading"] = loading["checklist"]
+        sections["loading_check"]["value"]["warehouse_loading_as_of"] = loading["as_of"]
+        sections["loading_check"]["source"] += " / warehouse_loading_checklists (existing read snapshot)"
+    if rules and rules.get("rules"):
+        sections["customer_rules"] = fact("client_delivery_constraints (existing assignment-options read)", rules["as_of"],
+                                         {"recorded_rules": rules["rules"], "so_notes": row.get("notes")})
     return {"id": row["id"], "number": row["number"], "customer": row["customer"], "delivery_date": row["date"],
             "order_type": row["order_type"], "status": status, "truck": plate_of(row),
             "last_update": at or row["as_of"], "sections": sections,
@@ -313,6 +325,7 @@ def find_orders(user, query, start, end, status=None, db=None, offset=0):
                       {"payment": card["sections"]["payment"]["value"]["status"]})
     result.sort(key=lambda r: (r["delivery_date"] or "", r["number"]), reverse=True)
     return {"orders": result[offset:offset + 50], "total": len(result), "offset": offset,
+            "source": "Zoho cached orders / trip workflow read snapshots", "as_of": min((r["last_update"] for r in result if r["last_update"]), default=None),
             "coverage": "Accessible cached records only; missing or cold records are not proof of no orders.",
             "scope": "All operations orders" if user.role in {"admin", "planner", "dispatcher"} else "Exact salesperson name matches only"}
 
@@ -336,7 +349,15 @@ def buyers_per_sku(user, start, end, filters=None, db=None):
             if not line["sku"] or not line["unit"] or not row["customer_id"]:
                 missing += 1
                 continue
-            group = groups.setdefault((line["sku"], line["unit"]), {"buyers": set(), "as_of": row["as_of"], "identity": row["customer_identity"]})
+            key = (line["sku"], line["unit"])
+            if key not in groups and len(groups) >= 100:
+                missing += 1
+                continue
+            group = groups.setdefault(key, {"buyers": set(), "as_of": row["as_of"], "identity": row["customer_identity"]})
+            if row["customer_identity"] != "id":
+                group["identity"] = "contains customer-name fallbacks; identities may be incomplete"
+            if row["as_of"]:
+                group["as_of"] = min(group["as_of"], row["as_of"]) if group["as_of"] else row["as_of"]
             group["buyers"].add(row["customer_id"])
     return {"definition": "Distinct customers per SKU and unit, across accessible cached SO/WM orders; TO excluded.",
             "items": [{"sku": sku, "unit": unit, "buyers": len(g["buyers"]), "source": "Zoho cached SO line_items", "as_of": g["as_of"], "identity": g["identity"]}

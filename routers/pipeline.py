@@ -172,6 +172,8 @@ def get_checklist(manifest_id: int, db: Session = Depends(get_db)):
         count = db.execute(select(func.count(ManifestItem.id)).where(ManifestItem.manifest_id == str(manifest_id))).scalar_one()
         checklist = WarehouseLoadingChecklist(manifest_id=manifest_id, cargo_count_expected=int(count))
         db.add(checklist); db.commit(); db.refresh(checklist)
+    from services.order_tracker_facts import capture_loading
+    capture_loading(manifest_id, row_to_dict(checklist))
     return {"manifest": row_to_dict(manifest), "checklist": row_to_dict(checklist)}
 
 
@@ -197,6 +199,8 @@ async def complete_checklist(manifest_id: int, body: ChecklistBody, current_user
     recipient = staff_directory_cache.first_active()
     if recipient:
         await send_message(SendMessageBody(audience="internal", recipient_id=recipient["id"], channels=["email"], subject="Truck departed", body=f"Truck {manifest.vehicle_id} departed on manifest {manifest.id}.", trigger_event="manifest_departed", related_so_number=None))
+    from services.order_tracker_facts import capture_loading
+    capture_loading(manifest_id, row_to_dict(checklist))
     return {"checklist": row_to_dict(checklist), "manifest": row_to_dict(manifest)}
 
 
