@@ -65,7 +65,8 @@ def test_eval_mocked_orchestration_and_recorded_facts(tracker_env, monkeypatch, 
         assert result["answer"] == ai.REFUSAL and not client.requests
     else:
         for token in case.get("expected", []):
-            assert token.casefold() in result["answer"].casefold()
+            evidence = result["answer"] + (json.dumps(result["blocks"]) if case.get("tool") == "buyers_per_sku" else "")
+            assert token.casefold() in evidence.casefold()
         assert result["tools"] == [case["tool"]]
         assert result["sources"]
         if case.get("not_recorded"):

@@ -123,7 +123,7 @@ def _bars(result, words):
     items.sort(key=lambda i: (-i["buyers"], str(i.get("sku")), str(i.get("unit"))))
     stamps = [i.get("as_of") for i in items if i.get("as_of")]
     return {"type": "bars", "title": words["bars_title"], "unit": words["bars_unit"],
-            "items": [{"label": f"{i.get('sku')} {i.get('unit')}", "value": i["buyers"]} for i in items[:MAX_BARS]],
+            "items": [{"label": f"{i['name']} ({i.get('sku')})" if i.get("name") else str(i.get("sku")), "value": i["buyers"]} for i in items[:MAX_BARS]],
             "source": items[0].get("source") or "Zoho cached SO line_items", "as_of": min(stamps) if stamps else None}
 
 
@@ -139,7 +139,7 @@ def _sanitize(value, key=None):
 
 def build_blocks(results, language, question=""):
     """results: [(tool_name, tool_result)] executed successfully in this request."""
-    words = LABELS["tl" if language == "tl" else "en"]
+    words = LABELS["en"]
     rows, table_meta, tiles, bars, missing = {}, None, [], None, {}
     photo_links, single_links = [], []
 

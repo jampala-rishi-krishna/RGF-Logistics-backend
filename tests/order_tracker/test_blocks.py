@@ -114,9 +114,9 @@ def test_payment_tiles_tagalog_and_decimals(tracker_env):
     env.rows[0].raw_json["invoices"] = [{"invoice_number": "INV-1", "total": "100.50", "balance": 0, "payment_made": 90}]
     tiles = by_type(blocks.build_blocks([("payment_status", run(env, "payment_status", SO))], "tl"), "tiles")[0]
     values = {t["label"]: t["value"] for t in tiles["tiles"]}
-    assert values["Tugma sa invoice?"] == "Hindi tugma" and values["Binayaran"] == "Hindi naka-record"
-    assert values["Kabuuan"] == "₱100.50" and values["Natitira"] == "₱0"
-    assert tiles["chip"] == {"label": "Bayad na", "tone": "positive"}
+    assert values["Matches invoice?"] == "No" and values["Paid on"] == "Not recorded"
+    assert values["Total"] == "₱100.50" and values["Balance"] == "₱0"
+    assert tiles["chip"] == {"label": "Paid", "tone": "positive"}
 
 
 def test_unknown_payment_gives_not_recorded_not_tiles(tracker_env):
@@ -125,7 +125,7 @@ def test_unknown_payment_gives_not_recorded_not_tiles(tracker_env):
     result = blocks.build_blocks([("payment_status", run(env, "payment_status", SO))], "tl")
     assert not by_type(result, "tiles")
     missing = by_type(result, "not_recorded")[0]
-    assert missing["title"] == "Hindi naka-record." and not missing["message"].lower().startswith("not recorded")
+    assert missing["title"] == "Not recorded." and not missing["message"].lower().startswith("not recorded")
 
 
 def test_permit_and_po_copy_not_recorded(tracker_env):
@@ -151,12 +151,12 @@ def test_bars_sorted_capped_and_from_tool(tracker_env):
     result = {"items": [{"sku": f"SKU-{i}", "unit": "kg", "buyers": i, "source": "Zoho cached SO line_items", "as_of": f"2026-10-{10 + i}"} for i in range(1, 12)]}
     bars = by_type(blocks.build_blocks([("buyers_per_sku", result)], "en"), "bars")[0]
     assert [i["value"] for i in bars["items"]] == [11, 10, 9, 8, 7, 6, 5, 4]
-    assert bars["items"][0]["label"] == "SKU-11 kg" and bars["unit"] == "buyers" and bars["as_of"] == "2026-10-11"
+    assert bars["items"][0]["label"] == "SKU-11" and bars["unit"] == "buyers" and bars["as_of"] == "2026-10-11"
     tl = by_type(blocks.build_blocks([("buyers_per_sku", result)], "tl"), "bars")[0]
-    assert tl["unit"] == "mamimili" and tl["title"].startswith("Mga nangungunang SKU")
+    assert tl["unit"] == "buyers" and tl["title"].startswith("Top SKUs")
     real = run(env, "buyers_per_sku", BUYERS)
     real_bars = by_type(blocks.build_blocks([("buyers_per_sku", real)], "en"), "bars")[0]
-    assert real_bars["items"] == [{"label": f"{i['sku']} {i['unit']}", "value": i["buyers"]} for i in real["items"]]
+    assert real_bars["items"] == [{"label": f"{i['name']} ({i['sku']})", "value": i["buyers"]} for i in real["items"]]
     assert by_type(blocks.build_blocks([("buyers_per_sku", {"items": [], "message": "Not recorded - none."})], "en"), "bars") == []
 
 
@@ -166,7 +166,7 @@ def test_photos_action_only_with_photos(tracker_env):
     deliver(env, "Delivered", [{"key": "delivery_photo", "value": 41}])
     proof = run(env, "proof_of_delivery", SO)
     actions = by_type(blocks.build_blocks([("proof_of_delivery", proof)], "tl"), "actions")[0]["actions"]
-    assert actions[0] == {"kind": "photos", "label": "Tingnan ang mga larawan", "link": proof["link"] + "#proof"}
+    assert actions[0] == {"kind": "photos", "label": "See the photos", "link": proof["link"] + "#proof"}
     assert actions[1]["kind"] == "open_order" and actions[1]["link"] == proof["link"]
 
 
@@ -197,11 +197,11 @@ def test_ask_returns_blocks_with_tool_numbers_not_model_numbers(tracker_env, mon
     env = tracker_env
     env.rows[0].raw_json["invoices"] = [{"invoice_number": "INV-9", "total": 22400, "balance": 0, "payment_made": 22400}]
     result, _ = ask(env, monkeypatch, "Bayad na ba ang SO-100?", [("payment_status", SO)])
-    assert result["language"] == "tl" and "999,999" in result["answer"]
+    assert result["language"] == "en" and "999,999" in result["answer"]
     tiles = by_type(result["blocks"], "tiles")[0]
     text = json.dumps(tiles, ensure_ascii=False)
     assert "₱22,400" in text and "999" not in text and "77" not in text
-    assert tiles["chip"]["label"] == "Bayad na"
+    assert tiles["chip"]["label"] == "Paid"
     assert by_type(result["blocks"], "actions")[0]["actions"][0]["link"].startswith("/app/order-tracker?order=SO-100")
 
 

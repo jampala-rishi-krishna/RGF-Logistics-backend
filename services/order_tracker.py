@@ -1,4 +1,4 @@
-"""Scoped Order 360. Current dates read existing memory only; no Zoho loaders.
+"""Scoped Order 360. Cached assigned orders and selected-batch trip facts; no Zoho loaders.
 
 Past-only windows reuse the existing date-scoped history reader behind a byte-
 bounded, single-flight cache. No database schema or write path is introduced.
@@ -24,6 +24,7 @@ MANILA = ZoneInfo("Asia/Manila")
 ROLES = {"admin", "planner", "dispatcher", "sales", "wet_market"}
 history_cache = snapshots.ByteCache(1024 * 1024, 300, 8)
 history_lock = threading.Lock()
+trip_lock = threading.Lock()
 PHONE = re.compile(r"(?<!\w)(?:\+?63[\s-]?|0)9(?:[\s-]?\d){9}(?!\w)")
 
 
@@ -63,7 +64,8 @@ def project(row, historical=False):
     detail = {} if historical else live.cached_detail(oid) or {}
     raw = {**(getattr(row, "raw_json", None) or {}), **detail}
     number = row.salesorder_number or oid
-    kind = str(raw.get("order_type") or getattr(row, "order_type", None) or "SO").upper()
+    from services.order_types import order_type_of
+    kind = order_type_of(row)
     if str(number).upper().startswith("WM-SO"):
         kind = "WM"
     state = {} if historical else live.get_assignment(oid) or {}
@@ -72,10 +74,12 @@ def project(row, historical=False):
             "customer_id": str(raw.get("customer_id") or norm(row.customer_name)),
             "customer_identity": "id" if raw.get("customer_id") else "name fallback",
             "salesperson": getattr(row, "salesperson_name", None) or raw.get("salesperson_name"),
-            "order_type": kind, "date": snapshots.stamp(row.expected_shipment_date),
+            "order_type": kind, "date": snapshots.stamp(state.get("expected_shipment_date") or row.expected_shipment_date),
             "vehicle": state.get("vehicle_id") or getattr(row, "vehicle_id", None),
-            "batch": state.get("assignment_batch_id") or getattr(row, "assignment_batch_id", None),
+            "batch": state.get("assignment_batch_id") or day_model.batch_key(row),
             "assignment_status": state.get("assignment_status") or getattr(row, "assignment_status", None),
+            "driver_id": state.get("driver_id", getattr(row, "driver_id", None)),
+            "helper_ids": state.get("helper_ids", getattr(row, "helper_ids", None)) or [],
             "manifest_id": state.get("manifest_id") or getattr(row, "manifest_id", None),
             "as_of": snapshots.stamp(getattr(row, "synced_at", None) or getattr(row, "updated_at", None)),
             "po_number": safe_text(getattr(row, "customer_po_number", None) or raw.get("customer_po_number") or raw.get("reference_number")),
@@ -93,12 +97,38 @@ def project(row, historical=False):
 
 
 def live_rows(start, end):
-    found = {str(r.id): r for r in live.cached_rows_overlapping(start, end)}
+    # Same assigned working set as Confirmed Orders; never call its provider loader.
+    from services.order_types import order_type_of
+    from services.delivery_status import is_delivered
     for row in live.cached_assigned_records():
-        if row.expected_shipment_date and start <= row.expected_shipment_date <= end:
-            found[str(row.id)] = row
-    # Stream projections: don't duplicate every order's line items for one request.
-    return (project(r) for r in found.values())
+        item = project(row)
+        status = norm(getattr(row, "order_status", None) or (getattr(row, "raw_json", None) or {}).get("status"))
+        if (item["assignment_status"] not in {"assigned", "completed"} or not item["vehicle"]
+                or not item["date"] or not str(start) <= item["date"] <= str(end)
+                or order_type_of(row) not in {"SO", "WM", "PO", "TO"}
+                or status in {"void", "cancelled", "canceled"}
+                or (item["order_type"] in {"SO", "WM"} and status == "draft")
+                or (is_delivered(getattr(row, "raw_json", None) or {}) and item["assignment_status"] != "completed")):
+            continue
+        yield item
+
+
+def ensure_trip_facts(db, rows):
+    """Selected assignments, one batched read on cold/expired/generation-invalid facts."""
+    if db is None:
+        return
+    batches = list(dict.fromkeys(r["batch"] for r in rows if r.get("batch")))
+    with trip_lock:
+        now = datetime.now(timezone.utc)
+        def expired(batch):
+            value = snapshots.current(batch)
+            return not value or (now - datetime.fromisoformat(value["as_of"])).total_seconds() >= 15
+        missing = [b for b in batches if expired(b)]
+        if missing:
+            from services import trip_state
+            for offset in range(0, len(missing), 32):
+                trip_state.load(db, missing[offset:offset + 32], names=True)
+                snapshots.publish(db)
 
 
 def historical_rows(db, start, end):
@@ -141,7 +171,9 @@ def rows_for(user, start, end, db=None):
         if db is None:
             raise HTTPException(503, "Historical records are unavailable.")
         result = chain(result, historical_rows(db, start, min(end, today() - timedelta(days=1))))
-    return (r for r in result if allowed(user, r))
+    result = [r for r in result if allowed(user, r) and r.get("vehicle") and r.get("assignment_status") in {"assigned", "completed"}]
+    ensure_trip_facts(db, [r for r in result if r["date"] >= today().isoformat()])
+    return iter(result)
 
 
 def fact(source, at, value=None, missing=None):
@@ -183,9 +215,9 @@ def location(row, snapshot, stop):
     if (row["date"] != today().isoformat() or row.get("assignment_status") not in {"assigned", "completed"}
             or not snapshot or snapshot["trip"].get("status") != "on_trip" or stop.get("checkout_at")):
         return fact("Cartrack memory / current trip", at, missing="Live location unavailable - only shown while this truck is carrying your order on an active trip.")
-    vehicle = next((v for v in fleet_static_cache.vehicles() if str(v["id"]) == str(row.get("vehicle"))), None)
-    plate = (vehicle or {}).get("plate_no") or row.get("vehicle")
-    gps = live_gps_store.get(str(plate))
+    plate = plate_of(row, snapshot["trip"].get("vehicle"))
+    # Cartrack's poller keys positions by the same normalized registration as Fleet.
+    gps = live_gps_store.get(fleet_static_cache._normalize_plate(str(plate)))
     if not gps:
         return fact("Cartrack memory", None, missing="Not recorded - truck GPS is unmapped or unavailable. Call Logistics.")
     fix = live_gps_store.normalize_gps_time(gps.get("gps_time"))
@@ -218,9 +250,22 @@ def rejected(value):
         return None
 
 
-def plate_of(row):
-    vehicle = next((v for v in fleet_static_cache.vehicles() if str(v["id"]) == str(row.get("vehicle"))), None)
-    return safe_text((vehicle or {}).get("plate_no") or row.get("vehicle"))
+def plate_of(row, trip_vehicle=None):
+    vehicles = fleet_static_cache.vehicles()
+    for candidate in (trip_vehicle, row.get("vehicle")):
+        if candidate is None:
+            continue
+        vehicle = next((v for v in vehicles if str(v["id"]) == str(candidate)
+                        or fleet_static_cache._normalize_plate(v["plate_no"]) == fleet_static_cache._normalize_plate(str(candidate))), None)
+        if vehicle:
+            return safe_text(vehicle["plate_no"])
+    return safe_text(row.get("vehicle") or trip_vehicle)
+
+
+def crew_names(row):
+    from services import staff_directory_cache
+    ids = list(dict.fromkeys([row.get("driver_id"), *row.get("helper_ids", [])]))
+    return [safe_text((staff_directory_cache.get_by_id(i) or {}).get("name")) for i in ids if i is not None]
 
 
 def order_card(row):
@@ -256,8 +301,9 @@ def order_card(row):
     issues = issues_snapshot.get("issues") if issues_snapshot else None
     sections = {
         "status_now": fact("trip workflow read snapshot", at, {"status": status, "truck": plate_of(row),
+                             "trip": row.get("batch"), "crew": crew_names(row),
                              "stop": stop.get("sequence"), "total_stops": len(snapshot.get("stops", {})) if snapshot else None},
-                            None if snapshot else "Not recorded in current memory - ask Logistics to check the trip in Driver Overview."),
+                            None if snapshot else "Trip facts are unavailable. Try Refresh orders."),
         "location": location(row, snapshot, stop),
         "times": fact("so_acknowledgements / trips / trip_stops", at,
                       {"acknowledged_at": (ack or {}).get("at"), "acknowledged_by": safe_text(((ack or {}).get("by") or {}).get("name")),
@@ -337,14 +383,16 @@ def find_orders(user, query, start, end, status=None, db=None, offset=0):
         if needle and needle not in norm(" ".join(str(v or "") for v in [row["number"], row["customer"], row.get("po_number"), card["truck"], card["sections"]["delivery_result"]["value"]["invoice_dr"], *[i.get("invoice_number") for i in row["invoices"]]])):
             continue
         counts["all"] += 1
-        if card["status"] in counts:
+        if card["status"] == "Arrived":
+            counts["Out for delivery"] += 1
+        elif card["status"] in counts:
             counts[card["status"]] += 1
         if is_problem(card):
             counts["problems"] += 1
         if status and status != "all":
             if status == "problems" and not is_problem(card):
                 continue
-            if status != "problems" and card["status"] != status:
+            if status != "problems" and card["status"] != status and not (status == "Out for delivery" and card["status"] == "Arrived"):
                 continue
         status_now = card["sections"]["status_now"]["value"]
         result.append({k: card[k] for k in ("number", "customer", "delivery_date", "order_type", "status", "truck", "last_update", "link")} |
@@ -352,7 +400,7 @@ def find_orders(user, query, start, end, status=None, db=None, offset=0):
                        "total_stops": status_now["total_stops"], "event": latest_event(card)})
     result.sort(key=lambda r: (r["delivery_date"] or "", r["number"]), reverse=True)
     return {"orders": result[offset:offset + 50], "total": len(result), "offset": offset, "counts": counts,
-            "source": "Zoho cached orders / trip workflow read snapshots", "as_of": min((r["last_update"] for r in result if r["last_update"]), default=None),
+            "source": "Confirmed assigned orders / trip workflow", "as_of": min((r["last_update"] for r in result if r["last_update"]), default=None),
             "coverage": "Accessible cached records only; missing or cold records are not proof of no orders.",
             "scope": "All operations orders" if user.role in {"admin", "planner", "dispatcher"} else "Exact salesperson name matches only"}
 
@@ -380,14 +428,15 @@ def buyers_per_sku(user, start, end, filters=None, db=None):
             if key not in groups and len(groups) >= 100:
                 missing += 1
                 continue
-            group = groups.setdefault(key, {"buyers": set(), "as_of": row["as_of"], "identity": row["customer_identity"]})
+            group = groups.setdefault(key, {"name": line.get("name"), "buyers": set(), "as_of": row["as_of"], "identity": row["customer_identity"]})
             if row["customer_identity"] != "id":
                 group["identity"] = "contains customer-name fallbacks; identities may be incomplete"
             if row["as_of"]:
                 group["as_of"] = min(group["as_of"], row["as_of"]) if group["as_of"] else row["as_of"]
             group["buyers"].add(row["customer_id"])
     return {"definition": "Distinct customers per SKU and unit, across accessible cached SO/WM orders; TO excluded.",
-            "items": [{"sku": sku, "unit": unit, "buyers": len(g["buyers"]), "source": "Zoho cached SO line_items", "as_of": g["as_of"], "identity": g["identity"]}
-                      for (sku, unit), g in sorted(groups.items())][:100],
+            "date_from": str(start), "date_to": str(end),
+            "items": [{"sku": sku, "name": g["name"], "unit": unit, "buyers": len(g["buyers"]), "source": "Zoho cached SO line_items", "as_of": g["as_of"], "identity": g["identity"]}
+                      for (sku, unit), g in sorted(groups.items(), key=lambda pair: (-len(pair[1]["buyers"]), pair[0]))][:100],
             "missing_or_incomplete_orders": missing, "coverage": "Cached lines only; not a complete outgoing-orders census.",
             "message": None if groups else "Not recorded - no eligible SKU/customer/unit facts are cached."}

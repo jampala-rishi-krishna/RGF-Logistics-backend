@@ -19,13 +19,13 @@ def tracker_env(monkeypatch):
                "invoices": [{"invoice_number": "000123", "total": 100, "balance": 0, "payment_made": 100}]}
         row = SimpleNamespace(id=oid, salesorder_number=number, customer_name="Fresh Foods", salesperson_name=owner,
                               expected_shipment_date=day, vehicle_id="TRK1", assignment_batch_id="batch-1", assignment_status="assigned",
-                              synced_at=datetime.now(timezone.utc), raw_json=raw, customer_po_number="PO-001", payment_status="paid")
+                              order_status="confirmed", assigned_at=datetime.now(timezone.utc), driver_id=None, helper_ids=[], synced_at=datetime.now(timezone.utc), raw_json=raw, customer_po_number="PO-001", payment_status="paid")
         for key, value in changes.items():
             setattr(row, key, value)
         return row
     rows = [make(), make("two", "Ben Cruz", "SO-200"), make("wm", "Ana Cruz", "WM-SO-300", "WM")]
     monkeypatch.setattr(live, "cached_rows_overlapping", lambda start, end: [r for r in rows if start <= r.expected_shipment_date <= end])
-    monkeypatch.setattr(live, "cached_assigned_records", lambda: [])
+    monkeypatch.setattr(live, "cached_assigned_records", lambda: rows)
     monkeypatch.setattr(live, "cached_detail", lambda oid: None)
     monkeypatch.setattr(live, "get_assignment", lambda oid: {})
     monkeypatch.setattr(tracker.fleet_static_cache, "vehicles", lambda: [{"id": "TRK1", "plate_no": "DCD 8953"}])
