@@ -102,11 +102,11 @@ def trips(date: str | None = None, from_: str | None = Query(None, alias="from")
 
 
 @router.get("/hardcopies")
-def hardcopies(warehouse: str | None = None, driver_id: int | None = None, q: str | None = Query(None, max_length=200), date: str | None = None, db: Session = Depends(get_db)):
-    """Invoice hard copies not yet received: all dates by default, `date` = only trips of that day."""
+def hardcopies(warehouse: str | None = None, driver_id: int | None = None, q: str | None = Query(None, max_length=200), date: str | None = None, collected: bool = False, db: Session = Depends(get_db)):
+    """Outstanding or collected invoice copies; date filters the delivery day, not receipt time."""
     wh = overview.parse_warehouse(warehouse)
     day = _optional_day(date)
-    return overview.cached("hardcopies", (wh, driver_id, q or "", day), lambda: overview.hardcopies(db, wh, driver_id, q, day))
+    return overview.cached("hardcopies", (wh, driver_id, q or "", day, collected), lambda: overview.hardcopies(db, wh, driver_id, q, day, collected))
 
 
 @router.get("/issues")

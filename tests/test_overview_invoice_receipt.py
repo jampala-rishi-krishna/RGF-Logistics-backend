@@ -79,3 +79,32 @@ def test_receipt_closes_legacy_returned_trip(env):
     assert response.status_code == 200, response.text
     with env.Session() as db:
         assert db.execute(select(Trip).where(Trip.batch_id == "E")).scalar_one().status == "closed"
+
+
+def test_received_invoice_moves_to_collected_with_receiver_time_and_delivery_result(env):
+    day, yesterday = seed(env)
+    headers = env.h["dispatcher"]
+    initial = env.client.get("/api/driver-overview/trips/B", headers=headers).json()["invoices"]
+    for invoice in initial[:2]:
+        response = env.client.post(f"/api/driver-overview/invoices/{invoice['item_id']}/receive", headers=headers, json={"idempotency_key": str(uuid.uuid4()), "status": "received"})
+        assert response.status_code == 200, response.text
+    pending = env.client.get("/api/driver-overview/hardcopies", headers=headers).json()
+    assert not {"SO-B1", "SO-B2"} & {r["so_number"] for r in pending["rows"]}
+    response = env.client.get("/api/driver-overview/hardcopies?collected=true", headers=headers)
+    assert response.status_code == 200, response.text
+    collected = response.json()
+    assert collected["total"] == 2 and collected["counts"] == {"received": 2}
+    assert {r["delivery_outcome"] for r in collected["rows"]} == {"Delivered", "Partially delivered"}
+    assert all(r["state_label"] == "Collected" and r["received_by"] == "Dee Dispatcher" and r["since"] and r["delivery_date"] == str(day) for r in collected["rows"])
+    for query in ["q=so b0002", "q=jaymar", "warehouse=METS", f"date={day}"]:
+        result = env.client.get("/api/driver-overview/hardcopies?collected=true&" + query, headers=headers).json()
+        assert result["total"] > 0, query
+    assert env.client.get(f"/api/driver-overview/hardcopies?collected=true&date={yesterday}", headers=headers).json()["total"] == 0
+    # A received item remains authoritative even if an old trip still says on_trip.
+    with env.Session() as db:
+        db.execute(Trip.__table__.update().where(Trip.batch_id == "B").values(status="on_trip"))
+        db.commit()
+    from services import trip_events
+    trip_events.bump()
+    pending = env.client.get("/api/driver-overview/hardcopies", headers=headers).json()
+    assert not {"SO-B1", "SO-B2"} & {r["so_number"] for r in pending["rows"]}

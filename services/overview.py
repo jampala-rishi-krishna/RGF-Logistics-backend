@@ -9,13 +9,14 @@ from __future__ import annotations
 import csv
 import io
 import os
+import re
 import threading
 import time
 from collections import defaultdict
 from datetime import date, datetime, timedelta
 from zoneinfo import ZoneInfo
 
-from sqlalchemy import select
+from sqlalchemy import String, cast, func, or_, select
 from sqlalchemy.orm import Session
 
 from models.trip import ISSUE_PRIORITIES, ISSUE_STATUSES, DriverIssue, FormTemplate, FormTemplateItem, InvoiceHandover, InvoiceHandoverItem, Trip, TripEvent
@@ -791,7 +792,7 @@ def issues_list(db: Session, status: str | None, priority: str | None, q: str | 
 # ---- hard copies: who holds each signed carbon-copy invoice, and since when ---------------------------------------------------
 
 
-def hardcopies(db: Session, warehouse: str | None, driver_id: int | None, q: str | None = None, day: date | None = None) -> dict:
+def hardcopies(db: Session, warehouse: str | None, driver_id: int | None, q: str | None = None, day: date | None = None, collected: bool = False) -> dict:
     """Every invoice hard copy not yet validated as received, ALL dates (or only trips of `day`):
     with the driver (checked out of a stop, handover not submitted) / with the officer (handed over, not validated) /
     missing or discrepancy (validated with a problem, not resolved). `q` = the same search as the Trips list (SO, invoice,
@@ -804,7 +805,7 @@ def hardcopies(db: Session, warehouse: str | None, driver_id: int | None, q: str
 
     def wanted(trip) -> bool:
         return day is None or trip.delivery_date == day
-    trips = db.execute(select(Trip).where(Trip.status.in_(("on_trip", "returned")))).scalars().all()
+    trips = [] if collected else db.execute(select(Trip).where(Trip.status.in_(("on_trip", "returned")))).scalars().all()
     if trips:
         from models.trip import TripStop
 
@@ -814,33 +815,70 @@ def hardcopies(db: Session, warehouse: str | None, driver_id: int | None, q: str
                 continue
             if (warehouse and (_staff_warehouse(trip.driver_staff_id) or str(trip.warehouse or "").upper()) != warehouse) or not wanted(trip):
                 continue
-            out.append({"so_number": stop.so_number, "customer_name": stop.customer_name, "invoice_no": trip_state.invoice_no_of(stop), "state": "with_driver", "state_label": "With the driver",
+            out.append({"delivery_outcome": stop.outcome, "so_number": stop.so_number, "customer_name": stop.customer_name, "invoice_no": trip_state.invoice_no_of(stop), "state": "with_driver", "state_label": "With the driver",
                         "holder": staff_name(trip.driver_staff_id), "since": iso(stop.checkout_at), "batch_id": trip.batch_id, "delivery_date": trip.delivery_date.isoformat(), "note": None,
                         **trip_fields(trip), "so_id": stop.so_id})
-    found = db.execute(select(InvoiceHandoverItem, InvoiceHandover, Trip).join(InvoiceHandover, InvoiceHandover.id == InvoiceHandoverItem.handover_id).join(Trip, Trip.id == InvoiceHandover.trip_id)
-                       .where(InvoiceHandoverItem.officer_status != "received")).all()
-    officer_ids = {h.officer_user_id for _i, h, _t in found if h.officer_user_id is not None}
+    from models.trip import TripStop
+    stmt = (select(InvoiceHandoverItem, InvoiceHandover, Trip, TripStop.outcome)
+            .join(InvoiceHandover, InvoiceHandover.id == InvoiceHandoverItem.handover_id)
+            .join(Trip, Trip.id == InvoiceHandover.trip_id)
+            .outerjoin(TripStop, (TripStop.trip_id == Trip.id) & (TripStop.so_id == InvoiceHandoverItem.so_id)))
+    if collected:
+        stmt = stmt.where(InvoiceHandoverItem.officer_status == "received")
+        if day is not None:
+            stmt = stmt.where(Trip.delivery_date == day)
+        if driver_id is not None:
+            stmt = stmt.where(Trip.driver_staff_id == driver_id)
+        if warehouse:
+            matching = [p["id"] for p in staff_directory_cache.all_staff() if _staff_warehouse(p["id"]) == warehouse]
+            stmt = stmt.where(or_(Trip.driver_staff_id.in_(matching), func.upper(Trip.warehouse) == warehouse))
+        if needle:
+            named = [p["id"] for p in staff_directory_cache.all_staff() if day_model.matches(needle, [p.get("name")])]
+            loose = re.sub(r"\d+", lambda m: str(int(m[0])), needle)
+            pattern = "%" + "%".join(loose) + "%"
+            stmt = stmt.where(or_(func.lower(InvoiceHandoverItem.so_number).like(pattern),
+                                  func.lower(InvoiceHandoverItem.invoice_no).like(pattern),
+                                  func.lower(InvoiceHandoverItem.customer_name).like(pattern),
+                                  func.lower(Trip.vehicle).like(pattern), Trip.driver_staff_id.in_(named),
+                                  *[cast(Trip.helper_staff_ids, String).contains(str(sid)) for sid in named]))
+        stmt = stmt.order_by(InvoiceHandoverItem.officer_checked_at.desc(), InvoiceHandoverItem.id.desc()).limit(501)
+    else:
+        # Include received items of active legacy trips for authority/deduplication;
+        # otherwise they can reappear as "With driver" from their checkout rows.
+        stmt = stmt.where(or_(InvoiceHandoverItem.officer_status != "received", Trip.id.in_([t.id for t in trips])))
+    found = db.execute(stmt).all()
+    truncated = collected and len(found) > 500
+    if collected:
+        found = found[:500]
+    authoritative = {(trip.batch_id, item.so_id) for item, _h, trip, _outcome in found}
+    officer_ids = {uid for item, h, _t, _outcome in found for uid in (h.officer_user_id, item.officer_user_id) if uid is not None}
     names = users_by_id(db, officer_ids)
-    for item, handover, trip in found:
+    for item, handover, trip, outcome in found:
+        if not collected and item.officer_status == "received":
+            continue
         if driver_id is not None and trip.driver_staff_id != driver_id:
             continue
         if (warehouse and (_staff_warehouse(trip.driver_staff_id) or str(trip.warehouse or "").upper()) != warehouse) or not wanted(trip):
             continue
-        if item.officer_status == "pending":
+        if item.officer_status == "received":
+            state, label = "received", "Collected"
+            holder = names.get(item.officer_user_id, {}).get("name") or "Logistics"
+            since = item.resolved_at or item.officer_checked_at
+        elif item.officer_status == "pending":
             officer = names.get(handover.officer_user_id, {}).get("name") if handover.officer_user_id is not None else None
             state, label, holder, since = ("with_officer", "With the officer: to validate", officer or "Logistics officer", handover.submitted_at) if item.handed_over else ("not_handed_over", "Not handed over by the driver", staff_name(trip.driver_staff_id), handover.submitted_at)
         else:
             state, label, holder, since = item.officer_status, "Missing" if item.officer_status == "missing" else "Discrepancy", staff_name(trip.driver_staff_id), item.officer_checked_at
-        out.append({"item_id": item.id, "handed_over": item.handed_over, "so_number": item.so_number, "customer_name": item.customer_name, "invoice_no": item.invoice_no, "state": state, "state_label": label, "holder": holder, "since": iso(since),
+        out.append({"delivery_outcome": outcome, "received_by": names.get(item.officer_user_id, {}).get("name"), "item_id": item.id, "handed_over": item.handed_over, "so_number": item.so_number, "customer_name": item.customer_name, "invoice_no": item.invoice_no, "state": state, "state_label": label, "holder": holder, "since": iso(since),
                     "batch_id": trip.batch_id, "delivery_date": trip.delivery_date.isoformat(), "note": item.officer_note or item.crew_note, **trip_fields(trip), "so_id": item.so_id})
     if needle:
         out = [r for r in out if day_model.matches(needle, [r["so_number"], r["invoice_no"], r["customer_name"], r["driver_name"], *r["helpers"], r["vehicle"]])]
     # A legacy returned trip can already have a handover. Its handover item is
     # authoritative; do not also show the same invoice as still with its driver.
-    handed = {(r["batch_id"], r["so_id"]) for r in out if r["state"] != "with_driver"}
+    handed = authoritative
     out = [r for r in out if r["state"] != "with_driver" or (r["batch_id"], r["so_id"]) not in handed]
-    out.sort(key=lambda r: r["since"] or "")
+    out.sort(key=lambda r: r["since"] or "", reverse=collected)
     counts: dict[str, int] = defaultdict(int)
     for row in out:
         counts[row["state"]] += 1
-    return {"generated_at": trip_events.now_utc().isoformat(), "total": len(out), "counts": dict(counts), "rows": out}
+    return {"generated_at": trip_events.now_utc().isoformat(), "total": len(out), "counts": dict(counts), "rows": out, "collected": collected, "truncated": truncated}
