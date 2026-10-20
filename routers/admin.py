@@ -7,14 +7,14 @@ from html import escape
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
-from sqlalchemy import select
+from sqlalchemy import select, func, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from auth.dependencies import CurrentUser, require_role
 from auth.security import hash_password, password_problem, unusable_password_hash
 from database import get_db
-from models.user import User
+from models.user import User, UserInvite
 from services import app_settings, gmail_sender, memory_tables, staff_directory_cache, user_cache, user_invites, zoho_usage
 from services.phone_numbers import ph_phone_digits
 from services.staff_roles import crew_kind
@@ -464,6 +464,48 @@ def create_user(body: CreateUserBody, db: Session = Depends(get_db), admin: Curr
 
 
 STAFF_OPTION_ROLES = ("driver", "helper")
+
+
+class EditUserBody(BaseModel):
+    full_name: str
+    email: str
+    phone: str | None = None
+    status: str
+
+
+@usage_router.patch("/users/{user_id}")
+def edit_user(user_id: int, body: EditUserBody, db: Session = Depends(get_db), admin: CurrentUser = Depends(require_role("admin"))):
+    """Correct an existing login without replacing its identity, role or staff/history links."""
+    user = _user_or_404(db, user_id)
+    name, email = body.full_name.strip(), body.email.strip().lower()
+    if len(name) < 2 or "@" not in email or " " in email or len(email) < 5:
+        raise HTTPException(400, "Enter a full name and valid email address.")
+    if body.status not in ("active", "disabled"):
+        raise HTTPException(400, "status must be active or disabled.")
+    if user.id == admin.id and body.status == "disabled":
+        raise HTTPException(400, "You cannot disable your own account.")
+    phone = ph_phone_digits(body.phone)
+    if (body.phone or "").strip() and phone is None:
+        raise HTTPException(400, "phone must be a Philippine mobile number (09XXXXXXXXX or +639XXXXXXXXX).")
+    if db.execute(select(User.id).where(func.lower(User.email) == email, User.id != user_id)).first():
+        raise HTTPException(409, "A user with this email already exists.")
+    if phone is not None and db.execute(select(User.id).where(User.phone == phone, User.id != user_id)).first():
+        raise HTTPException(409, "A user with this phone number already exists.")
+    email_changed = email != user.email.strip().lower()
+    user.full_name, user.email, user.phone, user.status = name, email, phone, body.status
+    if email_changed:
+        # Old test credentials and links must not remain usable with a corrected identity.
+        user.password_hash = unusable_password_hash()
+        user.must_change_password = False
+        db.execute(update(UserInvite).where(UserInvite.user_id == user.id, UserInvite.used_at.is_(None)).values(expires_at=user_invites._now()))
+    try:
+        db.commit()
+    except IntegrityError:
+        db.rollback()
+        raise HTTPException(409, "A user with this email or phone already exists.") from None
+    user_cache.invalidate(user.id)
+    logger.info("[AUTH] user_id=%s account corrected by admin_id=%s", user.id, admin.id)
+    return {**_user_row(user), "password_reset_required": email_changed}
 
 
 @usage_router.get("/staff-options")
