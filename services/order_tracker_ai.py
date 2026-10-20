@@ -145,6 +145,15 @@ def evidence(value, link=None):
     return out
 
 
+def safe_blocks(executed, language, question):
+    """Blocks are optional presentation; a builder fault must never turn a sourced answer into an error."""
+    try:
+        return order_tracker_blocks.build_blocks(executed, language, question)
+    except Exception:
+        logger.warning(json.dumps({"event": "order_tracker_blocks_failed"}))
+        return []
+
+
 def log_question(question):
     # Questions are logged, never tool payloads. Scrub common credential / token patterns.
     text = tracker.safe_text(question, 300)
@@ -202,7 +211,7 @@ async def ask(user, question, start, end, order=None, db=None):
                                 _answers[answer_id] = (user.id, now)
                             return {"answer_id": answer_id, "answer": tracker.safe_text(reply or "Not recorded", 6000),
                                     "sources": list(unique.values())[:20], "tools": called, "not_recorded": missing,
-                                    "blocks": [] if no_facts else order_tracker_blocks.build_blocks(executed, language, question),
+                                    "blocks": [] if no_facts else safe_blocks(executed, language, question),
                                     "language": language}
                         if len(called) + len(calls) > MAX_TOOLS:
                             raise HTTPException(422, "This question needs too many lookups. Ask about one order or a smaller range.")

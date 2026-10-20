@@ -238,3 +238,11 @@ def test_no_tool_answer_has_no_blocks(tracker_env, monkeypatch):
     monkeypatch.setattr(ai.openai_client, "_client", lambda: client)
     result = asyncio.run(ai.ask(env.user, "Is SO-100 paid?", env.day, env.day))
     assert result["blocks"] == [] and result["not_recorded"] is True
+
+
+def test_builder_fault_keeps_the_sourced_answer(tracker_env, monkeypatch):
+    def boom(*args, **kwargs):
+        raise RuntimeError("builder bug")
+    monkeypatch.setattr(blocks, "build_blocks", boom)
+    result, _ = ask(tracker_env, monkeypatch, "Which orders are out today?", [("find_orders", FIND)])
+    assert result["blocks"] == [] and result["sources"] and result["answer"]
