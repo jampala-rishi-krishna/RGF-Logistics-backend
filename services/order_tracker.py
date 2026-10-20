@@ -323,15 +323,26 @@ def latest_event(card):
     return None
 
 
+def is_problem(card):
+    return card["status"] in {"Partly delivered", "Not delivered"} or bool(card["sections"]["problems"]["value"])
+
+
 def find_orders(user, query, start, end, status=None, db=None, offset=0):
     result = []
+    # Quick-filter counts come from the same scoped, searched rows already projected here: no extra reads.
+    counts = {"all": 0, "Out for delivery": 0, "Delivered": 0, "problems": 0}
     for row in rows_for(user, start, end, db):
         needle = norm(query)
         card = order_card(row)
         if needle and needle not in norm(" ".join(str(v or "") for v in [row["number"], row["customer"], row.get("po_number"), card["truck"], card["sections"]["delivery_result"]["value"]["invoice_dr"], *[i.get("invoice_number") for i in row["invoices"]]])):
             continue
+        counts["all"] += 1
+        if card["status"] in counts:
+            counts[card["status"]] += 1
+        if is_problem(card):
+            counts["problems"] += 1
         if status and status != "all":
-            if status == "problems" and card["status"] not in {"Partly delivered", "Not delivered"} and not card["sections"]["problems"]["value"]:
+            if status == "problems" and not is_problem(card):
                 continue
             if status != "problems" and card["status"] != status:
                 continue
@@ -340,7 +351,7 @@ def find_orders(user, query, start, end, status=None, db=None, offset=0):
                       {"payment": card["sections"]["payment"]["value"]["status"], "stop": status_now["stop"],
                        "total_stops": status_now["total_stops"], "event": latest_event(card)})
     result.sort(key=lambda r: (r["delivery_date"] or "", r["number"]), reverse=True)
-    return {"orders": result[offset:offset + 50], "total": len(result), "offset": offset,
+    return {"orders": result[offset:offset + 50], "total": len(result), "offset": offset, "counts": counts,
             "source": "Zoho cached orders / trip workflow read snapshots", "as_of": min((r["last_update"] for r in result if r["last_update"]), default=None),
             "coverage": "Accessible cached records only; missing or cold records are not proof of no orders.",
             "scope": "All operations orders" if user.role in {"admin", "planner", "dispatcher"} else "Exact salesperson name matches only"}

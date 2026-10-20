@@ -249,3 +249,17 @@ def test_list_rows_carry_stop_and_latest_event_and_card_area(tracker_env):
     tracker.snapshots.facts.clear()
     row = tracker.find_orders(env.user, "SO-100", env.day, env.day)["orders"][0]
     assert row["event"] is None and row["stop"] is None and row["total_stops"] is None
+
+
+def test_quick_filter_counts_come_from_the_same_scoped_rows(tracker_env):
+    env = tracker_env
+    every = tracker.find_orders(env.user, "", env.day, env.day)
+    assert every["counts"]["all"] == every["total"]
+    out = tracker.find_orders(env.user, "", env.day, env.day, "Out for delivery")
+    # Counts ignore the selected status (so every button can show its number) but respect search and scope.
+    assert out["counts"] == every["counts"] and out["total"] == every["counts"]["Out for delivery"]
+    assert tracker.find_orders(env.user, "no-such-order", env.day, env.day)["counts"] == {"all": 0, "Out for delivery": 0, "Delivered": 0, "problems": 0}
+    env.snapshot["stops"]["one"].update(outcome="Partially delivered", status="checked_out", checkout_at=env.now)
+    env.save()
+    counts = tracker.find_orders(env.user, "", env.day, env.day)["counts"]
+    assert counts["problems"] == tracker.find_orders(env.user, "", env.day, env.day, "problems")["total"] >= 1
