@@ -16,7 +16,7 @@ from fastapi import HTTPException
 from fastapi.concurrency import run_in_threadpool
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
-from services import openai_client, order_tracker as tracker
+from services import openai_client, order_tracker as tracker, order_tracker_blocks
 
 logger = logging.getLogger("order_tracker")
 MAX_TOOLS, TIMEOUT, MAX_USERS = 6, 30, 1000
@@ -157,13 +157,16 @@ async def ask(user, question, start, end, order=None, db=None):
     limit(user.id)
     start, end = tracker.dates(start, end)
     called, sources, missing = [], [], False
+    executed = []  # (tool, result) for this request only; feeds the structured blocks.
+    language = order_tracker_blocks.detect_language(question)
     answer_id = uuid.uuid4().hex
     started = time.perf_counter()
     outcome = "error"
     try:
         if MUTATION.search(question):
             outcome = "refused"
-            return {"answer_id": answer_id, "answer": REFUSAL, "sources": [], "tools": [], "not_recorded": False}
+            return {"answer_id": answer_id, "answer": REFUSAL, "sources": [], "tools": [], "not_recorded": False,
+                    "blocks": [], "language": language}
         if order:
             # Verify selected-card access before sending even its reference to the provider.
             tracker.get_order(user, order, start, end, db)
@@ -183,7 +186,8 @@ async def ask(user, question, start, end, order=None, db=None):
                         calls = [item for item in response.output or [] if getattr(item, "type", None) == "function_call"]
                         if not calls:
                             reply = openai_client.extract_text(response)
-                            if not called or not sources:
+                            no_facts = not called or not sources
+                            if no_facts:
                                 reply = "Not recorded - no sourced platform facts were returned. Call Logistics."
                                 missing = True
                             outcome = "answered"
@@ -197,7 +201,9 @@ async def ask(user, question, start, end, order=None, db=None):
                                     _answers.popitem(last=False)
                                 _answers[answer_id] = (user.id, now)
                             return {"answer_id": answer_id, "answer": tracker.safe_text(reply or "Not recorded", 6000),
-                                    "sources": list(unique.values())[:20], "tools": called, "not_recorded": missing}
+                                    "sources": list(unique.values())[:20], "tools": called, "not_recorded": missing,
+                                    "blocks": [] if no_facts else order_tracker_blocks.build_blocks(executed, language, question),
+                                    "language": language}
                         if len(called) + len(calls) > MAX_TOOLS:
                             raise HTTPException(422, "This question needs too many lookups. Ask about one order or a smaller range.")
                         inputs.extend(response.output)
@@ -209,12 +215,18 @@ async def ask(user, question, start, end, order=None, db=None):
                                 # SQLAlchemy session stays on this sequential request; tool calls never run in parallel.
                                 result = await run_in_threadpool(execute, call.name, json.loads(call.arguments), user, start, end, db)
                             except (HTTPException, ValidationError, ValueError, TypeError) as exc:
+                                ok = False
                                 result = {"state": "not_recorded", "message": "Not recorded or not accessible for this scope / date range.",
                                           "source": "Order Tracker scope / validation", "as_of": None}
+                            else:
+                                ok = True
                             packed = json.dumps(result, default=str, ensure_ascii=False)
                             if len(packed.encode()) > 24000:
                                 result = {"state": "not_recorded", "message": "Not recorded in this answer - narrow the search to one order.", "source": "Order Tracker result limit", "as_of": None}
                                 packed = json.dumps(result)
+                                ok = False
+                            if ok:
+                                executed.append((call.name, result))
                             new_sources = evidence(result)
                             sources.extend(new_sources)
                             missing = missing or any(s["not_recorded"] for s in new_sources)

@@ -296,7 +296,7 @@ def order_card(row):
         sections["customer_rules"] = fact("client_delivery_constraints (existing assignment-options read)", rules["as_of"],
                                          {"recorded_rules": rules["rules"], "so_notes": row.get("notes")})
     return {"id": row["id"], "number": row["number"], "customer": row["customer"], "delivery_date": row["date"],
-            "order_type": row["order_type"], "status": status, "truck": plate_of(row),
+            "order_type": row["order_type"], "status": status, "truck": plate_of(row), "area": row.get("area"),
             "last_update": at or row["as_of"], "sections": sections,
             "link": "/app/order-tracker?order=" + quote(row["number"], safe="") + "&from=" + str(row["date"]) + "&to=" + str(row["date"]),
             "contact": "Call Logistics"}
@@ -307,6 +307,20 @@ def get_order(user, number, start, end, db=None):
     if row is None:
         raise HTTPException(404, "Order not found in your accessible cached records.")
     return order_card(row)
+
+
+FINAL_EVENTS = {"Delivered": "delivered", "Partly delivered": "partly delivered", "Not delivered": "not delivered"}
+
+
+def latest_event(card):
+    """Latest recorded journey event for the list meta line, from times already on the card."""
+    times = card["sections"]["times"]["value"] or {}
+    if card["status"] in FINAL_EVENTS and times.get("checkout_at"):
+        return {"label": FINAL_EVENTS[card["status"]], "at": times["checkout_at"]}
+    for key, label in (("arrived", "arrived"), ("left_warehouse", "left warehouse"), ("acknowledged_at", "loaded")):
+        if times.get(key):
+            return {"label": label, "at": times[key]}
+    return None
 
 
 def find_orders(user, query, start, end, status=None, db=None, offset=0):
@@ -321,8 +335,10 @@ def find_orders(user, query, start, end, status=None, db=None, offset=0):
                 continue
             if status != "problems" and card["status"] != status:
                 continue
+        status_now = card["sections"]["status_now"]["value"]
         result.append({k: card[k] for k in ("number", "customer", "delivery_date", "order_type", "status", "truck", "last_update", "link")} |
-                      {"payment": card["sections"]["payment"]["value"]["status"]})
+                      {"payment": card["sections"]["payment"]["value"]["status"], "stop": status_now["stop"],
+                       "total_stops": status_now["total_stops"], "event": latest_event(card)})
     result.sort(key=lambda r: (r["delivery_date"] or "", r["number"]), reverse=True)
     return {"orders": result[offset:offset + 50], "total": len(result), "offset": offset,
             "source": "Zoho cached orders / trip workflow read snapshots", "as_of": min((r["last_update"] for r in result if r["last_update"]), default=None),

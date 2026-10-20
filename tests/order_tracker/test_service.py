@@ -230,3 +230,22 @@ def test_tracker_drive_view_never_retries_metadata_writes(tracker_env, monkeypat
     response = media.get_media(41, "full", None, env.user, SimpleNamespace(get=lambda *a: photo), read_only)
     assert response.headers["Cache-Control"] == "private, no-store"
     assert response.headers["Vary"] == "Authorization"
+
+
+def test_list_rows_carry_stop_and_latest_event_and_card_area(tracker_env):
+    env = tracker_env
+    row = tracker.find_orders(env.user, "SO-100", env.day, env.day)["orders"][0]
+    assert row["stop"] == 1 and row["total_stops"] == 1
+    assert row["event"] == {"label": "left warehouse", "at": env.now}
+    assert tracker.get_order(env.user, "SO-100", env.day, env.day)["area"] == "Bulacan"
+    env.snapshot["stops"]["one"].update(checkin_at=env.now)
+    env.save()
+    assert tracker.find_orders(env.user, "SO-100", env.day, env.day)["orders"][0]["event"]["label"] == "arrived"
+    env.snapshot["stops"]["one"].update(outcome="Partially delivered", status="checked_out", checkout_at="2030-01-01T00:00:00+00:00")
+    env.save()
+    assert tracker.find_orders(env.user, "SO-100", env.day, env.day)["orders"][0]["event"] == {"label": "partly delivered", "at": "2030-01-01T00:00:00+00:00"}
+    env.snapshot["trip"] = {"status": "pending"}; env.snapshot["stops"] = {}; env.save()
+    assert tracker.find_orders(env.user, "SO-100", env.day, env.day)["orders"][0]["event"]["label"] == "loaded"
+    tracker.snapshots.facts.clear()
+    row = tracker.find_orders(env.user, "SO-100", env.day, env.day)["orders"][0]
+    assert row["event"] is None and row["stop"] is None and row["total_stops"] is None
