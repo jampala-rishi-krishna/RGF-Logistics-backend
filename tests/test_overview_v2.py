@@ -262,9 +262,9 @@ def test_trip_drawer_additions(env):
     assert [i["status"] for i in tl["issues"]] == ["submitted", "resolved"] and tl["issues"][0]["photos"][0]["photo_id"] == 31 and tl["issues"][0]["batch_id"] == "A"
     issue_keys = set(get(env, "/issues?status=all")["issues"][0])
     assert set(tl["issues"][0]) == issue_keys  # exactly like /issues items
-    assert tl["other_days"] == [{"batch_id": "E", "date": yesterday.isoformat(), "vehicle": "NAA1234", "trip_number": 1, "step": tl["other_days"][0]["step"], "tile": "back"}]
+    assert "other_days" not in tl
     b = get(env, "/trips/B")
-    assert [i["status"] for i in b["invoices"]] == ["with_officer"] * 3 and b["tile"] == "back" and b["other_days"] == []
+    assert [i["status"] for i in b["invoices"]] == ["with_officer"] * 3 and b["tile"] == "back" and "other_days" not in b
     with env.Session() as db:
         db.execute(InvoiceHandoverItem.__table__.update().where(InvoiceHandoverItem.so_id == "b2").values(officer_status="discrepancy", officer_note="total differs", officer_user_id=env.officer, officer_checked_at=datetime.now(timezone.utc)))
         db.commit()

@@ -132,7 +132,8 @@ def ensure_trip_facts(db, rows):
 
 
 def historical_rows(db, start, end):
-    key = (str(start), str(end))
+    from services import trip_events
+    key = (str(start), str(end), trip_events.generation())
     with history_lock:
         cached = history_cache.get(key)
         if cached is not None:

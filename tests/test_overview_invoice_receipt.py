@@ -1,0 +1,81 @@
+import uuid
+
+import pytest
+from sqlalchemy import select
+
+from auth.dependencies import CurrentUser
+from models.trip import InvoiceHandoverItem, Trip, TripEvent, TripStop
+from routers import driver
+from services import order_tracker, order_tracker_facts
+from tests import trip_test_support as t
+from tests.test_overview import env, seed
+
+
+@pytest.mark.parametrize("role", ["planner", "dispatcher", "admin"])
+def test_receipt_refreshes_overview_mobile_and_tracker_without_changing_outcome(env, monkeypatch, role):
+    day, _ = seed(env)
+    uid = t.make_user(env, name="Invoice Receiver", email=f"{role}@example.test", role=role)
+    headers = t.bearer(uid, role)
+    env.app.include_router(driver.router)
+    signals = []
+    from services.ws_manager import manager
+    async def broadcast(value): signals.append(value)
+    monkeypatch.setattr(manager, "broadcast", broadcast)
+    before = env.client.get("/api/driver-overview/trips/B", headers=headers).json()
+    items = before["invoices"]
+    assert all(i["status"] == "with_officer" and i["item_id"] for i in items)
+    order_tracker.history_cache.put("test-receipt", {"stale": True})
+    for item in items:
+        body = {"idempotency_key": str(uuid.uuid4()), "status": "received"}
+        url = f"/api/driver-overview/invoices/{item['item_id']}/receive"
+        response = env.client.post(url, headers=headers, json=body)
+        assert response.status_code == 200, response.text
+        assert env.client.post(url, headers=headers, json=body).json()["replayed"]
+    assert order_tracker.history_cache.get("test-receipt") is None
+    assert signals and all(s == {"type": "TRIP_STATE_CHANGED"} for s in signals)
+    after = env.client.get("/api/driver-overview/trips/B", headers=headers).json()
+    assert after["trip"]["status"] == "closed"
+    assert all(i["status"] == "received" for i in after["invoices"])
+    assert [o["stop"]["checkout"]["outcome"] for o in after["orders"]] == [o["stop"]["checkout"]["outcome"] for o in before["orders"]]
+    assert not [r for r in env.client.get("/api/driver-overview/hardcopies", headers=headers).json()["rows"] if r["batch_id"] == "B"]
+    mobile = env.client.get("/api/driver/assignments/B?driver_id=10", headers=env.h["admin"])
+    assert mobile.status_code == 200, mobile.text
+    assert mobile.json()["trip"]["status"] == "closed"
+    assert all(i["officer_status"] == "received" for i in mobile.json()["invoice_handover_items"])
+    from models.sales_order_history import SalesOrderHistory
+    with env.Session() as db:
+        rows = list(db.execute(select(SalesOrderHistory).where(SalesOrderHistory.assignment_batch_id == "B")).scalars())
+        monkeypatch.setattr(order_tracker.live, "cached_assigned_records", lambda: rows)
+        monkeypatch.setattr(order_tracker.live, "get_assignment", lambda _: {})
+        monkeypatch.setattr(order_tracker.live, "cached_detail", lambda _: None)
+        order_tracker_facts.facts.clear()
+        card = order_tracker.get_order(CurrentUser(uid, "receiver@example.test", "admin", "Receiver", "active"), "SO-B1", day, day, db)
+        assert card["status"] == "Delivered"
+        assert card["sections"]["proof"]["value"]["officer_invoice"]["status"] == "received"
+        assert set(db.execute(select(TripEvent.role).where(TripEvent.batch_id == "B", TripEvent.event_type == "invoice_resolved")).scalars()) == {role}
+
+
+def test_receipt_rejects_unhanded_invoice_and_other_roles(env):
+    seed(env)
+    with env.Session() as db:
+        item = db.execute(select(InvoiceHandoverItem).where(InvoiceHandoverItem.so_id == "b1")).scalar_one()
+        item.handed_over = False
+        item_id = item.id
+        db.commit()
+    url = f"/api/driver-overview/invoices/{item_id}/receive"
+    for role in ["driver", "helper", "warehouse", "sales", "wet_market", "logistics_officer"]:
+        uid = t.make_user(env, name=role, email=f"{role}@example.test", role=role)
+        assert env.client.post(url, headers=t.bearer(uid, role), json={"status": "received"}).status_code == 403
+    assert env.client.post(url, headers=env.h["dispatcher"], json={"status": "received"}).status_code == 409
+    with env.Session() as db:
+        assert db.get(InvoiceHandoverItem, item_id).officer_status == "pending"
+
+
+def test_receipt_closes_legacy_returned_trip(env):
+    seed(env)
+    with env.Session() as db:
+        item_id = db.execute(select(InvoiceHandoverItem.id).where(InvoiceHandoverItem.so_id == "e1")).scalar_one()
+    response = env.client.post(f"/api/driver-overview/invoices/{item_id}/receive", headers=env.h["dispatcher"], json={"idempotency_key": str(uuid.uuid4()), "status": "received"})
+    assert response.status_code == 200, response.text
+    with env.Session() as db:
+        assert db.execute(select(Trip).where(Trip.batch_id == "E")).scalar_one().status == "closed"

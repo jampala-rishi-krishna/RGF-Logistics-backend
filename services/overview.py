@@ -321,7 +321,7 @@ def _trip_summary(batch: dict) -> dict:
 
 
 def driver_detail(db: Session, staff_id: int, start: date, end: date) -> dict:
-    # legacy for Overview v2: the old person panel; v2 uses trip_detail() other_days + search. Kept for old clients.
+    # legacy for Overview v2: the old person panel; v2 uses the calendar and search. Kept for old clients.
     staff = staff_directory_cache.get_by_id(staff_id)
     data = Data(db, start, end)
     mine = [b for b in data.filtered() if b["driver_id"] == staff_id or staff_id in b["helper_ids"]]
@@ -683,7 +683,7 @@ def _invoice_entry(order: dict) -> dict | None:
     if item is not None:
         officer_status = str(item.get("officer_status") or "pending").lower()
         status = ("with_officer" if item.get("handed_over") else "not_handed_over") if officer_status == "pending" else officer_status
-        return {"so_id": order["so_id"], "so_number": order["so_number"], "invoice_no": item.get("invoice_no") or checkout.get("invoice_no"), "status": status,
+        return {"item_id": item.get("item_id"), "handed_over": item.get("handed_over"), "so_id": order["so_id"], "so_number": order["so_number"], "invoice_no": item.get("invoice_no") or checkout.get("invoice_no"), "status": status,
                 "officer_name": (item.get("checked_by") or {}).get("name") if item.get("checked_at") else None, "checked_at": item.get("checked_at"), "officer_note": item.get("officer_note")}
     if stop is not None and stop.get("status") == "checked_out":
         return {"so_id": order["so_id"], "so_number": order["so_number"], "invoice_no": checkout.get("invoice_no"), "status": "with_driver", "officer_name": None, "checked_at": None, "officer_note": None}
@@ -691,9 +691,9 @@ def _invoice_entry(order: dict) -> dict | None:
 
 
 def trip_detail(db: Session, batch_id: str, stale_minutes: int | None = None) -> dict:
-    """GET /trips/{batch_id}: the full timeline (every existing key) + step, tile, attention, invoices, issues, other_days, and per
+    """GET /trips/{batch_id}: the full timeline (every existing key) + step, tile, attention, invoices, issues, and per
     order `flags` + `photos`. Reads: the timeline's own reads, the batch's facts (day_model.load_batch), its driver_issues rows and the
-    driver's batches of the 7 days before the trip (day_model.load with staff_id). All inside the 15 s cache."""
+    driver's same-day batches for trip numbering (day_model.load with staff_id). All inside the 15 s cache."""
     from services.trip_timeline import build_timeline
 
     stale = stale_minutes or stale_minutes_default()
@@ -723,15 +723,11 @@ def trip_detail(db: Session, batch_id: str, stale_minutes: int | None = None) ->
     })
     driver_id = facts.driver_id if facts.driver_id is not None else next((c["id"] for c in timeline["crew"] if c["role"] == "driver"), None)
     day = facts.date or (date.fromisoformat(timeline["batch"]["delivery_date"]) if timeline["batch"].get("delivery_date") else None)
-    other_days, number = [], (1, 1)
+    number = (1, 1)
     if driver_id is not None and day is not None:
-        mine = [f for f in day_model.load(db, day - timedelta(days=7), day, staff_id=driver_id).values() if f.driver_id == driver_id]
+        mine = [f for f in day_model.load(db, day, day, staff_id=driver_id).values() if f.driver_id == driver_id]
         numbers = day_model.trip_numbers(mine + ([facts] if facts.orders and all(f.batch_id != batch_id for f in mine) else []))
         number = numbers.get(batch_id, number)
-        for f in sorted((f for f in mine if f.batch_id != batch_id), key=lambda f: (f.date or date.min, numbers[f.batch_id][0]), reverse=True):
-            s = day_model.driver_step(f)
-            other_days.append({"batch_id": f.batch_id, "date": f.date.isoformat() if f.date else None, "vehicle": f.vehicle, "trip_number": numbers[f.batch_id][0], "step": s, "tile": day_model.tile_of(s)})
-    timeline["other_days"] = other_days
     day_model.photo_capture_times(db, [p for o in timeline["orders"] for p in o["photos"]])
     timeline["batch"].update({"trip_number": number[0], "trips_on_date": number[1], "kg": facts.kg, "kg_complete": facts.kg_complete, "kg_unknown_lines": facts.kg_unknown_lines, "packs": facts.packs,
                               "warehouse": timeline["batch"].get("warehouse") or _staff_warehouse(driver_id)})
@@ -835,7 +831,7 @@ def hardcopies(db: Session, warehouse: str | None, driver_id: int | None, q: str
             state, label, holder, since = ("with_officer", "With the officer: to validate", officer or "Logistics officer", handover.submitted_at) if item.handed_over else ("not_handed_over", "Not handed over by the driver", staff_name(trip.driver_staff_id), handover.submitted_at)
         else:
             state, label, holder, since = item.officer_status, "Missing" if item.officer_status == "missing" else "Discrepancy", staff_name(trip.driver_staff_id), item.officer_checked_at
-        out.append({"so_number": item.so_number, "customer_name": item.customer_name, "invoice_no": item.invoice_no, "state": state, "state_label": label, "holder": holder, "since": iso(since),
+        out.append({"item_id": item.id, "handed_over": item.handed_over, "so_number": item.so_number, "customer_name": item.customer_name, "invoice_no": item.invoice_no, "state": state, "state_label": label, "holder": holder, "since": iso(since),
                     "batch_id": trip.batch_id, "delivery_date": trip.delivery_date.isoformat(), "note": item.officer_note or item.crew_note, **trip_fields(trip), "so_id": item.so_id})
     if needle:
         out = [r for r in out if day_model.matches(needle, [r["so_number"], r["invoice_no"], r["customer_name"], r["driver_name"], *r["helpers"], r["vehicle"]])]

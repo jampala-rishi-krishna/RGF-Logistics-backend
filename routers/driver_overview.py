@@ -1,10 +1,10 @@
 """Driver Overview dashboard for admin / dispatcher. Contract: docs/TRIP_WORKFLOW.md section 8.
 
-Read-only over Neon + memory caches (services/overview.py). No Zoho. Template creation is admin only.
+Neon + memory views and existing invoice receipt workflow. No Zoho. Template creation is admin only.
 """
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, BackgroundTasks, Depends, Query
 from fastapi.responses import Response
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
@@ -14,10 +14,23 @@ from database import get_db
 from services import driver_issues, overview, reconcile
 from services.trip_events import fail
 from services.order_tracker_facts import publish_existing_reads
+from routers.officer import ResolveBody
 
 router = APIRouter(prefix="/api/driver-overview", tags=["driver-overview"], dependencies=[Depends(require_role("admin", "dispatcher")), Depends(publish_existing_reads)])
 
 BOARD_STATES = ("idle", "to_acknowledge", "ready", "on_trip", "returned", "handover_pending", "closed")
+
+
+@router.post("/invoices/{item_id}/receive")
+def receive_invoice(item_id: int, body: ResolveBody, tasks: BackgroundTasks,
+                    user: CurrentUser = Depends(require_role("admin", "dispatcher")), db: Session = Depends(get_db)):
+    from services import handover, order_tracker
+    from services.trip_events import Actor
+    from services.ws_manager import manager
+    result = handover.resolve(db, Actor(user.id, user.role, user.staff_id, user.full_name), item_id, body, require_handed_over=True)
+    order_tracker.history_cache.clear()
+    tasks.add_task(manager.broadcast, {"type": "TRIP_STATE_CHANGED"})
+    return result
 
 
 def _optional_day(value: str | None):
@@ -53,7 +66,7 @@ def driver(staff_id: int, from_: str | None = Query(None, alias="from"), to: str
 
 @router.get("/trips/{batch_id}")
 def trip(batch_id: str, db: Session = Depends(get_db)):
-    """The trip drawer: the full timeline + step, tile, attention, invoices, issues, other_days, per-order flags + photos."""
+    """The trip drawer: the full timeline + step, tile, attention, invoices, issues, per-order flags + photos."""
     stale = overview.stale_minutes_default()
     return overview.cached("trip", (batch_id, stale), lambda: overview.trip_detail(db, batch_id, stale))
 

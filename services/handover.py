@@ -178,7 +178,7 @@ def _respond(db: Session, handover_id: int, viewer_user_id: int, *, already_done
 
 def _close(db: Session, handover: InvoiceHandover, trip: Trip | None, actor: Actor, received_at, client_ts, gps) -> None:
     handover.status = "closed"
-    if trip is not None and trip.status == "handover_submitted":
+    if trip is not None and trip.status in {"returned", "handover_submitted"}:
         trip.status = "closed"
         trip.closed_at = client_ts
         trip_events.add_event(db, trip_id=trip.id, batch_id=trip.batch_id, event_type="trip_closed", actor=actor, received_at=received_at, client_ts=client_ts, gps=gps)
@@ -258,7 +258,7 @@ def validate(db: Session, actor: Actor, handover_id: int, body) -> dict:
     return result
 
 
-def resolve(db: Session, actor: Actor, item_id: int, body) -> dict:
+def resolve(db: Session, actor: Actor, item_id: int, body, *, require_handed_over: bool = False) -> dict:
     """body: idempotency_key, client_ts, gps, gps_denied_reason, status ("received"), note."""
     replay = trip_events.replay_of(db, body.idempotency_key)
     if replay is not None:
@@ -266,6 +266,8 @@ def resolve(db: Session, actor: Actor, item_id: int, body) -> dict:
     item = db.get(InvoiceHandoverItem, item_id)
     if item is None:
         fail(404, "Invoice not found.", "not_found")
+    if require_handed_over and not item.handed_over:
+        fail(409, "The crew must hand over this invoice before you can receive it.", "out_of_order")
     handover = db.get(InvoiceHandover, item.handover_id)
     if (body.status or "").strip().lower() != "received":
         fail(422, "A later resolution marks the invoice as received.", "validation", [{"key": "status", "message": "Only received is accepted here."}])
