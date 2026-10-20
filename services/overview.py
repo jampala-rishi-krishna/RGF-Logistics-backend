@@ -792,7 +792,7 @@ def issues_list(db: Session, status: str | None, priority: str | None, q: str | 
 # ---- hard copies: who holds each signed carbon-copy invoice, and since when ---------------------------------------------------
 
 
-def hardcopies(db: Session, warehouse: str | None, driver_id: int | None, q: str | None = None, day: date | None = None, collected: bool = False) -> dict:
+def hardcopies(db: Session, warehouse: str | None, driver_id: int | None, q: str | None = None, day: date | None = None, collected: bool = False, end: date | None = None) -> dict:
     """Every invoice hard copy not yet validated as received, ALL dates (or only trips of `day`):
     with the driver (checked out of a stop, handover not submitted) / with the officer (handed over, not validated) /
     missing or discrepancy (validated with a problem, not resolved). `q` = the same search as the Trips list (SO, invoice,
@@ -804,7 +804,7 @@ def hardcopies(db: Session, warehouse: str | None, driver_id: int | None, q: str
         return {"so_id": None, "vehicle": trip.vehicle, "driver_name": staff_name(trip.driver_staff_id), "helpers": [staff_name(h) for h in helper_ids_of(trip.driver_staff_id, trip.helper_staff_ids)]}
 
     def wanted(trip) -> bool:
-        return day is None or trip.delivery_date == day
+        return day is None or day <= trip.delivery_date <= (end or day)
     trips = [] if collected else db.execute(select(Trip).where(Trip.status.in_(("on_trip", "returned")))).scalars().all()
     if trips:
         from models.trip import TripStop
@@ -826,7 +826,7 @@ def hardcopies(db: Session, warehouse: str | None, driver_id: int | None, q: str
     if collected:
         stmt = stmt.where(InvoiceHandoverItem.officer_status == "received")
         if day is not None:
-            stmt = stmt.where(Trip.delivery_date == day)
+            stmt = stmt.where(Trip.delivery_date >= day, Trip.delivery_date <= (end or day))
         if driver_id is not None:
             stmt = stmt.where(Trip.driver_staff_id == driver_id)
         if warehouse:

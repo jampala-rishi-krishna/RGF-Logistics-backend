@@ -90,6 +90,7 @@ def test_received_invoice_moves_to_collected_with_receiver_time_and_delivery_res
         assert response.status_code == 200, response.text
     pending = env.client.get("/api/driver-overview/hardcopies", headers=headers).json()
     assert not {"SO-B1", "SO-B2"} & {r["so_number"] for r in pending["rows"]}
+
     response = env.client.get("/api/driver-overview/hardcopies?collected=true", headers=headers)
     assert response.status_code == 200, response.text
     collected = response.json()
@@ -108,3 +109,30 @@ def test_received_invoice_moves_to_collected_with_receiver_time_and_delivery_res
     trip_events.bump()
     pending = env.client.get("/api/driver-overview/hardcopies", headers=headers).json()
     assert not {"SO-B1", "SO-B2"} & {r["so_number"] for r in pending["rows"]}
+
+
+def test_collected_calendar_filters_delivery_day_and_inclusive_range(env):
+    from datetime import timedelta
+    day, yesterday = seed(env)
+    headers = env.h["dispatcher"]
+    with env.Session() as db:
+        ids = list(db.execute(select(InvoiceHandoverItem.id).where(InvoiceHandoverItem.so_id.in_(("b1", "e1")))).scalars())
+    for item_id in ids:
+        response = env.client.post(f"/api/driver-overview/invoices/{item_id}/receive", headers=headers, json={"status": "received", "idempotency_key": str(uuid.uuid4())})
+        assert response.status_code == 200, response.text
+
+    def collected(**scope):
+        response = env.client.get("/api/driver-overview/hardcopies", params={"collected": "true", **scope}, headers=headers)
+        assert response.status_code == 200, response.text
+        return response.json()
+
+    for selected, expected in [(day, {"SO-B1"}), (yesterday, {"SO-E1"}), (day + timedelta(days=1), set())]:
+        result = collected(date=str(selected))
+        assert {row["so_number"] for row in result["rows"]} == expected
+        assert result["total"] == len(expected)
+        assert result["counts"] == ({"received": 1} if expected else {})
+    result = collected(**{"from": str(yesterday), "to": str(day)})
+    assert {row["so_number"] for row in result["rows"]} == {"SO-B1", "SO-E1"}
+    assert result["total"] == 2 and result["counts"] == {"received": 2}
+    for scope in [{"from": str(day)}, {"from": str(day), "to": str(yesterday)}]:
+        assert env.client.get("/api/driver-overview/hardcopies", params={"collected": "true", **scope}, headers=headers).status_code == 422
