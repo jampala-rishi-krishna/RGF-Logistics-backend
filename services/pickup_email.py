@@ -104,6 +104,61 @@ def documents(scheduled, pahabol):
     return pdf.getvalue(), excel.getvalue()
 
 
+PICKUP_TABLE_COLUMNS = ("PO#", "Vendor", "Pickup address", "Contact / phone", "Delivery date", "Destination warehouse", "Items", "Total kg")
+
+
+def _kg(value):
+    try:
+        return f"{round(float(value), 2):g}"
+    except (TypeError, ValueError):
+        return None
+
+
+def _row_kg(row):
+    known = [_kg(item.get('kg')) for item in row.get('items') or []]
+    total = sum(float(v) for v in known if v is not None)
+    missing = sum(v is None for v in known)
+    return (f"{round(total, 2):g} kg" + ("+" if missing else "")) if known and len(known) > missing else "—", missing
+
+
+def email_html(data):
+    """Same RareChain HTML layout as the crew assignment email (inline CSS only; Gmail strips <style>)."""
+    from services.rarechain_email_template import render_rarechain_email
+    cell = "border:1px solid #cfd4da;padding:8px 10px;text-align:left;vertical-align:top;font-size:13px;line-height:1.4;color:#1f2933;"
+    head = "border:1px solid #cfd4da;padding:8px 10px;text-align:left;background:#eef1f4;font-size:12px;font-weight:700;color:#1f2933;white-space:nowrap;"
+    headers = "".join(f"<th style='{head}'>{escape(h)}</th>" for h in PICKUP_TABLE_COLUMNS)
+    grand_total = 0.0
+    sections = []
+    for title, note, rows in [("Scheduled pickups", "Confirmed for pickup on the delivery date below.", data['scheduled']),
+                              ("Not scheduled – needs Logistics approval", "Pahabol: requested after the cut-off. Logistics must approve before pickup.", data['pahabol'])]:
+        body_rows = []
+        for row in rows:
+            kg_text, missing = _row_kg(row)
+            grand_total += sum(float(v) for v in (_kg(i.get('kg')) for i in row.get('items') or []) if v is not None)
+            address = escape(row.get('address') or '') if row.get('address') and not row.get('vendor_address_missing') else (
+                f"{escape(row.get('address') or '')}<br>" if row.get('address') else "") + "<span style='color:#b42318;font-weight:700;'>Vendor address missing</span>"
+            items = "<br>".join(escape(f"{item.get('name') or '—'} — {item.get('qty') if item.get('qty') is not None else '—'} {item.get('unit') or ''}".strip()
+                                       + (f" / {_kg(item.get('kg'))} kg" if _kg(item.get('kg')) is not None else " / kg unknown")) for item in row.get('items') or []) or "—"
+            kg_cell = escape(kg_text) + (f"<br><span style='font-size:11px;color:#6b7280;'>{missing} line(s) without weight</span>" if missing and kg_text != "—" else "")
+            contact = escape(row.get('contact') or '') or "<span style='color:#b42318;'>Missing</span>"
+            body_rows.append(f"<tr><td style='{cell}white-space:nowrap;font-weight:700;'>{escape(str(row.get('po') or '—'))}</td><td style='{cell}'>{escape(str(row.get('vendor') or '—'))}</td>"
+                             f"<td style='{cell}'>{address}</td><td style='{cell}'>{contact}</td>"
+                             f"<td style='{cell}white-space:nowrap;'>{escape(str(row.get('delivery_date') or '—'))}</td><td style='{cell}'>{escape(row.get('destination') or '—')}</td>"
+                             f"<td style='{cell}'>{items}</td><td style='{cell}white-space:nowrap;'>{kg_cell}</td></tr>")
+        table = (f"<div style='overflow-x:auto;-webkit-overflow-scrolling:touch;'><table cellspacing='0' cellpadding='0' border='0' style='border-collapse:collapse;width:100%;min-width:720px;'>"
+                 f"<thead><tr>{headers}</tr></thead><tbody>{''.join(body_rows)}</tbody></table></div>") if body_rows else "<p style='margin:0;font-size:13px;color:#77787B;'>None.</p>"
+        sections.append(f"<h2 style='margin:24px 0 4px;font-size:16px;color:#0B0B0B;'>{escape(title)} ({len(rows)})</h2>"
+                        f"<p style='margin:0 0 10px;font-size:12px;color:#77787B;'>{escape(note)}</p>{table}")
+    body_html = ("<p style='margin:0 0 8px;font-size:14px;line-height:1.5;'>Please review the vendor pickups below and reply to confirm. "
+                 "The PDF and Excel versions are attached.</p>" + "".join(sections))
+    stats = [{"label": "PICKUP DATE", "value": data['delivery_date']}, {"label": "SCHEDULED POs", "value": str(len(data['scheduled']))},
+             {"label": "PAHABOL POs", "value": str(len(data['pahabol']))}, {"label": "TOTAL KG", "value": f"{round(grand_total, 2):g}"}]
+    return render_rarechain_email("PROCUREMENT / VENDOR PICKUPS", "Pickup list.", f"Vendor pickups for {data['delivery_date']}.",
+                                  "https://images.pexels.com/photos/7464230/pexels-photo-7464230.jpeg?auto=compress&amp;cs=tinysrgb&amp;w=1200", stats,
+                                  "https://images.pexels.com/photos/6169056/pexels-photo-6169056.jpeg?auto=compress&amp;cs=tinysrgb&amp;w=1800",
+                                  "Pickup details for Procurement and Logistics.", body_html)
+
+
 def send(db, *, preview_token=None, schedule_key=None):
     with _send_lock:
         data = preview()
@@ -125,9 +180,7 @@ def send(db, *, preview_token=None, schedule_key=None):
         else:
             try:
                 pdf, excel = documents(data['scheduled'], data['pahabol'])
-                html = '<h1>Pickup list</h1>'
-                for title, rows in [('Scheduled pickups', data['scheduled']), ('Not scheduled – needs Logistics approval', data['pahabol'])]:
-                    html += f'<h2>{title}</h2><ul>' + ''.join(f"<li>{escape(row['po'])}: {escape(row['vendor'])} — {escape(row['address'])}; {escape(row['contact'])}; {escape(row['delivery_date'])} → {escape(row['destination'])}; " + escape("; ".join(f"{item.get('name')} {item.get('qty')} {item.get('unit')} / {item.get('kg') if item.get('kg') is not None else 'Unknown'} kg" for item in row['items'])) + "</li>" for row in rows) + '</ul>'
+                html = email_html(data)
                 gmail_sender.send_email(to=data['recipients']['to'], cc=data['recipients']['cc'], subject=f"Pickup list — {data['delivery_date']}", html=html,
                     attachments=[('Pickup-list.pdf','application/pdf',pdf), ('Pickup-list.xlsx','application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',excel)], purpose='pickup-list')
                 log.status = 'sent'
