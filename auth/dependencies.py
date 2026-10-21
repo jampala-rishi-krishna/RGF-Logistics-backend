@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import re
+
 from dataclasses import asdict, dataclass
 
 from fastapi import Depends, HTTPException, Request, status
@@ -70,6 +72,21 @@ def get_current_user_optional(credentials: HTTPAuthorizationCredentials | None =
     return _load_user(int(payload["sub"]))
 
 
+_ROUTE_STOPS = re.compile(r"^/routes/\d+/stops$")
+
+
+def department_can_read(method: str, path: str) -> bool:
+    """Sales / Wet Market tabs: Control Tower, Fleet, Orders, Order Tracker - READ ONLY (GET). Never a write."""
+    if method != "GET":
+        return False
+    return (path.startswith("/orders") or path.startswith("/api/orders") or
+            path.startswith("/api/load-planning/inventory/sales-orders") or
+            path.startswith("/api/load-planning/inventory/export/") or path == "/api/load-planning/inventory/branches" or
+            # Fleet + Control Tower (vehicles, live alerts, routes on the map)
+            path == "/vehicles" or path.startswith("/vehicles/") or path == "/alerts" or
+            path in {"/routes", "/routes/warehouses"} or bool(_ROUTE_STOPS.match(path)))
+
+
 def require_role(*allowed_roles: str):
     """Replaces the Catalyst requireRole(app, allowedRoles) pattern. Unlike the original, this
     does NOT fall back to trusting a spoofable X-User-Role header when there's no session -
@@ -78,11 +95,7 @@ def require_role(*allowed_roles: str):
 
     def dependency(current_user: CurrentUser = Depends(get_current_user), request: Request = None) -> CurrentUser:
         # Sales / Wet Market may read order lists and details only, never mutate them.
-        readonly = current_user.role in {"sales", "wet_market"} and request is not None and request.method == "GET" and (
-            request.url.path.startswith("/orders") or request.url.path.startswith("/api/orders") or
-            request.url.path.startswith("/api/load-planning/inventory/sales-orders") or
-            request.url.path.startswith("/api/load-planning/inventory/export/") or
-            request.url.path == "/api/load-planning/inventory/branches")
+        readonly = current_user.role in {"sales", "wet_market"} and request is not None and department_can_read(request.method, request.url.path)
         if not readonly and ROLE_ALIASES.get(current_user.role, current_user.role) not in allowed_roles:
             raise HTTPException(status.HTTP_403_FORBIDDEN, "Forbidden")
         return current_user
@@ -102,10 +115,7 @@ def workspace_access(request: Request, user: CurrentUser | None = Depends(get_cu
     path = request.url.path
     if user.role in {"sales", "wet_market"}:
         tracker_access = (request.method == "GET" and (path.startswith("/api/order-tracker/") or path.startswith("/api/media/"))) or (request.method == "POST" and path in {"/api/order-tracker/ask", "/api/order-tracker/feedback"})
-        allowed = tracker_access or path.startswith("/auth/") or path.startswith("/api/access/") or (request.method == "GET" and (
-            path.startswith("/orders") or path.startswith("/api/orders") or
-            path.startswith("/api/load-planning/inventory/sales-orders") or
-            path.startswith("/api/load-planning/inventory/export/") or path == "/api/load-planning/inventory/branches"))
+        allowed = tracker_access or path.startswith("/auth/") or path.startswith("/api/access/") or department_can_read(request.method, path)
         if not allowed:
             raise HTTPException(403, "Orders read-only access")
     if user.role in {"planner", "dispatcher"} and (path.startswith("/api/fleet-health") or
