@@ -138,6 +138,32 @@ def test_load_planning_list_endpoints_ask_for_the_non_blocking_read(monkeypatch)
     with pytest.raises(cache.WindowWarming):
         load_planning.list_sales_order_cities(date_from=None, date_to=None)
     assert seen and all(kwargs.get("block") is False for kwargs in seen)
+    assert seen[1].get("include_window") is False
+
+
+def test_confirmed_orders_use_warm_assigned_rows_without_loading_inventory(monkeypatch):
+    from datetime import datetime, timedelta
+    from types import SimpleNamespace
+    from routers import load_planning
+
+    day = datetime.now(cache.PHT).date() + timedelta(days=1)
+    row = SimpleNamespace(id="cached-so", expected_shipment_date=day,
+                          salesorder_number="SO26-100", order_type="SO", raw_json={},
+                          assignment_status="assigned", customer_name="Customer",
+                          reference_number=None, vehicle_id="truck", order_status="confirmed")
+    monkeypatch.setattr(cache, "_assignment_state", {row.id: {
+        "assignment_status": "assigned", "expected_shipment_date": day}})
+    monkeypatch.setattr(cache, "_assigned_zoho", {row.id: row})
+    monkeypatch.setattr(cache, "_excluded_ids", {})
+
+    def unrelated_inventory(*args, **kwargs):
+        raise AssertionError("Confirmed Orders must not fetch the Inventory window")
+
+    monkeypatch.setattr(cache, "get_window", unrelated_inventory)
+    monkeypatch.setattr(cache, "fetch_sales_order_detail", unrelated_inventory)
+    rows = load_planning._rows_any_branch(None, day.isoformat(), day.isoformat(),
+                                         "All", None, "assigned", order_types="SO,WM,PO,TO")
+    assert [r.id for r in rows] == [row.id]
 
 
 # ---- CORS on every failure ---------------------------------------------------------------------------------------------------

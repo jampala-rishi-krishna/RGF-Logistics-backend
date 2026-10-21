@@ -701,7 +701,9 @@ def _rows_any_branch(db: Session, date_from: str | None, date_to: str | None, st
         # Current/future range for Confirmed SO: the in-memory assigned snapshot (Zoho data,
         # kept warm live; assignment state kept warm from sales_order_history at startup and
         # updated on every mutation). Zero Neon reads.
-        rows = [r for r in live_sales_order_cache.get_assigned_snapshot_ex(block=False)[0] if r.expected_shipment_date is not None and start <= r.expected_shipment_date <= end and transfer_orders.order_type_of(r) in types]
+        # Assigned orders need only their own cached Zoho details. Do not gate this
+        # list on the unrelated 16-day Inventory window (which can still be warming).
+        rows = [r for r in live_sales_order_cache.get_assigned_snapshot_ex(include_window=False, block=False)[0] if r.expected_shipment_date is not None and start <= r.expected_shipment_date <= end and transfer_orders.order_type_of(r) in types]
     else:
         # Unassigned / no assignment filter, any date: live Zoho window cache (5-min TTL).
         # No sales_orders_cache read/write at all any more.
