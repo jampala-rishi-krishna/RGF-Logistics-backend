@@ -26,6 +26,30 @@ def test_today_uses_no_db_or_provider(tracker_env, monkeypatch):
     assert card["sections"]["documents"]["value"]["client_po_number"] == "PO-001"
 
 
+@pytest.mark.parametrize("trip_status", [None, "not_started", "closed"])
+def test_assigned_truck_is_available_without_active_trip_or_gps(tracker_env, monkeypatch, trip_status):
+    env = tracker_env
+    if trip_status is None:
+        tracker.snapshots.facts.clear()
+    else:
+        env.snapshot["trip"]["status"] = trip_status
+        env.save()
+    monkeypatch.setattr(tracker.live_gps_store, "get", lambda plate: None)
+    for tool in ("truck_assignment", "truck_location", "get_order"):
+        result = ai.execute(tool, {"so_number": "SO-100"}, env.user, env.day, env.day, None)
+        assignment = result if tool == "truck_assignment" else result["assignment"]
+        assert assignment["state"] == "recorded"
+        assert assignment["value"]["truck"] == "DCD 8953"
+        assert assignment["value"]["vehicle_id"] == "TRK1"
+        assert assignment["value"]["assigned_at"]
+        assert assignment["as_of"] and assignment["source"] == "Fleet / cached order assignment"
+        if tool == "truck_location":
+            assert result["state"] == "not_recorded"
+            assert not result.get("value")  # no GPS coordinates are exposed
+            assert any(s["source"] == assignment["source"] and not s["not_recorded"]
+                       for s in ai.evidence(result))
+
+
 @pytest.mark.parametrize("role,expected", [("sales", {"SO-100", "WM-SO-300"}), ("wet_market", {"WM-SO-300"}), ("admin", {"SO-100", "SO-200", "WM-SO-300"}), ("planner", {"SO-100", "SO-200", "WM-SO-300"})])
 def test_scope_list(tracker_env, role, expected):
     env = tracker_env; env.user.role = role

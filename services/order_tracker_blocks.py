@@ -31,7 +31,7 @@ LABELS = {
            "open": "Buksan ang ", "photos": "Tingnan ang mga larawan"},
 }
 CHIP_TONES = {"Paid": "positive", "Partly paid": "warning", "Unpaid": "neutral"}
-SECTION_TOOLS = {"truck_location", "order_times", "delivery_result", "proof_of_delivery", "payment_status",
+SECTION_TOOLS = {"truck_assignment", "truck_location", "order_times", "delivery_result", "proof_of_delivery", "payment_status",
                  "order_documents", "loading_check", "order_issues"}
 
 
