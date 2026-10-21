@@ -53,11 +53,29 @@ def env(monkeypatch):
     user_cache._cache.clear(); app_settings.reset(); purchase_orders.reset()
 
 
-@pytest.mark.parametrize('role', ['planner','sales','wet_market','driver','helper','logistics_officer'])
-def test_nonmanagers_cannot_unassign_or_bulk(env,role):
+@pytest.mark.parametrize('role', ['sales','wet_market','driver','helper','logistics_officer'])
+def test_nonoperations_roles_cannot_unassign_or_bulk(env,role):
     h=env.headers(role)
     assert env.client.post('/api/load-planning/assignments/one/unassign',headers=h,json={}).status_code==403
     assert env.client.post('/api/load-planning/assignments/bulk-unassign',headers=h,json={'order_ids':['one']}).status_code==403
+
+
+def test_planner_can_unassign_without_manager_permission(env, monkeypatch):
+    calls = []
+    def single(order_id, user, db, **kwargs):
+        calls.append((order_id, user.role, user.is_manager))
+        return {'success': True}
+    def bulk(order_ids, user, db, **kwargs):
+        calls.append((order_ids, user.role, user.is_manager))
+        return {'success': True}
+    monkeypatch.setattr(assignment, 'unassign_one', single)
+    monkeypatch.setattr(assignment, 'bulk_unassign_orders', bulk)
+    h = env.headers('planner')
+    assert env.client.post('/api/load-planning/assignments/one/unassign', headers=h, json={}).status_code == 200
+    assert env.client.post('/api/load-planning/assignments/bulk-unassign', headers=h, json={'order_ids':['one']}).status_code == 200
+    preview = env.client.post('/api/load-planning/assignments/unassign-preview', headers=h, json={'order_ids':[]})
+    assert preview.status_code == 400 and preview.json()['detail'] == 'Select at least one order.'
+    assert calls == [('one', 'planner', False), (['one'], 'planner', False)]
 
 
 def test_planner_reaches_overview_but_cannot_manage_users_or_settings(env):

@@ -17,7 +17,7 @@ from pydantic import BaseModel
 from sqlalchemy import select, func
 from sqlalchemy.orm import Session
 
-from auth.dependencies import CurrentUser, require_role, require_manager
+from auth.dependencies import CurrentUser, require_role
 from database import get_db
 from types import SimpleNamespace
 from models.dispatch_pipeline import ClientDeliveryConstraint
@@ -429,7 +429,7 @@ def _record_unassign(db: Session, user: CurrentUser, row: dict) -> None:
 
 # Registered before "/{salesorder_id}" so "unassign-preview" is not taken for an order id.
 @router.post("/unassign-preview")
-def unassign_preview(body: UnassignPreviewBody, current_user: CurrentUser = Depends(require_manager), db: Session = Depends(get_db)):
+def unassign_preview(body: UnassignPreviewBody, current_user: CurrentUser = Depends(require_role("admin", "dispatcher", "warehouse")), db: Session = Depends(get_db)):
     """Contract 6: what unassigning these orders would undo (acknowledged / trip started / checked in -> confirm; delivered -> blocked).
     Memory first; the Neon sales_orders rows only for ids not in memory, plus the trip rows of the selected batches. Never Zoho."""
     ids = list(dict.fromkeys(str(value).strip() for value in body.order_ids if str(value).strip()))
@@ -450,7 +450,7 @@ def unassign_preview(body: UnassignPreviewBody, current_user: CurrentUser = Depe
 
 # Registered before "/{salesorder_id}" (like "new-driver") so "bulk-unassign" is not taken for an order id.
 @router.post("/bulk-unassign")
-def bulk_unassign(body: BulkUnassignBody, current_user: CurrentUser = Depends(require_manager), db: Session = Depends(get_db)):
+def bulk_unassign(body: BulkUnassignBody, current_user: CurrentUser = Depends(require_role("admin", "dispatcher", "warehouse")), db: Session = Depends(get_db)):
     """Confirmed Orders > "Unassign selected" (a MANUAL unassign: the Zoho-status / checked-out guard applies)."""
     return bulk_unassign_orders(body.order_ids, current_user, db, confirm=body.confirm)
 
@@ -691,7 +691,7 @@ def assign_order(salesorder_id: str, body: AssignmentBody, current_user: Current
 
 
 @router.post("/{salesorder_id}/unassign")
-def unassign_order(salesorder_id: str, current_user: CurrentUser = Depends(require_manager), db: Session = Depends(get_db), body: UnassignBody | None = None):
+def unassign_order(salesorder_id: str, current_user: CurrentUser = Depends(require_role("admin", "dispatcher", "warehouse")), db: Session = Depends(get_db), body: UnassignBody | None = None):
     """Contract 7: delivered / checked out -> 409 code "delivered"; acknowledged / trip started / checked in without
     {"confirm": true} -> 409 code "confirm_required" (nothing done). Zoho fulfilled / shipped / partially delivered -> 409 code
     "unassign_blocked". The unassign and its audit event are ONE commit (contract 8). A MANUAL unassign (the route)."""
