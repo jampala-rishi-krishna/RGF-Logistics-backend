@@ -25,6 +25,7 @@ from zoneinfo import ZoneInfo
 
 from models.inventory import SalesOrderCache
 from services import branches, order_types, warehouses
+from services import order_fields
 from services.item_weight import calculate_line_weight_kg
 from services.pack_units import is_pack_unit
 from services.serialize import row_to_dict
@@ -452,6 +453,7 @@ def summary(row, *, allow_fetch: bool = False) -> dict:
     result["zoho_lock"] = None
     result["branch_id"] = result["branch_name"] = result["branch_code"] = None
     result["notes"] = raw.get("notes")
+    order_fields.apply(result, row)  # a TO normally has neither field: both None
     result["mets_qty_available_for_sale"] = None
     result["glacier_qty_available_for_sale"] = None
     products, packs, cases, units = [], 0.0, 0.0, 0.0

@@ -295,6 +295,8 @@ def actor_name(users: dict[int, dict], user_id: int | None, staff_id: int | None
 def _event_payload(e: TripEvent, users: dict[int, dict], number_by_so: dict[str, str]) -> dict:
     out = {"type": e.event_type, "at": iso(e.client_ts), "received_at": iso(e.received_at), "by": _by(users, e.user_id, e.role), "so_number": number_by_so.get(e.so_id) if e.so_id else None, "gps": e.gps,
            "actor_name": actor_name(users, e.user_id, e.staff_id), "actor_role": actor_role(e.role)}
+    if e.role == "system":  # automatic rows (services/zoho_writeback, services/auto_unassign): no login behind them
+        out.update(actor_name="System", by={"user_id": e.user_id, "name": "System", "role": "system"}, message=(e.result or {}).get("message"), status=(e.result or {}).get("status"))
     if e.event_type == UNASSIGNED:  # contract 9: shown even after the order left the batch
         from services import dispatch_changes  # lazy: dispatch_changes -> trip_state -> ... keeps this module import-light
 

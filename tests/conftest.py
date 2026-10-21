@@ -60,6 +60,15 @@ def _no_real_database(monkeypatch):
 
     monkeypatch.setattr(vehicle_flags, "_open_session", blocked)
     monkeypatch.setattr(assignment_email_status, "_open_session", blocked)  # status writes stay in memory under test
+    from services import auto_unassign, zoho_writeback
+
+    # Zoho write-back / automatic date-change unassign run in background threads with their own session: off unless a test opts in.
+    monkeypatch.setattr(zoho_writeback, "_spawn", lambda fn: None)
+    monkeypatch.setattr(zoho_writeback, "_open_session", blocked)
+    monkeypatch.setattr(auto_unassign, "_spawn", lambda fn: None)
+    monkeypatch.setattr(auto_unassign, "_open_session", blocked)
+    zoho_writeback.reset()
+    auto_unassign.reset()
     before = len(CONNECTION_ATTEMPTS)
     network_before = len(NETWORK_ATTEMPTS)
     yield

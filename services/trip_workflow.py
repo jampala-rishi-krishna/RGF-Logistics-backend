@@ -22,7 +22,7 @@ from sqlalchemy.orm import Session
 from auth.dependencies import CurrentUser
 from models.trip import (KIND_ACKNOWLEDGE, KIND_CHECKOUT, InvoiceHandover, InvoiceHandoverItem, SoAcknowledgement, Trip, TripPhoto, TripStop)
 from models.user import User
-from services import day_model, dispatch_changes, driver_assignments, form_templates, live_sales_order_cache, media_storage, order_types, stop_order, transfer_orders, trip_events, trip_state, warehouses
+from services import cancel_request, day_model, dispatch_changes, driver_assignments, form_templates, live_sales_order_cache, media_storage, order_types, stop_order, transfer_orders, trip_events, trip_state, warehouses
 from services.sales_order_location import address_lines
 from services.trip_events import Actor, fail
 
@@ -370,7 +370,13 @@ def _check_out(ctx: Ctx):
     sent = dict(body.answers or {})
     if is_transfer:
         sent.pop("invoice_dr_number", None)  # contract 5: whatever the phone sent is ignored for a TO
-    answers, errors = form_templates.validate_checkout(template, sent, media_storage.is_enabled(), _photo_checker(ctx.db, ctx.batch_id), prefill, skip_keys=frozenset({"invoice_dr_number"}) if is_transfer else frozenset())
+    cancelling = cancel_request.is_cancel(sent)  # outcome "cancelled_by_request": requester + reason + proof photo instead of the outcome question
+    if cancelling:
+        sent, cancel_raw = cancel_request.split(sent)
+        cancel_answers, cancel_errors = cancel_request.validate(cancel_raw, media_storage.is_enabled(), _photo_checker(ctx.db, ctx.batch_id))
+    answers, errors = form_templates.validate_checkout(cancel_request.template_without_outcome(template) if cancelling else template, sent, media_storage.is_enabled(), _photo_checker(ctx.db, ctx.batch_id), prefill, skip_keys=frozenset({"invoice_dr_number"}) if is_transfer else frozenset())
+    if cancelling:
+        answers, errors = cancel_answers + answers, cancel_errors + errors
     if errors:
         fail(422, "Please complete the delivery form.", "validation", errors)
     if is_transfer:
@@ -563,11 +569,17 @@ def check_out(db: Session, user: CurrentUser, batch_id: str, so_id: str, body: C
     result = run_action(db, user, batch_id, body, "checked_out", _check_out, so_id)
     if not result.get("replayed") and not result.get("already_done"):
         media_storage.after_checkout(db, batch_id, so_id)  # committed: best-effort Drive name / description update, off the request (never raises)
+        from services import zoho_writeback
+        zoho_writeback.after_checkout(db, batch_id, so_id)  # committed: SO Delivered / Partial -> Zoho "Closed" sub-status, background + retried (never raises)
     return result
 
 
 def end(db: Session, user: CurrentUser, batch_id: str, body: ActionBody) -> dict:
-    return run_action(db, user, batch_id, body, "trip_ended", _end)
+    result = run_action(db, user, batch_id, body, "trip_ended", _end)
+    if not result.get("replayed"):
+        from services import auto_unassign
+        auto_unassign.after_trip_end(db, batch_id)  # committed: not delivered / cancelled SOs go back to Inventory (own commit, never raises)
+    return result
 
 
 def handover(db: Session, user: CurrentUser, batch_id: str, body: HandoverBody) -> dict:

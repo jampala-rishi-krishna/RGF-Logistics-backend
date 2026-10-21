@@ -54,11 +54,19 @@ def alerts(user: CurrentUser = Depends(get_current_user), db: Session = Depends(
         order = live_sales_order_cache.find_cached(row.order_id)
         day = getattr(order, "expected_shipment_date", None)
         items.append({**row_to_dict(row), "unread": unread, "text": text, "delivery_date": day.isoformat() if day else None})
+    if user.is_manager:  # automatic unassigns after the crew had started (Zoho date change): process memory, no table (services/auto_unassign)
+        from services import auto_unassign
+        items = auto_unassign.manager_alerts(user.id) + items
     return {"items": items, "unread_count": sum(i["unread"] for i in items)}
 
 
 @router.post("/alerts/{request_id}/read")
 def read_alert(request_id: int, user: CurrentUser = Depends(get_current_user), db: Session = Depends(get_db)):
+    if request_id < 0:  # an in-memory automatic-unassign alert (services/auto_unassign): no database write
+        from services import auto_unassign
+        if not user.is_manager or not auto_unassign.mark_alert_read(request_id, user.id):
+            raise HTTPException(404, "Alert not found")
+        return {"ok": True}
     row = db.get(UnassignRequest, request_id)
     if row is None:
         raise HTTPException(404, "Request not found")

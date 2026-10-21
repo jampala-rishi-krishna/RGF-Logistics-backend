@@ -11,21 +11,22 @@ from openpyxl import Workbook
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
 
+from services import order_fields
 from services import order_types as order_type_rules
 from services.sales_order_location import address_lines, shipping_city
 from services.warehouses import WAREHOUSES, warehouse_key
 
 # Default layout. "Type" (SO/TO/PO) sits right after the order number; "Warehouse" is the last column
 # (it drives the Glacier row fill in the Excel export).
-HEADERS = ["Expected Shipment Date", "Order#", "Type", "Customer Name", "Item Description", "SKU", "Quantity", "Unit", "City", "Shipping Address", "Fulfillment Type", "Order Status", "Invoiced", "Payment", "Packed", "Shipped", "Amount", "Warehouse"]
+HEADERS = ["Expected Shipment Date", "Order#", "Type", "Customer Name", "Item Description", "SKU", "Quantity", "Unit", "City", "Shipping Address", "Delivery Method", "Fulfillment Type", "Order Status", "Invoiced", "Payment", "Packed", "Shipped", "Amount", "Warehouse"]
 DEFAULT_ORDER_COLUMN = 1
 DEFAULT_TYPE_COLUMN = 2
-DEFAULT_STATUS_COLUMN = 11
-DEFAULT_WAREHOUSE_COLUMN = 17
-DEFAULT_WIDTHS = [52, 70, 28, 95, 105, 55, 40, 35, 55, 145, 65, 60, 45, 45, 42, 42, 65, 70]
+DEFAULT_STATUS_COLUMN = 12
+DEFAULT_WAREHOUSE_COLUMN = 18
+DEFAULT_WIDTHS = [52, 70, 28, 95, 105, 55, 40, 35, 55, 130, 60, 65, 60, 45, 45, 42, 42, 65, 70]
 # Confirmed export: every column the Confirmed screen shows, in the layout dispatch uses.
 # "Type" (SO/TO/PO) sits right after the order number column (which holds the SO#/TO#/PO#).
-CONFIRMED_HEADERS = ["Date", "Item", "SKU", "Quantity", "Unit", "Order Number", "Type", "Customer", "City", "Shipping Address", "Warehouse", "Mets Qty Available for Sale", "Glacier Qty Available for Sale", "Notes", "Fulfillment Type", "Truck", "Driver/Helper"]
+CONFIRMED_HEADERS = ["Date", "Item", "SKU", "Quantity", "Unit", "Order Number", "Type", "Customer", "City", "Shipping Address", "Warehouse", "Mets Qty Available for Sale", "Glacier Qty Available for Sale", "Notes", "Delivery Method", "Fulfillment Type", "Truck", "Driver/Helper"]
 CONFIRMED_QTY_COLUMN = 3
 CONFIRMED_ORDER_COLUMN = 5
 CONFIRMED_TYPE_COLUMN = 6
@@ -33,8 +34,8 @@ CONFIRMED_ADDRESS_COLUMN = 9
 CONFIRMED_WAREHOUSE_COLUMN = 10
 CONFIRMED_STOCK_COLUMNS = (11, 12)
 CONFIRMED_NOTES_COLUMN = 13
-CONFIRMED_TRUCK_COLUMN = 15
-CONFIRMED_WIDTHS = [50, 100, 58, 42, 30, 62, 28, 85, 52, 118, 68, 52, 56, 150, 62, 56, 80]
+CONFIRMED_TRUCK_COLUMN = 16
+CONFIRMED_WIDTHS = [50, 100, 58, 42, 30, 62, 28, 85, 52, 112, 68, 52, 56, 130, 60, 62, 56, 80]
 CYAN = colors.HexColor("#00FFFF")
 NEGATIVE_RED = colors.HexColor("#C00000")
 RARE_RED = colors.HexColor("#86000B")
@@ -63,10 +64,13 @@ def _address(value) -> str:
     return ", ".join(address_lines(value))
 
 def _fulfillment_type(raw: dict) -> str:
-    """Zoho stores this as a custom field (cf_fulfillment_type), not a top-level key."""
-    hash_value = (raw.get("custom_field_hash") or {}).get("cf_fulfillment_type") if isinstance(raw.get("custom_field_hash"), dict) else None
-    labelled = next((field.get("value") for field in raw.get("custom_fields") or [] if isinstance(field, dict) and str(field.get("label") or "").strip().lower() == "fulfillment type"), None)
-    return _text(raw.get("fulfillment_type") or raw.get("cf_fulfillment_type") or hash_value or labelled or raw.get("cf_fulfillment_type_formatted") or raw.get("order_fulfillment_type"))
+    """Zoho stores this as a custom field (cf_fulfillment_type), not a top-level key (services/order_fields.py)."""
+    return _text(order_fields.fulfillment_type(raw) or raw.get("cf_fulfillment_type_formatted") or raw.get("order_fulfillment_type"))
+
+
+def _delivery_method(order) -> str:
+    """Zoho's standard sales-order delivery_method (services/order_fields.py); blank when the order has none."""
+    return _text(order_fields.delivery_method(order))
 
 
 def _line_item_id(item: dict) -> str | None:
@@ -181,7 +185,7 @@ def flatten_confirmed_order(order, stock_of, truck_driver) -> list[list]:
     for item in items:
         item_id = _line_item_id(item)
         stock = (stock_of(item_id) if item_id else None) or {}
-        rows.append([_date(order.expected_shipment_date), item.get("name") or item.get("item_description"), item.get("sku"), item.get("quantity"), item.get("unit"), order.salesorder_number, otype, order.customer_name, city, _address(address_value), order_line_warehouse(order, item), stock.get("mets"), stock.get("glacier"), notes, _fulfillment_type(raw), truck, driver])
+        rows.append([_date(order.expected_shipment_date), item.get("name") or item.get("item_description"), item.get("sku"), item.get("quantity"), item.get("unit"), order.salesorder_number, otype, order.customer_name, city, _address(address_value), order_line_warehouse(order, item), stock.get("mets"), stock.get("glacier"), notes, _delivery_method(order), _fulfillment_type(raw), truck, driver])
     return rows
 
 
@@ -203,7 +207,7 @@ def flatten_order(order) -> list[list]:
     packed = "Yes" if any(item.get("quantity") and item.get("quantity_packed", 0) >= item.get("quantity") for item in items) or any(value in _text(package.get("status") or package.get("detailed_status")).lower() for package in packages for value in ("packed", "fulfilled", "shipped", "delivered")) or any(value in shipment_status for value in ("packed", "shipped", "delivered")) else "No"
     shipped = "Yes" if any(item.get("quantity") and item.get("quantity_shipped", 0) >= item.get("quantity") for item in items) or any(value in _text(package.get("status") or package.get("detailed_status")).lower() for package in packages for value in ("shipped", "fulfilled", "delivered")) or any(value in shipment_status for value in ("shipped", "delivered")) else "No"
     otype = order_type_of(order)
-    return [[_date(order.expected_shipment_date), order.salesorder_number, otype, order.customer_name, item.get("name") or item.get("item_description"), item.get("sku"), item.get("quantity"), item.get("unit"), city, shipping, _fulfillment_type(raw), order.order_status, invoiced, payment, packed, shipped, item.get("item_total") or order.total, order_line_warehouse(order, item)] for item in items]
+    return [[_date(order.expected_shipment_date), order.salesorder_number, otype, order.customer_name, item.get("name") or item.get("item_description"), item.get("sku"), item.get("quantity"), item.get("unit"), city, shipping, _delivery_method(order), _fulfillment_type(raw), order.order_status, invoiced, payment, packed, shipped, item.get("item_total") or order.total, order_line_warehouse(order, item)] for item in items]
 
 def _number_format(value) -> str:
     whole = isinstance(value, (int, float)) and float(value).is_integer()
@@ -257,7 +261,7 @@ def _make_confirmed_excel(rows: list[list], warehouse_fill: bool = True) -> Byte
         _style_data_row(sheet, row_number, payload, CONFIRMED_ORDER_COLUMN, CONFIRMED_TYPE_COLUMN, CONFIRMED_WAREHOUSE_COLUMN, warehouse_fill)
         row_number += 1
     sheet.freeze_panes = "A2"
-    widths = [13, 30, 14, 11, 8, 15, 7, 28, 14, 48, 20, 16, 16, 60, 18, 14, 22]
+    widths = [13, 30, 14, 11, 8, 15, 7, 28, 14, 48, 20, 16, 16, 60, 18, 18, 14, 22]
     for column, width in enumerate(widths, 1): sheet.column_dimensions[get_column_letter(column)].width = width
     _add_legend_sheet(book)
     output = BytesIO(); book.save(output); output.seek(0); return output

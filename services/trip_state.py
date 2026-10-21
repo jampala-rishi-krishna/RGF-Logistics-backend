@@ -13,7 +13,7 @@ from sqlalchemy.orm import Session
 
 from models.trip import InvoiceHandover, InvoiceHandoverItem, SoAcknowledgement, Trip, TripStop
 from models.user import User
-from services import day_model, staff_directory_cache
+from services import cancel_request, day_model, staff_directory_cache
 from services.staff_roles import helper_ids_of
 
 
@@ -221,6 +221,8 @@ def order_workflow(row, facts: dict, trip_summary: dict, data: TripData, *, can_
             "sequence": stop.sequence, "status": stop.status, "checkin_at": iso(stop.checkin_at), "checkin_by": data.user(stop.checkin_by_user_id),
             "checkin_distance_m": stop.checkin_distance_m, "checkin_far": stop.checkin_far, "checkout_at": iso(stop.checkout_at),
             "checkout_by": data.user(stop.checkout_by_user_id), "outcome": stop.outcome, "reason": stop.reason, "invoice_no": invoice_no_of(stop),
+            # "Cancelled" for a stop cancelled at the customer / sales agent's request (+ who asked); the raw outcome otherwise
+            "outcome_label": cancel_request.CANCELLED_SHORT if cancel_request.is_cancelled(stop.outcome) else stop.outcome, "cancel": cancel_request.details(stop.form_answers) if cancel_request.is_cancelled(stop.outcome) else None,
             # proof photos stored with the check-out answers: id + caption data (SO, client time, result); no extra read
             "photos": day_model.stop_photos(stop, so_numbers.get(row.id) or row.salesorder_number or row.id),
         },

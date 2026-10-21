@@ -446,11 +446,22 @@ def publish_zoho_data(order_id: str, detail: dict, epoch: int) -> SalesOrderCach
         _excluded_ids[str(order_id)] = record.get("salesorder_number")
         raise branches.BranchNotAllowed(record.get("salesorder_number"))
     row = _build_transient(record)
+    _observe_dates([record])
     with zoho_acquisition.publication(epoch) as current:
         if current:
             _apply_assignment(row)
             _assigned_zoho[order_id] = row
     return row
+
+
+def _observe_dates(records) -> None:
+    """A4: hand the records of this (already made) Zoho sync to the automatic date-change unassign. Memory only, no Zoho call."""
+    try:
+        from services import auto_unassign
+
+        auto_unassign.observe_zoho_records(list(records))
+    except Exception as exc:  # never break a sync
+        logger.warning("[LiveSalesOrderCache] date-change check skipped: %s", type(exc).__name__)
 
 
 def require_allowed(order_id: str) -> None:
@@ -904,6 +915,7 @@ def get_window(start: date, end: date, *, hydrate: bool = True, block: bool = Tr
     if hydrate:
         _hydrate_details(raw)
     rows = {rid: _build_transient(record) for rid, record in raw.items()}
+    _observe_dates(raw.values())
     with zoho_acquisition.publication(epoch) as current:
         if current:
             with _window_lock:
@@ -937,6 +949,7 @@ def refresh_shared_window(*, force_full: bool = False) -> int:
         for rid, record in raw.items():
             current[rid] = _build_transient(record)
         _store_window_locked(_windows, key, current)
+    _observe_dates(raw.values())
     memory_debug.log_rss(f"wide-window-refreshed {'full' if do_full else 'delta'} rows={len(current)} details={len(_details)} assigned_rows={len(_assigned_zoho)}")
     _wide_window_last_sync = now
     if do_full:
@@ -1028,6 +1041,7 @@ def apply_salesorder_webhook(record: dict) -> bool:
     assigned = _assigned_zoho.get(record_id)
     if assigned is not None:
         merge_zoho_payload(assigned, record)
+    _observe_dates([record])
     modified = str(record.get("last_modified_time") or "")
     if modified:
         _remember_detail(record_id, modified, {k: v for k, v in record.items() if v not in (None, "", [], {})})

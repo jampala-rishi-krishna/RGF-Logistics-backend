@@ -170,7 +170,24 @@ def _fallback_delay(attempt: int) -> float:
     return base + random.uniform(0, base * RETRY_JITTER_FRACTION)
 
 
-def _request_http(method: str, path: str, url: str, query: dict, logical_id: str, feature: str = "other") -> dict:
+def _write_with_files(path: str, params: dict, files: dict, feature: str) -> dict:
+    """A multipart POST (e.g. an SO attachment) through the same budget guard / limiter / usage counter / retry policy as every
+    other write. Never coalesced; reads are fenced like _request's writes."""
+    url = f"{api_domain()}/inventory/v1/{path}"
+    query = {"organization_id": _required("ZOHO_ORG_ID"), **params}
+    with zoho_acquisition.invalidation():
+        pass
+    try:
+        logical_id = uuid4().hex
+        zoho_acquisition.event("logical_request", logical_id=logical_id, method="POST", endpoint=path)
+        with zoho_usage.feature(feature):
+            return _request_http("POST", path, url, query, logical_id, zoho_usage.current_feature(), files=files)
+    finally:
+        with zoho_acquisition.invalidation():
+            pass
+
+
+def _request_http(method: str, path: str, url: str, query: dict, logical_id: str, feature: str = "other", files: dict | None = None) -> dict:
     """Every actual Zoho Inventory HTTP attempt - first try and each retry - goes through the
     shared org limiter. Backoff sleeps happen outside the limiter, so a waiting retry holds no
     concurrency slot. The retry policy (what is retried, and MAX_RETRIES) is unchanged."""
@@ -201,6 +218,7 @@ def _request_http(method: str, path: str, url: str, query: dict, logical_id: str
                     headers={"Authorization": f"Zoho-oauthtoken {token}"},
                     params=query,
                     timeout=REQUEST_TIMEOUT,
+                    **({"files": files} if files else {}),
                 )
             # Count what Zoho counts: a 429 was rejected before processing (tracked apart, not in the
             # total); every other answered attempt counts, retries after a 5xx included.
@@ -350,6 +368,17 @@ def acknowledge_sales_order(salesorder_id: str, status_code: str = "cs_acknowl")
 def remove_acknowledge_sales_order(salesorder_id: str) -> dict:
     """Reset the sales order sub-status to Zoho's plain Confirmed state."""
     return _request_with_feature("POST", f"salesorders/{salesorder_id}/substatus/confirmed", {}, "acknowledge")
+
+
+def set_sales_order_substatus(salesorder_id: str, status_code: str) -> dict:
+    """Delivery write-back (services/zoho_writeback.py): apply a custom sub-status (e.g. the "Closed" sub-status code configured
+    in ZOHO_SO_CLOSED_SUBSTATUS) to a sales order. Same endpoint as the acknowledge sub-status."""
+    return _request_with_feature("POST", f"salesorders/{salesorder_id}/substatus/{status_code}", {}, "delivery_writeback")
+
+
+def attach_to_sales_order(salesorder_id: str, filename: str, data: bytes, content_type: str = "image/jpeg") -> dict:
+    """Delivery write-back: POST salesorders/{id}/attachment (multipart field "attachment")."""
+    return _write_with_files(f"salesorders/{salesorder_id}/attachment", {}, {"attachment": (filename, data, content_type)}, "delivery_writeback")
 
 
 def confirm_sales_order(salesorder_id: str) -> dict:

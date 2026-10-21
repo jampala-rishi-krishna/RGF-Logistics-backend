@@ -53,13 +53,18 @@ def _photo_response(photo: TripPhoto, replayed: bool = False) -> dict:
 
 def _drive_store(meta: media_storage.PhotoMeta, upload_key: str, captured, jpeg: bytes) -> str:
     """storage_key of the photo in Drive (threadpool: Drive calls block). 503 keeps the photo queued on the phone."""
+    return _drive_store_named(meta, upload_key, captured, jpeg)[0]
+
+
+def _drive_store_named(meta: media_storage.PhotoMeta, upload_key: str, captured, jpeg: bytes) -> tuple[str, str | None]:
+    """(storage_key, Drive file name) - the name is reused for the Zoho SO attachment (services/zoho_writeback.py)."""
     try:
         stored = media_storage.store_drive_photo(meta, upload_key, captured, jpeg)
     except gdrive_storage.DriveAuthError:
         fail(503, "Photo storage needs to be reconnected. The photo stays on the phone and will be sent later.", "storage_disabled")
     except gdrive_storage.DriveError:
         fail(503, "The photo could not be stored. Try again.", "storage_disabled")
-    return f"{media_storage.DRIVE_PREFIX}{stored['id']}"
+    return f"{media_storage.DRIVE_PREFIX}{stored['id']}", stored.get("name")
 
 
 @router.post("/api/driver/uploads")
@@ -113,9 +118,10 @@ async def upload_photo(
         except image_processing.ImageError:
             fail(422, "The photo could not be read. Take it again.", "validation", [{"key": "file", "message": "Unreadable image."}])
         meta = media_storage.photo_meta(db, batch_id=batch_id, so_id=so_id, field_key=field_key, uploader_staff_id=user.staff_id)
-        storage_key = await run_in_threadpool(_drive_store, meta, upload_key, captured, jpeg)
+        storage_key, drive_name = await run_in_threadpool(_drive_store_named, meta, upload_key, captured, jpeg)
         content_type, size = "image/jpeg", len(jpeg)
     else:
+        drive_name = jpeg = None
         storage_key = f"trips/{_SAFE.sub('_', batch_id)}/{uuid.uuid4().hex}.{EXTENSIONS[content_type]}"
         try:
             media_storage.put_object(storage_key, data, content_type)
@@ -133,6 +139,8 @@ async def upload_photo(
         if winner is None:
             raise
         return _photo_response(winner, replayed=True)
+    from services import zoho_writeback
+    zoho_writeback.after_upload(db, photo, file_name=drive_name, data=jpeg)  # committed: SO proof photo -> Zoho SO attachment, background (never raises)
     return _photo_response(photo)
 
 

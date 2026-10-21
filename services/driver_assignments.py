@@ -21,7 +21,7 @@ from sqlalchemy.orm import Session
 
 from models.sales_order_history import SalesOrderHistory
 from models.trip import KIND_CHECKOUT
-from services import day_model, delivery_details, dispatch_changes, form_templates, live_sales_order_cache, order_types, staff_directory_cache, stop_order, transfer_orders, trip_events, trip_state
+from services import day_model, delivery_details, dispatch_changes, form_templates, live_sales_order_cache, order_types, staff_directory_cache, stop_order, transfer_orders, trip_events, trip_state, warehouses
 from services.pack_units import is_pack_unit
 from services.text_repair import repair_deep
 from services.sales_order_location import address_lines, address_object, find_city
@@ -137,7 +137,9 @@ def _order_payload(row, lines: list) -> dict:
     shipping = address_object(row.shipping_address)
     totals_ = day_model.order_totals(lines)
     out_lines = [
-        {"name": line.name or "-", "quantity": _num(line.quantity), "unit": line.unit, "packs": _num(line.quantity) if is_pack_unit(line.unit) else None, "kg": None if line.weight_kg is None else round(_num(line.weight_kg), 2)}
+        {"name": line.name or "-", "quantity": _num(line.quantity), "unit": line.unit, "packs": _num(line.quantity) if is_pack_unit(line.unit) else None, "kg": None if line.weight_kg is None else round(_num(line.weight_kg), 2),
+         # pickup warehouse of THIS line (sales_order_lines.location_name, from the cached Zoho SO): one SO can be picked from METS + GLACIER
+         "warehouse": warehouses.pickup_label(getattr(line, "location_name", None))}
         for line in lines
     ]
     order_type = transfer_orders.order_type_of(row)
@@ -159,6 +161,7 @@ def _order_payload(row, lines: list) -> dict:
         "area": find_city(shipping),
         "shipment_date": row.expected_shipment_date.isoformat() if row.expected_shipment_date else None,
         "lines": out_lines,
+        "pickup_warehouses": warehouses.pickup_warehouses(line["warehouse"] for line in out_lines),
         "total_kg": totals_["kg"],
         "kg_complete": totals_["kg_complete"],
         "kg_unknown_lines": totals_["kg_unknown_lines"],

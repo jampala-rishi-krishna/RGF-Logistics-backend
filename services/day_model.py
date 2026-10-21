@@ -26,7 +26,9 @@ from services.staff_roles import helper_ids_of
 
 # Everything except never-assigned / unassigned / released orders is part of a driver's day or history.
 VISIBLE_STATUSES = ("assigned", "manifested", "completed", "delivered")
-OUTCOME_BUCKET = {"delivered": "delivered", "partially delivered": "partial", "failed": "failed", "returned": "failed", "failed / returned": "failed"}
+OUTCOME_BUCKET = {"delivered": "delivered", "partially delivered": "partial", "failed": "failed", "returned": "failed", "failed / returned": "failed",
+                  # cancelled at the customer / sales agent's request: not delivered for every count (services.cancel_request)
+                  "cancelled_by_request": "failed", "cancelled by request": "failed"}
 
 
 def _aware(value: datetime | None) -> datetime | None:

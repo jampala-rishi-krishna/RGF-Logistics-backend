@@ -32,7 +32,8 @@ from services.item_weight import calculate_line_weight_kg, calculate_order_weigh
 from services.delivery_status import is_delivered
 from services.staff_roles import helper_ids_of, staff_kind
 from services import order_types, transfer_orders
-from services import dispatch_changes, trip_events
+from services import order_fields
+from services import dispatch_changes, trip_events, unassign_guard
 from services import staff_directory_cache, live_sales_order_cache, memory_tables, vapi_client, vehicle_flags, voice_calls, voice_control, whatsapp_control
 from services.sales_order_history_sync import sync_history_row
 from routers.fleet import invalidate_fleet_cache
@@ -205,7 +206,7 @@ class AssignmentEmailBody(AssignmentBody):
     subject: str | None = None
 
 
-ASSIGNMENT_TABLE_COLUMNS = ("SO number", "Client", "Total kg", "Total Packs", "Shipping Address")
+ASSIGNMENT_TABLE_COLUMNS = ("SO number", "Client", "Delivery method", "Fulfillment type", "Total kg", "Total Packs", "Shipping Address")
 
 
 def _line_items(order) -> list[dict]:
@@ -255,7 +256,7 @@ def _assignment_email_text(profile, orders, weight_fn=None, helpers=(), unknown_
         raw = order.raw_json or {}
         address_text = ", ".join(address_lines(raw.get("shipping_address") or order.shipping_address))
         kg_text, kg_note = _kg_text(order, weight_fn(order), unknown_fn)
-        lines += [f"SO number: {order.salesorder_number or order.id}", f"Client: {order.customer_name or '-'}", f"Total kg: {kg_text}" + (f" ({kg_note})" if kg_note else ""), f"Total Packs: {_packs_text(order)}", f"Shipping Address: {address_text or '-'}", ""]
+        lines += [f"SO number: {order.salesorder_number or order.id}", f"Client: {order.customer_name or '-'}", f"Delivery method: {order_fields.delivery_method(order) or '-'}", f"Fulfillment type: {order_fields.fulfillment_type(order) or '-'}", f"Total kg: {kg_text}" + (f" ({kg_note})" if kg_note else ""), f"Total Packs: {_packs_text(order)}", f"Shipping Address: {address_text or '-'}", ""]
     return "\n".join(lines).strip()
 
 
@@ -276,14 +277,14 @@ def _assignment_email_html(drivers: list, profile, orders, assigned_by: str, ass
         address_text = ", ".join(address_lines(raw.get("shipping_address") or order.shipping_address))
         kg_text, kg_note = _kg_text(order, weight_fn(order), unknown_fn)
         kg_cell = escape(kg_text) + (f"<br><span style='font-size:11px;color:#6b7280;'>{escape(kg_note)}</span>" if kg_note else "")
-        rows.append(f"<tr><td style='{cell}'>{escape(str(order.salesorder_number or order.id))}</td><td style='{cell}'>{escape(str(order.customer_name or '-'))}</td><td style='{cell}'>{kg_cell}</td><td style='{cell}'>{_packs_text(order)}</td><td style='{cell}'>{escape(address_text or '-')}</td></tr>")
+        rows.append(f"<tr><td style='{cell}'>{escape(str(order.salesorder_number or order.id))}</td><td style='{cell}'>{escape(str(order.customer_name or '-'))}</td><td style='{cell}'>{escape(order_fields.delivery_method(order) or '-')}</td><td style='{cell}'>{escape(order_fields.fulfillment_type(order) or '-')}</td><td style='{cell}'>{kg_cell}</td><td style='{cell}'>{_packs_text(order)}</td><td style='{cell}'>{escape(address_text or '-')}</td></tr>")
     headers = "".join(f"<th style='{head}'>{heading}</th>" for heading in ASSIGNMENT_TABLE_COLUMNS)
     helper_html = f"<p style='margin:0 0 16px;font-size:14px;line-height:1.5;font-weight:700;'>{escape(_helper_line(helpers))}</p>" if _helper_line(helpers) else ""
     body_html = (
         "<p style='margin:0 0 16px;font-size:14px;line-height:1.5;'>Please review the assigned sales orders below before dispatch and reply to confirm receipt.</p>"
         f"{helper_html}"
         "<div style='overflow-x:auto;-webkit-overflow-scrolling:touch;'>"
-        f"<table cellspacing='0' cellpadding='0' border='0' style='border-collapse:collapse;width:100%;min-width:520px;'><thead><tr>{headers}</tr></thead><tbody>{''.join(rows)}</tbody></table>"
+        f"<table cellspacing='0' cellpadding='0' border='0' style='border-collapse:collapse;width:100%;min-width:720px;'><thead><tr>{headers}</tr></thead><tbody>{''.join(rows)}</tbody></table>"
         "</div>"
     )
     html_body = render_rarechain_email("COLD-CHAIN OPERATIONS / PHILIPPINES", "New dispatch assignment.", f"{driver_names} {'have' if len(drivers) > 1 else 'has'} been assigned to truck {profile.plate_no or '-'}.", "https://images.pexels.com/photos/7464230/pexels-photo-7464230.jpeg?auto=compress&amp;cs=tinysrgb&amp;w=1200", [{"label": "TRUCK PLATE", "value": profile.plate_no or "-"}, {"label": "WAREHOUSE PICKUP", "value": profile.capacity_note or "-"}, {"label": "TOTAL SOs", "value": str(len(orders))}, *([{"label": "HELPER", "value": ", ".join(h.name for h in helpers if getattr(h, "name", None))}] if helpers else [])], "https://images.pexels.com/photos/6169056/pexels-photo-6169056.jpeg?auto=compress&amp;cs=tinysrgb&amp;w=1800", "Route details for the assigned driver.", body_html)
@@ -392,14 +393,20 @@ class UnassignPreviewBody(BaseModel):
 MAX_BULK_UNASSIGN = 200
 
 
-def _candidate(order_id: str, order, *, require_assigned: bool) -> dict:
-    """What the unassign rules need about one order (memory; `order` may be a Neon sales_orders row for the preview)."""
+def _candidate(order_id: str, order, *, require_assigned: bool, automatic: bool = False) -> dict:
+    """What the unassign rules need about one order (memory; `order` may be a Neon sales_orders row for the preview).
+    A MANUAL unassign is also refused when Zoho shows the SO fulfilled / shipped / partially delivered / delivered
+    (services/unassign_guard); automatic unassigns (trip end, Zoho date change) pass automatic=True and skip that guard."""
     state = live_sales_order_cache.get_assignment(order_id) or {}
     if order is None:
         return dispatch_changes.candidate(order_id, number=None, order_type=transfer_orders.order_type_of(order_id), batch_id=None, blocker="Order was not found.")
     status = getattr(order, "assignment_status", None)
-    delivered = status in {"completed", "delivered"} or is_delivered(getattr(order, "raw_json", None) or {})
+    # Automatic unassigns go by OUR check-out (a not-delivered stop is often Zoho "fulfilled"/"shipped" already); the Zoho
+    # date-change path checks Zoho delivered/partially delivered itself (services/auto_unassign.observe_zoho_records).
+    delivered = status in {"completed", "delivered"} or (not automatic and is_delivered(getattr(order, "raw_json", None) or {}))
     blocker = "Delivered or completed sales orders cannot be unassigned." if delivered else _unassign_blocker(order, require_assigned=require_assigned)
+    if not blocker and not automatic:
+        blocker = unassign_guard.zoho_status_blocker(order)
     return dispatch_changes.candidate(
         order_id, number=getattr(order, "salesorder_number", None), order_type=transfer_orders.order_type_of(order),
         batch_id=state.get("assignment_batch_id") or getattr(order, "assignment_batch_id", None),
@@ -444,11 +451,18 @@ def unassign_preview(body: UnassignPreviewBody, current_user: CurrentUser = Depe
 # Registered before "/{salesorder_id}" (like "new-driver") so "bulk-unassign" is not taken for an order id.
 @router.post("/bulk-unassign")
 def bulk_unassign(body: BulkUnassignBody, current_user: CurrentUser = Depends(require_manager), db: Session = Depends(get_db)):
-    """Confirmed Orders > "Unassign selected": returns every selected SO/TO to its source tab (Inventory / Load Planning). Orders that cannot be
-    unassigned (delivered, completed, on a manifest, not assigned) are skipped and listed with the reason; the rest are done. The email status of
-    the touched batches is cleared: the unassigned orders lose it, and any order left on the same batch goes back to not_sent (its email no longer
-    matches the load)."""
-    ids = list(dict.fromkeys(str(value).strip() for value in body.order_ids if str(value).strip()))
+    """Confirmed Orders > "Unassign selected" (a MANUAL unassign: the Zoho-status / checked-out guard applies)."""
+    return bulk_unassign_orders(body.order_ids, current_user, db, confirm=body.confirm)
+
+
+def bulk_unassign_orders(order_ids: list[str], current_user, db: Session, *, confirm: bool = False, automatic: bool = False) -> dict:
+    """Returns every selected SO/TO to its source tab (Inventory / Load Planning). Orders that cannot be
+    unassigned (delivered, completed, on a manifest, not assigned, Zoho fulfilled/shipped/partially delivered, stop checked out) are skipped and
+    listed with the reason ({id, order_number, reason}); the rest are done. The email status of the touched batches is cleared: the unassigned
+    orders lose it, and any order left on the same batch goes back to not_sent (its email no longer matches the load).
+    automatic=True (trip end / Zoho date change, never a dispatcher click): skips the Zoho-status + checked-out guard and the confirm step."""
+    confirm = confirm or automatic
+    ids = list(dict.fromkeys(str(value).strip() for value in order_ids if str(value).strip()))
     if not ids:
         raise HTTPException(400, "Select at least one order.")
     if len(ids) > MAX_BULK_UNASSIGN:
@@ -461,23 +475,25 @@ def bulk_unassign(body: BulkUnassignBody, current_user: CurrentUser = Depends(re
         try:
             order = live_sales_order_cache.find_cached(order_id) or live_sales_order_cache.ensure_zoho_data(order_id)
         except HTTPException as exc:
-            skipped.append({"id": order_id, "reason": str(exc.detail)})
+            skipped.append({"id": order_id, "order_number": order_id, "reason": str(exc.detail)})
             continue
         if order is None:
-            skipped.append({"id": order_id, "reason": "Order was not found."})
+            skipped.append({"id": order_id, "order_number": order_id, "reason": "Order was not found."})
             continue
         blocker = _unassign_blocker(order, require_assigned=True)
         if blocker:
-            skipped.append({"id": order_id, "reason": blocker})
+            skipped.append({"id": order_id, "order_number": getattr(order, "salesorder_number", None) or order_id, "reason": blocker})
             continue
         loaded.append((order_id, order))
     # Contract 7: checked-out orders are skipped with the reason; acknowledged / started / checked-in ones need confirm (else 409, nothing done).
-    rows = dispatch_changes.describe(db, [_candidate(order_id, order, require_assigned=True) for order_id, order in loaded]) if loaded else []
+    rows = dispatch_changes.describe(db, [_candidate(order_id, order, require_assigned=True, automatic=automatic) for order_id, order in loaded]) if loaded else []
+    if automatic:
+        _release_checked_out(rows)
     for row in rows:
         if row["blocked"]:
-            skipped.append({"id": row["id"], "reason": row["reason"]})
+            skipped.append({"id": row["id"], "order_number": row["number"], "reason": row["reason"]})
     rows = [row for row in rows if not row["blocked"]]
-    if not body.confirm:
+    if not confirm:
         dispatch_changes.confirm_required(rows)
     by_id = dict(loaded)
     for row in rows:
@@ -558,6 +574,13 @@ def send_assignment_email_route(body: AssignmentEmailBody, current_user: Current
     return send_assignment_email(body, current_user, db)
 
 
+def _pickup_block(order) -> dict | None:
+    """Sales orders (SO / WM) only: a PO's "For Pickup" means OUR truck collects from the vendor, so it is never blocked here."""
+    if transfer_orders.order_type_of(order) in {"TO", "PO"}:
+        return None
+    return unassign_guard.pickup_block(order)
+
+
 @router.post("/{salesorder_id}")
 def assign_order(salesorder_id: str, body: AssignmentBody, current_user: CurrentUser = Depends(require_role("admin", "dispatcher")), db: Session = Depends(get_db)):
     order_ids = body.salesorder_ids or [salesorder_id]
@@ -577,6 +600,18 @@ def assign_order(salesorder_id: str, body: AssignmentBody, current_user: Current
     profile = profile or manual_profile
     if not order or not profile or len(orders) != len(set(order_ids)):
         raise HTTPException(404, "Sales order or vehicle was not found.")
+    # Customer pickups (Delivery method / Fulfillment type = pickup) never go on a truck. One order (or every selected order is a
+    # pickup) -> 422 with the structured list; a bulk selection assigns the rest and returns the blocked ones in `pickup_blocked`.
+    pickup_blocked = [block for block in (_pickup_block(item) for item in orders) if block]
+    if pickup_blocked:
+        blocked_ids = {str(block["id"]) for block in pickup_blocked}
+        orders = [item for item in orders if str(item.id) not in blocked_ids]
+        if not orders:
+            message = pickup_blocked[0]["reason"] if len(pickup_blocked) == 1 else f"{len(pickup_blocked)} orders are customer pickups and can't be assigned to a truck."
+            raise HTTPException(422, detail={"code": "pickup_not_assignable", "title": "Unable to assign", "message": message, "blocked": pickup_blocked})
+        order_ids = [item.id for item in orders]
+        if str(order.id) in blocked_ids:
+            order = orders[0]
     if str(profile.plate_no or "").upper() in LOCKED_VEHICLES:
         raise HTTPException(409, f"Vehicle unavailable: {LOCKED_VEHICLES[str(profile.plate_no).upper()]}")
     if any(item.assignment_status == "assigned" for item in orders):
@@ -645,6 +680,7 @@ def assign_order(salesorder_id: str, body: AssignmentBody, current_user: Current
     order_ids_assigned = [item.id for item in orders]
     batch_id = uuid.uuid4().hex  # one id per assignment click: Retry/Resend can never merge two assignments to the same truck
     response["assignment_batch_id"] = batch_id
+    response["pickup_blocked"] = pickup_blocked  # customer pickups left out of this assignment ("Unable to assign" popup)
     if not driver_ids:
         assignment_email_status.record(order_ids_assigned, "skipped", error="skipped: no driver selected", batch_id=batch_id)
         response["notifications"] = {"skipped": True, "reason": "No driver selected."}
@@ -657,14 +693,34 @@ def assign_order(salesorder_id: str, body: AssignmentBody, current_user: Current
 @router.post("/{salesorder_id}/unassign")
 def unassign_order(salesorder_id: str, current_user: CurrentUser = Depends(require_manager), db: Session = Depends(get_db), body: UnassignBody | None = None):
     """Contract 7: delivered / checked out -> 409 code "delivered"; acknowledged / trip started / checked in without
-    {"confirm": true} -> 409 code "confirm_required" (nothing done). The unassign and its audit event are ONE commit (contract 8)."""
+    {"confirm": true} -> 409 code "confirm_required" (nothing done). Zoho fulfilled / shipped / partially delivered -> 409 code
+    "unassign_blocked". The unassign and its audit event are ONE commit (contract 8). A MANUAL unassign (the route)."""
+    return unassign_one(salesorder_id, current_user, db, confirm=bool(body and body.confirm))
+
+
+def _release_checked_out(rows: list[dict]) -> None:
+    """Automatic unassign: a stop checked out as not delivered / cancelled at trip end is still removed (only the manual guard blocks it).
+    Zoho delivered / completed / on a manifest stay blocked."""
+    for row in rows:
+        c = row["_candidate"]
+        if row["blocked"] and not c["delivered"] and not c["blocker"]:
+            row["blocked"], row["reason"] = False, None
+
+
+def unassign_one(salesorder_id: str, current_user, db: Session, *, confirm: bool = False, automatic: bool = False) -> dict:
+    """The unassign service. automatic=True (trip end not-delivered/cancelled, Zoho date change): skips the manual guard
+    (Zoho fulfilled/shipped/partially delivered, stop checked out) and the confirm step."""
     order = live_sales_order_cache.find_cached(salesorder_id) or live_sales_order_cache.ensure_zoho_data(salesorder_id)
     if order is None:
         raise HTTPException(404, "Sales order was not found.")
-    row = dispatch_changes.describe(db, [_candidate(salesorder_id, order, require_assigned=False)])[0]
+    rows = dispatch_changes.describe(db, [_candidate(salesorder_id, order, require_assigned=False, automatic=automatic)])
+    if automatic:
+        _release_checked_out(rows)
+    row = rows[0]
     if row["blocked"]:
-        raise HTTPException(409, detail={"code": "delivered", "message": row["reason"]})
-    if not (body and body.confirm):
+        code = "delivered" if row["state"] == "delivered" else "unassign_blocked"
+        raise HTTPException(409, detail={"code": code, "message": row["reason"], "order_number": row["number"]})
+    if not (confirm or automatic):
         dispatch_changes.confirm_required([row])
     _apply_unassign(order, db)
     _record_unassign(db, current_user, row)

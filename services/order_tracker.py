@@ -18,7 +18,7 @@ from zoneinfo import ZoneInfo
 from fastapi import HTTPException
 
 from services import day_model, fleet_static_cache, live_gps_store, live_sales_order_cache as live
-from services import media_storage, order_tracker_facts as snapshots
+from services import media_storage, order_fields, order_tracker_facts as snapshots
 
 MANILA = ZoneInfo("Asia/Manila")
 ROLES = {"admin", "planner", "dispatcher", "sales", "wet_market"}
@@ -93,6 +93,8 @@ def project(row, historical=False):
                       for item in (raw.get("line_items") or [])[:200] if isinstance(item, dict)],
             "line_coverage": "truncated" if len(raw.get("line_items") or []) > 200 else "cached",
             "attachment_count": len(raw.get("documents") or raw.get("attachments") or []),
+            "delivery_method": safe_text(order_fields.delivery_method(raw) or getattr(row, "delivery_method", None), 200),
+            "fulfillment_type": safe_text(order_fields.fulfillment_type(raw), 200),
             }
 
 
@@ -280,7 +282,7 @@ def order_card(row):
     at = snapshot.get("as_of") if snapshot else None
     answers = answer_map(stop.get("answers"))
     bucket = day_model.outcome_bucket(stop.get("outcome"))
-    status = {"delivered": "Delivered", "partial": "Partly delivered", "failed": "Not delivered"}.get(bucket)
+    status = "Cancelled" if str(stop.get("outcome") or "").strip().lower() == "cancelled_by_request" else {"delivered": "Delivered", "partial": "Partly delivered", "failed": "Not delivered"}.get(bucket)
     if not status:
         status = ("Back at warehouse" if trip.get("status") in {"returned", "handover_submitted", "closed"} else
                   "Arrived" if stop.get("checkin_at") else "Out for delivery" if trip.get("status") == "on_trip" else
@@ -344,6 +346,7 @@ def order_card(row):
                                          {"recorded_rules": rules["rules"], "so_notes": row.get("notes")})
     return {"id": row["id"], "number": row["number"], "customer": row["customer"], "delivery_date": row["date"],
             "order_type": row["order_type"], "status": status, "truck": plate_of(row), "area": row.get("area"),
+            "delivery_method": row.get("delivery_method"), "fulfillment_type": row.get("fulfillment_type"),
             "last_update": at or row["as_of"], "sections": sections,
             "link": "/app/order-tracker?order=" + quote(row["number"], safe="") + "&from=" + str(row["date"]) + "&to=" + str(row["date"]),
             "contact": "Call Logistics"}
@@ -356,7 +359,7 @@ def get_order(user, number, start, end, db=None):
     return order_card(row)
 
 
-FINAL_EVENTS = {"Delivered": "delivered", "Partly delivered": "partly delivered", "Not delivered": "not delivered"}
+FINAL_EVENTS = {"Delivered": "delivered", "Partly delivered": "partly delivered", "Not delivered": "not delivered", "Cancelled": "cancelled"}
 
 
 def latest_event(card):
@@ -371,7 +374,7 @@ def latest_event(card):
 
 
 def is_problem(card):
-    return card["status"] in {"Partly delivered", "Not delivered"} or bool(card["sections"]["problems"]["value"])
+    return card["status"] in {"Partly delivered", "Not delivered", "Cancelled"} or bool(card["sections"]["problems"]["value"])
 
 
 def find_orders(user, query, start, end, status=None, db=None, offset=0):

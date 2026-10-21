@@ -146,8 +146,10 @@ def _crew_ids(event: TripEvent) -> set[int]:
 def timeline_entry(event: TripEvent, actor_name: str | None) -> dict:
     """Contract 9: how an unassign shows in the Driver Overview timeline."""
     result = event.result or {}
+    automatic = bool(result.get("automatic"))  # services/auto_unassign: trip end not delivered / cancelled, Zoho date change
     return {"so_id": event.so_id, "so_number": result.get("so_number") or event.so_id, "order_type": result.get("order_type") or "SO", "previous_state": result.get("previous_state"),
-            "actor_name": actor_name or result.get("by_name")}
+            "actor_name": (result.get("by_name") if automatic else None) or actor_name or result.get("by_name"),
+            "automatic": automatic, "reason": result.get("reason"), "message": result.get("message")}
 
 
 def driver_changes(db: Session, staff_id: int, today: date, current_batch_ids: set[str], also: tuple[date, ...] = ()) -> list[dict]:
@@ -156,7 +158,8 @@ def driver_changes(db: Session, staff_id: int, today: date, current_batch_ids: s
     since = now_utc() - timedelta(days=LOOKBACK_DAYS)
     events = db.execute(select(TripEvent).where(TripEvent.event_type == EVENT, TripEvent.received_at >= since).order_by(TripEvent.received_at, TripEvent.id)).scalars().all()
     days = {today.isoformat(), *(d.isoformat() for d in also)}  # the driver app lists today + tomorrow (same query, wider filter)
-    mine = [e for e in events if staff_id in _crew_ids(e) and (e.payload or {}).get("delivery_date") in days]
+    mine = [e for e in events if staff_id in _crew_ids(e) and (e.payload or {}).get("delivery_date") in days
+            and (e.payload or {}).get("notify_crew", True)]  # an automatic unassign after the trip ended (not delivered) is not a dispatch change
     out: list[dict] = []
     gone: dict[str, TripEvent] = {}
     for event in mine:

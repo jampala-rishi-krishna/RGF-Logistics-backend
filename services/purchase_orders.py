@@ -27,6 +27,7 @@ from zoneinfo import ZoneInfo
 
 from models.inventory import SalesOrderCache
 from services import branches, memory_debug, transfer_orders, warehouses, zoho_resilience, pickup_rules
+from services import order_fields
 from services.item_weight import calculate_line_weight_kg
 from services.pack_units import is_pack_unit
 from services.serialize import row_to_dict
@@ -597,6 +598,7 @@ def summary(row, *, allow_fetch: bool = False) -> dict:
     )
     sent_at = getattr(row, "email_sent_at", None)
     result["email_sent_at"] = sent_at.isoformat() if hasattr(sent_at, "isoformat") else sent_at
+    order_fields.apply(result, row)  # a PO has a standard delivery_method only when Zoho sends one; fulfillment type normally None
     products, packs, cases, units = [], 0.0, 0.0, 0.0
     lines = raw.get("line_items") or []
     for item, weight in zip(lines, line_weights(row, allow_fetch=allow_fetch)):

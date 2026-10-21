@@ -34,6 +34,7 @@ FEATURES = {
     "shipments",
     "lock_status",
     "acknowledge",
+    "delivery_writeback",  # services/zoho_writeback.py: SO Closed sub-status + POD attachment after a check-out
     "reports",
     "dashboard",
     "agent_tools",
@@ -49,7 +50,7 @@ FEATURES = {
 # calls run under the separate lock credential (a different Zoho user), so they are not this app user's
 # calls. They still count against the org-wide Zoho limit, which is why they stay tracked.
 UNCOUNTED = {"token_refresh", "rate_limited", "lock_webhook", "lock_status"}
-ESSENTIAL_FEATURES = {"acknowledge", "lock_status", "so_detail"}
+ESSENTIAL_FEATURES = {"acknowledge", "lock_status", "so_detail", "delivery_writeback"}
 # At 100% of the budget everything stops except these two (so_detail is essential only below 100%).
 HARD_STOP_EXEMPT = {"acknowledge", "lock_status"}
 # While the startup restore has failed, only these pass freely; so_detail is hard-capped (see failsafe_so_detail_cap).

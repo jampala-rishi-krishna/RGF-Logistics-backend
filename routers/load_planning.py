@@ -37,6 +37,8 @@ from services.item_weight import calculate_line_weight_kg
 from services.pack_units import is_pack_unit
 from services.delivery_status import is_delivered, sales_order_delivery_status
 from services import item_detail_cache
+from services import order_fields, warehouses
+from services import unassign_guard
 from services.warehouse_stock import cached_item_stock, fetch_item_stock, stock_branch_id, stock_for_orders_cached
 from services.sales_order_location import address_object, find_city, shipping_city
 from fastapi.concurrency import run_in_threadpool
@@ -295,6 +297,7 @@ def _summary(row, db: Session | None = None, *, allow_fetch: bool = True) -> dic
     result["branch_code"] = branch["code"] if branch else None
     notes = raw_notes.get("notes") or raw_notes.get("note") or raw_notes.get("customer_notes")
     result["notes"] = str(notes).strip() if notes is not None and str(notes).strip() else None
+    order_fields.apply(result, row)  # delivery_method + fulfillment_type from the cached Zoho record (None for Neon history rows)
     # Stock belongs to a specific SKU and warehouse; do not expose old SO-level snapshots.
     result["mets_qty_available_for_sale"] = None
     result["glacier_qty_available_for_sale"] = None
@@ -326,7 +329,7 @@ def _summary(row, db: Session | None = None, *, allow_fetch: bool = True) -> dic
             if is_pack_unit(normalized): total_packs += quantity
             elif "case" in normalized or "carton" in normalized: total_cases += quantity
             else: total_units += quantity
-            products.append({"mets_qty_available_for_sale": saved_item_stock.get("mets"), "glacier_qty_available_for_sale": saved_item_stock.get("glacier"), "line_item_id": None, "item_id": line.item_id, "name": line.name, "sku": line.sku, "quantity": quantity, "unit": unit or None, "total_weight_kg": line.weight_kg, "packaging_type": "pack" if is_pack_unit(normalized) else "case" if "case" in normalized or "carton" in normalized else None, "pack_quantity": quantity if is_pack_unit(normalized) else 0, "case_quantity": quantity if "case" in normalized or "carton" in normalized else 0, "quantity_packed": 0.0, "quantity_shipped": float(line.quantity_shipped or 0)})
+            products.append({"mets_qty_available_for_sale": saved_item_stock.get("mets"), "glacier_qty_available_for_sale": saved_item_stock.get("glacier"), "line_item_id": None, "item_id": line.item_id, "name": line.name, "sku": line.sku, "quantity": quantity, "unit": unit or None, "total_weight_kg": line.weight_kg, "packaging_type": "pack" if is_pack_unit(normalized) else "case" if "case" in normalized or "carton" in normalized else None, "pack_quantity": quantity if is_pack_unit(normalized) else 0, "case_quantity": quantity if "case" in normalized or "carton" in normalized else 0, "quantity_packed": 0.0, "quantity_shipped": float(line.quantity_shipped or 0), "warehouse": warehouses.pickup_label(line.location_name)})
         total_item_quantity = sum(float(line.quantity or 0) for line in lines)
     else:
         items = (row.raw_json or {}).get("line_items") or []
@@ -347,7 +350,7 @@ def _summary(row, db: Session | None = None, *, allow_fetch: bool = True) -> dic
             line_total_weight_kg = item_weight_kg(item, row.salesorder_number or row.id)
             stock_item_id = _line_item_id(item)
             item_stock = ((fetch_item_stock(stock_item_id, stock_branch) if allow_fetch else cached_item_stock(stock_item_id, stock_branch)) if stock_item_id else None) or {}
-            products.append({"mets_qty_available_for_sale": item_stock.get("mets"), "glacier_qty_available_for_sale": item_stock.get("glacier"), "line_item_id": item.get("line_item_id"), "item_id": stock_item_id, "name": item.get("name") or item.get("item_description") or item.get("description"), "sku": item.get("sku") or item.get("item_order") or stock_item_id, "quantity": quantity, "unit": unit or None, "total_weight_kg": line_total_weight_kg, "packaging_type": "pack" if is_pack_unit(normalized) else "case" if "case" in normalized or "carton" in normalized else None, "pack_quantity": quantity if is_pack_unit(normalized) else 0, "case_quantity": quantity if "case" in normalized or "carton" in normalized else 0, "quantity_packed": number(item, "quantity_packed"), "quantity_shipped": number(item, "quantity_shipped")})
+            products.append({"mets_qty_available_for_sale": item_stock.get("mets"), "glacier_qty_available_for_sale": item_stock.get("glacier"), "line_item_id": item.get("line_item_id"), "item_id": stock_item_id, "name": item.get("name") or item.get("item_description") or item.get("description"), "sku": item.get("sku") or item.get("item_order") or stock_item_id, "quantity": quantity, "unit": unit or None, "total_weight_kg": line_total_weight_kg, "packaging_type": "pack" if is_pack_unit(normalized) else "case" if "case" in normalized or "carton" in normalized else None, "pack_quantity": quantity if is_pack_unit(normalized) else 0, "case_quantity": quantity if "case" in normalized or "carton" in normalized else 0, "quantity_packed": number(item, "quantity_packed"), "quantity_shipped": number(item, "quantity_shipped"), "warehouse": warehouses.pickup_label(warehouses.line_location(item))})
         total_item_quantity = sum(number(item, "quantity") for item in items)
 
     if is_transfer:  # a saved (past-dated) TO: the TO fields come from its own columns
@@ -357,10 +360,23 @@ def _summary(row, db: Session | None = None, *, allow_fetch: bool = True) -> dic
                       status_label=purchase_orders.status_label(row.order_status), expected_delivery_date=row.expected_shipment_date.isoformat() if row.expected_shipment_date else None)
     result["product_count"] = len([p for p in products if p["name"]])
     result["products"] = products
+    # Pickup warehouse(s) of the order's lines (line-level Zoho location, already cached): ["METS", "GLACIER"] = picked from both. TO / PO: [].
+    result["pickup_warehouses"] = [] if is_reference else warehouses.pickup_warehouses(p.get("warehouse") for p in products)
     result["pack_count"] = total_packs
     result["case_count"] = total_cases
     result["unit_count"] = total_units
     result["total_item_quantity"] = total_item_quantity
+    return result
+
+
+def _with_unassign_reason(result: dict, row) -> dict:
+    """`unassign_blocked_reason`: why the Unassign action is hidden for this row (Zoho fulfilled / shipped / partially delivered /
+    delivered, or the trip stop is checked out per the in-memory trip facts). None = Unassign may show. Memory only."""
+    try:
+        result["unassign_blocked_reason"] = unassign_guard.unassign_blocked_reason(row) if (getattr(row, "assignment_status", None) or "unassigned") != "unassigned" else None
+    except Exception:  # noqa: BLE001 - a display hint must never break the list
+        result["unassign_blocked_reason"] = None
+    result.update({"stop_outcome": None, "checkout_at": None, **unassign_guard.stop_fact(row)})
     return result
 
 
@@ -443,7 +459,7 @@ def list_sales_orders(
         waiting += item_detail_cache.request_refresh(db.execute(select(SalesOrderLine.item_id).where(SalesOrderLine.sales_order_id.in_(saved_page))).scalars().all())
     total_weight, weight_complete = _total_weight_kg(rows, db)
     return {
-        "items": [_summary(row, db, allow_fetch=False) for row in page_rows],
+        "items": [_with_unassign_reason(_summary(row, db, allow_fetch=False), row) for row in page_rows],
         "page": page,
         "per_page": per_page,
         "total": len(rows),

@@ -35,6 +35,35 @@ def warehouse_key(name: str | None) -> str | None:
     return None
 
 
+_PICKUP_ORDER = {"METS": 0, "GLACIER": 1}
+
+
+def pickup_label(name: str | None) -> str | None:
+    """Short pickup label of a line's Zoho location / warehouse name: "METS" / "GLACIER", any other name as-is, None if blank."""
+    key = warehouse_key(name)
+    if key:
+        return key.upper()
+    text = str(name or "").strip()
+    return text or None
+
+
+def line_location(item: dict | None) -> str | None:
+    """The warehouse / location name of ONE cached Zoho SO line (location_name, warehouse_name or the nested objects)."""
+    if not isinstance(item, dict):
+        return None
+    location = item.get("location") if isinstance(item.get("location"), dict) else {}
+    warehouse = item.get("warehouse") if isinstance(item.get("warehouse"), dict) else {}
+    name = item.get("location_name") or item.get("warehouse_name") or location.get("location_name") or warehouse.get("warehouse_name")
+    return str(name).strip() if name and str(name).strip() else None
+
+
+def pickup_warehouses(names) -> list[str]:
+    """Distinct pickup labels of an order's lines, METS before GLACIER, then any other name alphabetically.
+    ["METS", "GLACIER"] = one SO picked from both warehouses."""
+    labels = {label for label in (pickup_label(n) for n in names or []) if label}
+    return sorted(labels, key=lambda label: (_PICKUP_ORDER.get(label, 2), label))
+
+
 def list_warehouses() -> list[dict]:
     return [dict(warehouse) for warehouse in WAREHOUSES.values()]
 

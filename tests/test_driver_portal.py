@@ -418,7 +418,7 @@ def test_assignment_detail_has_contact_notes_lines_and_marks_uncached_details(en
     first, second = detail["orders"]
     assert first["so_number"] == "SO-so-d1" and first["contact"] == {"person": "Ana Cruz", "phone": "09175550000", "attention": "Receiving"}
     assert first["notes"] == "Gate B, call on arrival" and first["address_text"].startswith("so-d1 Main St")
-    assert first["lines"][1] == {"name": "Chicken", "quantity": 5.0, "unit": "pack", "packs": 5.0, "kg": 6.0}
+    assert first["lines"][1] == {"name": "Chicken", "quantity": 5.0, "unit": "pack", "packs": 5.0, "kg": 6.0, "warehouse": None}
     assert first["total_kg"] == 26.0 and first["total_packs"] == 5.0 and first["details_loading"] is False
     assert second["contact"] is None and second["details_loading"] is True and detail["details_loading"] is True
     assert env.zoho_calls == []

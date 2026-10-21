@@ -36,14 +36,14 @@ def test_packs_count_only_pck_pack_packs_lines_kg_and_pc_are_not_packs():
     o = order("SO-1", [line("kg", 50), line("pck", 36), line("pc", 5), line("packs", 4)])
     assert assignment._order_packs(o) == 40.0
     _, html, _ = html_for([o])
-    assert cells(html, "SO-1")[3] == "40"
+    assert cells(html, "SO-1")[5] == "40"
 
 
 def test_an_order_without_pack_lines_shows_a_dash_not_a_quantity_sum():
     o = order("SO-2", [line("kg", 564), line("pc", 12)])
     assert assignment._order_packs(o) is None
     _, html, body = html_for([o])
-    assert cells(html, "SO-2")[3] == "\u2014" and cells(body, "SO-2")[3] == "\u2014"  # driver email, team email and preview all use this same table
+    assert cells(html, "SO-2")[5] == "\u2014" and cells(body, "SO-2")[5] == "\u2014"  # driver email, team email and preview all use this same table
     text = assignment._assignment_email_text(PROFILE, [o], weight_fn=lambda x: 1.0, unknown_fn=lambda x: 0)
     assert "Total Packs: \u2014" in text
 
@@ -51,12 +51,12 @@ def test_an_order_without_pack_lines_shows_a_dash_not_a_quantity_sum():
 def test_partial_weight_is_written_with_a_plus_and_a_note_never_as_complete():
     o = order("SO-3", [line("kg", 354), line("pck", 36, "no-weight-item")])
     _, html, _ = html_for([o], weight=lambda x: 354.0, unknown=lambda x: 1)
-    kg_cell = cells(html, "SO-3")[2]
+    kg_cell = cells(html, "SO-3")[4]
     assert "354.0 kg+" in kg_cell and "1 line without weight" in kg_cell
     text = assignment._assignment_email_text(PROFILE, [o], weight_fn=lambda x: 354.0, unknown_fn=lambda x: 1)
     assert "Total kg: 354.0 kg+ (1 line without weight)" in text
     _, html2, _ = html_for([order("SO-4", [line("kg", 10)])], weight=lambda x: 10.0, unknown=lambda x: 0)
-    assert "kg+" not in html2 and "without weight" not in html2 and cells(html2, "SO-4")[2] == "10.0"  # complete stays plain
+    assert "kg+" not in html2 and "without weight" not in html2 and cells(html2, "SO-4")[4] == "10.0"  # complete stays plain
 
 
 def test_unknown_weight_counted_from_items_already_in_memory(monkeypatch):

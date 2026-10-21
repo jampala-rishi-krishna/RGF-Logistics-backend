@@ -102,7 +102,7 @@ def r2_object_key(storage_key: str) -> str:
 # ---- Drive photo naming / description ----------------------------------------------------------------------------------
 
 _UNSAFE_NAME = re.compile(r'[/\\:*?"<>|\x00-\x1f]+')
-RESULT_LABEL = {"delivered": "Delivered", "partial": "Partial", "failed": "Not delivered"}
+RESULT_LABEL = {"delivered": "Delivered", "partial": "Partial", "failed": "Not delivered", "cancel_proof": "Cancelled by request"}
 FINAL_KINDS = frozenset(RESULT_LABEL)
 
 
@@ -138,6 +138,8 @@ def upload_kind(field_key: str | None) -> str:
         return "problem"
     if key == "failure_photo":
         return "failed"
+    if key == "cancel_proof":
+        return "cancel_proof"
     if key == "delivery_photo":
         return "delivery"
     if "signature" in key:
@@ -151,6 +153,8 @@ def outcome_kind(outcome: str | None) -> str | None:
     text = str(outcome or "").strip().lower()
     if not text:
         return None
+    if text.startswith("cancelled"):
+        return "cancel_proof"
     if text.startswith("partial"):
         return "partial"
     if text.startswith(("fail", "return", "not deliver", "undeliver")):
