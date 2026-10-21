@@ -9,7 +9,7 @@ Order of checks inside every action (so retries and duplicate taps never fail):
 from __future__ import annotations
 
 import urllib.parse
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime
 from typing import Any
 
@@ -217,6 +217,7 @@ def _ensure_trip(ctx: Ctx) -> Trip:
 
 def run_action(db: Session, user: CurrentUser, batch_id: str, body: ActionBody, event_type: str, handler, so_id: str | None = None) -> dict:
     rows = _crew_member(db, user, batch_id)
+    user = replace(user, role="driver" if rows[0].driver_id == user.staff_id else "helper")
     replay = _replay(db, body.idempotency_key, batch_id)
     if replay is not None:
         return replay
@@ -498,6 +499,7 @@ def acknowledge_all(db: Session, user: CurrentUser, batch_id: str, body: Acknowl
     same so_acknowledgements row + "acknowledged" trip_events row as the single endpoint (who, when, GPS). The first event carries the
     idempotency key and the stored response, so a replay of the key returns the first result and writes nothing."""
     rows = _crew_member(db, user, batch_id)
+    user = replace(user, role="driver" if rows[0].driver_id == user.staff_id else "helper")
     replay = _replay(db, body.idempotency_key, batch_id)
     if replay is not None:
         return replay

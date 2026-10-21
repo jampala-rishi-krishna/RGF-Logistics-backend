@@ -42,8 +42,11 @@ def can_act(user: CurrentUser) -> bool:
     return user.role in CREW_ROLES
 
 
-def viewer_role(user: CurrentUser, staff: dict) -> str:
-    """CONTRACT: "driver" | "helper" - the login's crew role; an admin viewing someone gets that staff record's kind."""
+def viewer_role(user: CurrentUser, staff: dict, batches=None) -> str:
+    """Today's single trip role when consistent; mixed days use per-batch viewer_role."""
+    roles = {b.get("viewer_role") for b in (batches or []) if b.get("viewer_role") in CREW_ROLES}
+    if len(roles) == 1:
+        return next(iter(roles))
     return user.role if user.role in CREW_ROLES else staff_kind(staff)
 
 
@@ -72,7 +75,7 @@ def me(driver_id: int | None = Query(None), user: CurrentUser = Depends(require_
         "crew_today": list(crew.values()),
         "driver_id": who,
         "role": user.role if own else staff_kind(staff),
-        "viewer_role": viewer_role(user, staff),
+        "viewer_role": viewer_role(user, staff, batches),
         "name": staff.get("name") or (user.full_name if own else f"Staff #{who}"),
         "title": staff.get("title"),
         "warehouse": staff.get("warehouse"),
@@ -92,7 +95,7 @@ def today(driver_id: int | None = Query(None), user: CurrentUser = Depends(requi
     return {
         "date": driver_assignments.manila_today().isoformat(),
         "driver": {"id": who, "name": staff.get("name")},
-        "viewer_role": viewer_role(user, staff),
+        "viewer_role": viewer_role(user, staff, [b for b in batches if b.get("day") != "tomorrow"]),
         # KPI tiles count today's work only; tomorrow's batches (day == "tomorrow") are listed for acknowledgement.
         "summary": driver_assignments.day_summary([b for b in batches if b.get("day") != "tomorrow"], driver_issues.count_open(db, user_id=user.id) if user.role in CREW_ROLES else 0),
         "tomorrow": (driver_assignments.manila_today() + timedelta(days=1)).isoformat(),

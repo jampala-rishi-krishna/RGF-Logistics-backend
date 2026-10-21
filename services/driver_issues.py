@@ -96,7 +96,7 @@ def create(db: Session, user: CurrentUser, body: IssueBody) -> dict:
     received = trip_events.now_utc()
     client_ts, _ = trip_events.parse_client_ts(body.client_ts, received)
     issue = DriverIssue(
-        reporter_user_id=user.id, reporter_staff_id=user.staff_id, reporter_role=user.role, batch_id=batch_id, so_id=so_id, so_number=(row.salesorder_number or row.id) if row is not None else None,
+        reporter_user_id=user.id, reporter_staff_id=user.staff_id, reporter_role=("driver" if rows[0].driver_id == user.staff_id else "helper") if rows else user.role, batch_id=batch_id, so_id=so_id, so_number=(row.salesorder_number or row.id) if row is not None else None,
         vehicle=rows[0].vehicle_id if rows else None, category=body.category, priority=body.priority, description=description, photo_ids=photo_ids or None, status="submitted",
         client_ts=client_ts, idempotency_key=body.idempotency_key,
     )

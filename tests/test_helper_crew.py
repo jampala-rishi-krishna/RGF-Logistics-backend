@@ -90,6 +90,60 @@ def test_driver_login_unchanged(env):
     assert env.client.get("/api/driver/me", headers=env.h["driver"]).json()["viewer_role"] == "driver"
 
 
+@pytest.mark.parametrize("bulk_ack", [False, True])
+def test_driver_account_works_as_helper_with_trip_role_and_audit(env, bulk_ack):
+    from models.sales_order_history import SalesOrderHistory
+    uid = t.make_user(env, name="Relief Driver", email="relief@example.test", role="driver", staff_id=10)
+    headers = t.bearer(uid, "driver")
+    with env.Session() as db:
+        for row in db.execute(select(SalesOrderHistory).where(SalesOrderHistory.assignment_batch_id == "b1")).scalars():
+            row.helper_ids = [DRIVER, 10]
+        db.commit()
+    assert env.client.get("/api/driver/me", headers=headers).json()["role"] == "driver"
+    assert env.client.get("/api/driver/me", headers=headers).json()["viewer_role"] == "helper"
+    today = env.client.get("/api/driver/today", headers=headers).json()
+    assert today["batches"][0]["viewer_role"] == "helper"
+    detail = env.client.get("/api/driver/assignments/b1", headers=headers).json()
+    assert detail["viewer_role"] == "helper" and detail["crew"]["driver"]["staff_id"] == DRIVER
+    # The same Driver account performs helper work; it is never changed to a Helper account.
+    for so in (("all",) if bulk_ack else ("s1", "s2")):
+        path = "acknowledge-all" if bulk_ack else f"orders/{so}/acknowledge"
+        response = env.client.post(f"/api/driver/batches/b1/{path}", headers=headers, json=body() if bulk_ack else ack_body(env))
+        assert response.status_code == 200, response.text
+        assert response.json()["done_by_detail"]["role"] == "helper"
+    assert env.client.post("/api/driver/batches/b1/start", headers=headers, json=body()).status_code == 200
+    for so in ("s1", "s2"):
+        assert env.client.post(f"/api/driver/batches/b1/orders/{so}/check-in", headers=headers, json=body()).status_code == 200
+        response = env.client.post(f"/api/driver/batches/b1/orders/{so}/check-out", headers=headers,
+                                   json=body(answers={"outcome": "Delivered", "received_by": "Ana"}))
+        assert response.status_code == 200, response.text
+    assert env.client.post("/api/driver/batches/b1/end", headers=headers, json=body()).status_code == 200
+    with env.Session() as db:
+        assert db.get(User, uid).role == "driver"
+        events = db.execute(select(TripEvent).where(TripEvent.staff_id == 10)).scalars().all()
+        assert events and all(e.role == "helper" for e in events)
+    t.add_so(env, "relief-own", batch="own-trip", driver=10, helpers=(HELPER,))
+    assert env.client.get("/api/driver/assignments/own-trip", headers=headers).json()["viewer_role"] == "driver"
+    assert env.client.get("/api/driver/assignments/b1", headers=headers).json()["viewer_role"] == "helper"
+
+
+@pytest.mark.parametrize("driver_id,helpers,staff,expected", [
+    (1, [2], {"id": 1, "role": "HELPER", "title": "DELIVERY HELPER"}, "cannot be assigned as drivers"),
+    (1, [1], {"id": 1, "role": "DRIVER"}, "cannot also be the helper"),
+    (1, [2], {"id": 1, "role": "DRIVER", "active": False}, "active delivery crew"),
+])
+def test_assignment_enforces_crew_qualification(monkeypatch, driver_id, helpers, staff, expected):
+    h = Harness(monkeypatch)
+    order = make_order("crew-check")
+    h.orders = {order.id: order}
+    monkeypatch.setattr(assignment.staff_directory_cache, "get_by_id", lambda i: staff if i == 1 else {"id": i, "role": "DRIVER"})
+    request = assignment.AssignmentBody(salesorder_ids=[order.id], vehicle_id="TRK1", driver_id=driver_id, helper_ids=helpers)
+    with pytest.raises(HTTPException) as exc:
+        assignment.assign_order(order.id, request, h.user, h.db)
+    assert exc.value.status_code == 400 and expected in exc.value.detail
+    assert order.assignment_status == "unassigned"
+
+
 # ---- actions ------------------------------------------------------------------------------------------------------------
 
 

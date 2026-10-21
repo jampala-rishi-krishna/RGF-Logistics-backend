@@ -30,7 +30,7 @@ from services.pack_units import pack_total
 from services.sales_order_location import address_lines
 from services.item_weight import calculate_line_weight_kg, calculate_order_weight_kg
 from services.delivery_status import is_delivered
-from services.staff_roles import helper_ids_of, staff_kind
+from services.staff_roles import crew_kind, helper_ids_of, staff_kind
 from services import order_types, transfer_orders
 from services import order_fields
 from services import dispatch_changes, trip_events, unassign_guard
@@ -176,7 +176,7 @@ class AssignmentBody(BaseModel):
     # `driver_id` column only stores one integer, so persistence still records a
     # single "primary" driver (the first id) — see assign_order() below.
     driver_ids: list[int] = []
-    # Optional helpers (staff role HELPER), NOT including the driver. `driver_ids` above is the pre-helper-picker
+    # Optional helpers (qualified drivers may also help), NOT including the driver. `driver_ids` above is the pre-helper-picker
     # field and is still accepted: its first entry is the driver when `driver_id` is absent.
     helper_ids: list[int] = []
 
@@ -545,7 +545,7 @@ def assignment_options(salesorder_id: str, extra_ids: str | None = Query(None, d
         if existing.assignment_status == "assigned" and not is_delivered(existing.raw_json or {}) and existing.expected_shipment_date == order.expected_shipment_date:
             assigned[existing.vehicle_id] = assigned.get(existing.vehicle_id, 0.0) + _weight(existing)
     constraint = db.execute(select(ClientDeliveryConstraint).where(ClientDeliveryConstraint.customer_name == order.customer_name)).scalar_one_or_none()
-    drivers = sorted((d for d in staff_directory_cache.all_staff() if d.get("active") and str(d.get("title") or "").strip().upper() in ASSIGNABLE_DRIVER_TITLES), key=lambda d: d.get("name") or "")
+    drivers = sorted((d for d in staff_directory_cache.all_staff() if d.get("active") and crew_kind(d) is not None and str(d.get("title") or "").strip().upper() in ASSIGNABLE_DRIVER_TITLES), key=lambda d: d.get("name") or "")
     weight = _weight_if_known(order)
     # Total of every selected order (this one + extra_ids) for the over-capacity warning; None
     # when any weight is unknown, so an unverified selection is never flagged.
@@ -640,9 +640,16 @@ def assign_order(salesorder_id: str, body: AssignmentBody, current_user: Current
     if body.helper_ids and primary_driver_id is None:
         raise HTTPException(400, "Pick a driver before adding helpers.")
     _require_one_helper(primary_driver_id, driver_ids)
+    if primary_driver_id is not None and primary_driver_id in body.helper_ids:
+        raise HTTPException(400, "The driver cannot also be the helper on the same trip.")
     for driver_id in driver_ids:
-        if not staff_directory_cache.get_by_id(driver_id):
+        staff = staff_directory_cache.get_by_id(driver_id)
+        if not staff:
             raise HTTPException(404, "Driver was not found.")
+        if staff.get("active") is False or crew_kind(staff) is None:
+            raise HTTPException(400, "Select active delivery crew only.")
+        if driver_id == primary_driver_id and crew_kind(staff) != "driver":
+            raise HTTPException(400, "Delivery helpers cannot be assigned as drivers.")
     # driver_id = the driver. helper_ids keeps EVERY selected id including the driver (backward compatible);
     # the helpers are always helper_ids minus the driver, by value (services/staff_roles.helper_ids_of).
     # Every selected person still gets the assignment notifications (send_assignment_email below).
