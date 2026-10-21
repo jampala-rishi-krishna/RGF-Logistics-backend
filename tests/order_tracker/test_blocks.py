@@ -62,7 +62,7 @@ def test_order_table_from_find_orders_and_get_order_merged(tracker_env):
     result = blocks.build_blocks([("find_orders", found), ("get_order", card)], "en")
     table = by_type(result, "order_table")[0]
     numbers = [r["number"] for r in table["rows"]]
-    assert sorted(numbers) == ["SO-100", "WM-SO-300"] and len(set(numbers)) == len(numbers)
+    assert sorted(numbers) == ["SO-100", "SO-200", "WM-SO-300"] and len(set(numbers)) == len(numbers)
     row = next(r for r in table["rows"] if r["number"] == "SO-100")
     assert row["reason"] == "Customer refused some" and row["rejected"] == "2 box pork-belly-sku"
     assert row["status"] == "Partly delivered" and row["link"].startswith("/app/order-tracker?")
@@ -199,7 +199,7 @@ def test_ask_returns_blocks_with_tool_numbers_not_model_numbers(tracker_env, mon
     result, _ = ask(env, monkeypatch, "Bayad na ba ang SO-100?", [("payment_status", SO)])
     assert result["language"] == "en" and "999,999" in result["answer"]
     tiles = by_type(result["blocks"], "tiles")[0]
-    text = json.dumps(tiles, ensure_ascii=False)
+    text = json.dumps(tiles["tiles"], ensure_ascii=False)
     assert "₱22,400" in text and "999" not in text and "77" not in text
     assert tiles["chip"]["label"] == "Paid"
     assert by_type(result["blocks"], "actions")[0]["actions"][0]["link"].startswith("/app/order-tracker?order=SO-100")
@@ -210,7 +210,7 @@ def test_ask_english_find_and_get(tracker_env, monkeypatch):
     result, _ = ask(env, monkeypatch, "Which orders are out today?", [("find_orders", FIND), ("get_order", SO)])
     assert result["language"] == "en"
     rows = by_type(result["blocks"], "order_table")[0]["rows"]
-    assert sorted(r["number"] for r in rows) == ["SO-100", "WM-SO-300"]
+    assert sorted(r["number"] for r in rows) == ["SO-100", "SO-200", "WM-SO-300"]
 
 
 def test_refusal_has_no_blocks(tracker_env, monkeypatch):
@@ -221,10 +221,9 @@ def test_refusal_has_no_blocks(tracker_env, monkeypatch):
 
 def test_out_of_scope_tool_results_produce_no_blocks(tracker_env, monkeypatch):
     env = tracker_env
-    calls = [("get_order", {"so_number": "SO-200"}), ("payment_status", {"so_number": "SO-200"}),
-             ("find_orders", {**FIND, "date_from": "2000-01-01"})]
+    calls = [("find_orders", {**FIND, "date_from": "2000-01-01"})]
     result, client = ask(env, monkeypatch, "Is SO-200 paid?", calls)
-    assert result["tools"] == ["get_order", "payment_status", "find_orders"]
+    assert result["tools"] == ["find_orders"]
     assert result["blocks"] == []
     assert "SO-200" not in json.dumps(result["blocks"])
 

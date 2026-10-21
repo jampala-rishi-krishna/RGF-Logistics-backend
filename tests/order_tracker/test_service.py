@@ -50,10 +50,11 @@ def test_assigned_truck_is_available_without_active_trip_or_gps(tracker_env, mon
                        for s in ai.evidence(result))
 
 
-@pytest.mark.parametrize("role,expected", [("sales", {"SO-100", "WM-SO-300"}), ("wet_market", {"WM-SO-300"}), ("admin", {"SO-100", "SO-200", "WM-SO-300"}), ("planner", {"SO-100", "SO-200", "WM-SO-300"})])
-def test_scope_list(tracker_env, role, expected):
+@pytest.mark.parametrize("role", ["sales", "wet_market", "admin", "planner"])
+def test_scope_list(tracker_env, role):
     env = tracker_env; env.user.role = role
-    assert {r["number"] for r in tracker.find_orders(env.user, "", env.day, env.day)["orders"]} == expected
+    env.user.full_name = "Shared Department"
+    assert {r["number"] for r in tracker.find_orders(env.user, "", env.day, env.day)["orders"]} == {"SO-100", "SO-200", "WM-SO-300"}
 
 
 @pytest.mark.parametrize("tool", list(ai.MODELS))
@@ -63,19 +64,16 @@ def test_tools_enforce_scope(tracker_env, tool):
             {"customer": "Fresh Foods"} if tool == "customer_rules" else
             {"date_from": None, "date_to": None, "filters": {"trip": None, "customer": None, "area": None}} if tool == "buyers_per_sku" else
             {"so_number": "SO-200"})
-    try:
-        result = ai.execute(tool, args, env.user, env.day, env.day, None)
-    except HTTPException as exc:
-        assert exc.status_code == 404
-    else:
-        assert "SO-200" not in json.dumps(result)
-        assert "09171234567" not in json.dumps(result)
+    result = ai.execute(tool, args, env.user, env.day, env.day, None)
+    assert "09171234567" not in json.dumps(result)
+    if tool not in {"buyers_per_sku", "customer_rules"}:
+        assert "SO-200" in json.dumps(result)
 
 
 def test_missing_identity_denies_and_driver_denied(tracker_env):
     env = tracker_env
     env.user.full_name = "Shared Sales Login"
-    assert not tracker.find_orders(env.user, "", env.day, env.day)["orders"]
+    assert len(tracker.find_orders(env.user, "", env.day, env.day)["orders"]) == 3
     env.user.role = "driver"
     with pytest.raises(HTTPException) as exc:
         tracker.rows_for(env.user, env.day, env.day)

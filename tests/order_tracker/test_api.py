@@ -25,7 +25,7 @@ def test_workspace_roles(tracker_env, role, status):
 
 def test_order_ownership_and_validation_on_http_boundary(tracker_env):
     api = client(tracker_env, "sales")
-    assert api.get("/api/order-tracker/orders/SO-200").status_code == 404
+    assert api.get("/api/order-tracker/orders/SO-200").status_code == 200
     assert api.get("/api/order-tracker/orders/SO-100").status_code == 200
     assert api.get("/api/order-tracker/orders?date_from=not-a-date").status_code == 422
     assert api.post("/api/order-tracker/ask", json={"question": "Where is SO-100?", "user_id": 1}).status_code == 422

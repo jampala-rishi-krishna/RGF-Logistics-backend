@@ -37,7 +37,7 @@ def test_tracker_loads_cold_trip_without_opening_other_pages(tracker_env, monkey
     assert card["sections"]["times"]["value"]["left_warehouse"] == env.now
     assert card["sections"]["status_now"]["value"]["stop"] == 1
     assert card["sections"]["status_now"]["value"]["total_stops"] == 1
-    assert tracker.find_orders(env.user, "", env.day, env.day, db=db)["counts"]["Out for delivery"] == 2
+    assert tracker.find_orders(env.user, "", env.day, env.day, db=db)["counts"]["Out for delivery"] == 3
     assert calls == [["batch-1"]]
     facts.facts.clear()
     tracker.get_order(env.user, "SO-100", env.day, env.day, db)
@@ -76,7 +76,7 @@ def test_ask_english_tomorrow_uses_manila_not_selected_date(tracker_env, monkeyp
 def test_generic_truck_question_uses_scoped_active_orders(tracker_env):
     env = tracker_env
     result = asyncio.run(ai.ask(env.user, "Where is my truck now?", env.day, env.day))
-    assert "SO-100" in result["answer"] and "DCD 8953" in result["answer"] and "SO-200" not in result["answer"]
+    assert "SO-100" in result["answer"] and "DCD 8953" in result["answer"] and "SO-200" in result["answer"]
     env.snapshot["trip"]["status"] = "pending"; env.save()
     result = asyncio.run(ai.ask(env.user, "Where is my truck now?", env.day, env.day))
     assert result["answer"] == "None of your orders are out for delivery right now."

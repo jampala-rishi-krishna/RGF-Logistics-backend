@@ -71,12 +71,9 @@ def test_eval_mocked_orchestration_and_recorded_facts(tracker_env, monkeypatch, 
         assert result["sources"]
         if case.get("not_recorded"):
             assert "not recorded" in result["answer"].casefold()
-        if case.get("scenario") != "injection":
-            assert "SO-200" not in result["answer"]
-        else:
+        if case.get("scenario") == "injection":
             # A note may mention an order, but may never cause a lookup of it.
             assert result["tools"] == ["customer_rules"]
-            assert not any("SO-200" in (s["link"] or "") for s in result["sources"])
         assert "09171234567" not in result["answer"]
 
 

@@ -41,15 +41,9 @@ def norm(value):
 
 
 def allowed(user, row):
-    if user.role not in ROLES:
-        return False
-    if user.role in {"admin", "planner", "dispatcher"}:
-        return True
-    # No email-prefix guessing or department-wide fallback. Unknown ownership denies.
-    owner = norm(row.get("salesperson"))
-    if not owner or not norm(user.full_name) or owner != norm(user.full_name):
-        return False
-    return user.role != "wet_market" or row.get("order_type") == "WM"
+    # Sales and Wet Market are shared department logins, with the same read
+    # visibility as Operations. They are not individual salesperson accounts.
+    return user.role in ROLES
 
 
 def dates(start=None, end=None):
@@ -412,7 +406,7 @@ def find_orders(user, query, start, end, status=None, db=None, offset=0):
     return {"orders": result[offset:offset + 50], "total": len(result), "offset": offset, "counts": counts,
             "source": "Confirmed assigned orders / trip workflow", "as_of": min((r["last_update"] for r in result if r["last_update"]), default=None),
             "coverage": "Accessible cached records only; missing or cold records are not proof of no orders.",
-            "scope": "All operations orders" if user.role in {"admin", "planner", "dispatcher"} else "Exact salesperson name matches only"}
+            "scope": "All assigned orders"}
 
 
 def buyers_per_sku(user, start, end, filters=None, db=None):
