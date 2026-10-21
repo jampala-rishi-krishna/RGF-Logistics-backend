@@ -45,6 +45,27 @@ def test_defaults_are_the_unchanged_budget_and_92_percent():
     assert zoho_usage.cache_only_pct() == 92
 
 
+def test_6000_budget_has_exact_5750_call_guardrail(monkeypatch):
+    monkeypatch.setenv("ZOHO_DAILY_BUDGET", "6000")
+    value = app_settings.parse(app_settings.DEFINITIONS["ZOHO_GUARD_CACHE_ONLY_PCT"], "95.83333333333333")
+    app_settings._overrides["ZOHO_GUARD_CACHE_ONLY_PCT"] = str(value)
+    assert zoho_usage.cache_only_limit() == 5750
+    use(5749)
+    assert zoho_usage.snapshot()["guard"] == "warn" and not blocked("inventory_list")
+    use(5750)
+    assert zoho_usage.snapshot()["guard"] == "cache_only" and blocked("inventory_list")
+    assert zoho_usage.snapshot()["budget"] == 6000 and zoho_usage.snapshot()["cache_only_limit"] == 5750
+    assert not blocked("so_detail")
+    use(6000)
+    assert blocked("so_detail") and not blocked("acknowledge")
+
+
+@pytest.mark.parametrize("value", ["nan", "inf", "-inf", True, 49.9, 99.1])
+def test_decimal_percentage_rejects_invalid_values(value):
+    with pytest.raises(app_settings.SettingError):
+        app_settings.parse(app_settings.DEFINITIONS["ZOHO_GUARD_CACHE_ONLY_PCT"], value)
+
+
 def test_86_percent_is_allowed_exactly_the_production_situation(monkeypatch):
     use(3873)  # 3,873 / 4,500 = 86.07%: it was cache_only under the old 80% rule
     snapshot = zoho_usage.snapshot()

@@ -255,11 +255,15 @@ def should_skip_background(feature_name: str | None = None, *, background: bool 
     return background and name not in ESSENTIAL_FEATURES and not is_working_time()
 
 
-def cache_only_pct() -> int:
+def cache_only_pct() -> float:
     """Percent of the budget at which non-essential calls pause (Admin > Settings ZOHO_GUARD_CACHE_ONLY_PCT, default 92)."""
     from services import app_settings
 
-    return max(50, min(99, app_settings.get_int("ZOHO_GUARD_CACHE_ONLY_PCT")))
+    return max(50, min(99, float(app_settings.get("ZOHO_GUARD_CACHE_ONLY_PCT"))))
+
+
+def cache_only_limit() -> int:
+    return round(budget() * cache_only_pct() / 100)
 
 
 def guard_state_locked(total: int) -> str:
@@ -267,7 +271,7 @@ def guard_state_locked(total: int) -> str:
     if _enabled and not _restored:
         return "unknown_restoring"
     percent = total / limit * 100
-    return "exhausted" if percent >= 100 else "cache_only" if percent >= cache_only_pct() else "warn" if percent >= 50 else "ok"
+    return "exhausted" if total >= limit else "cache_only" if total >= cache_only_limit() else "warn" if percent >= 50 else "ok"
 
 
 def enforce_budget(feature_name: str | None = None) -> None:
@@ -290,7 +294,7 @@ def enforce_budget(feature_name: str | None = None) -> None:
         raise ZohoBudgetGuard("Zoho daily budget exhausted; serving cache only.")
     if name in ESSENTIAL_FEATURES:
         return
-    if used >= int(limit * cache_only_pct() / 100):
+    if used >= cache_only_limit():
         raise ZohoBudgetGuard("Zoho daily budget guard active; non-essential Zoho calls are paused.")
 
 
@@ -453,6 +457,7 @@ def snapshot() -> dict:
             "date": _day,
             "timezone": timezone_name(),
             "budget": limit,
+            "cache_only_limit": cache_only_limit(),
             "org_limit": org_limit(),
             "zoho_calls_today": total,
             "by_feature": counted,

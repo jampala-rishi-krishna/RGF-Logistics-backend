@@ -52,7 +52,7 @@ def get_gps_cadence():
 
 
 class SettingBody(BaseModel):
-    value: str | int | None = None
+    value: str | int | float | None = None
 
 
 @usage_router.get("/settings")

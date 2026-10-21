@@ -8,6 +8,7 @@ secrets (R2, Zoho, Gmail, JWT, Cartrack, database) stay in environment variables
 from __future__ import annotations
 
 import logging
+import math
 import os
 import re
 import threading
@@ -27,7 +28,7 @@ class SettingDef:
     key: str  # also the environment variable name used as the fallback
     label: str
     description: str
-    kind: str  # "int" | "phone" | "emails" | "time"
+    kind: str  # "int" | "float" | "phone" | "emails" | "time"
     default: Any
     minimum: int | None = None
     maximum: int | None = None
@@ -44,7 +45,7 @@ DEFINITIONS: dict[str, SettingDef] = {d.key: d for d in (
     SettingDef("DISPATCH_PHONE", "Dispatch phone", "Number the driver app's 'Call dispatch' button dials. Leave empty to hide the button.", "phone", ""),
     SettingDef("DRIVER_STALE_MINUTES", "Driver stale threshold", "A driver on a trip with no action for this long is flagged stale in Driver Overview.", "int", 15, 1, 1440, "minutes"),
     SettingDef("ZOHO_DAILY_BUDGET", "Zoho daily budget", "Platform soft budget of Zoho API calls per day. Once usage reaches the cache-only percentage non-essential Zoho calls pause; at 100% everything stops except acknowledge and lock calls. Cannot exceed the organisation limit.", "int", 4500, 100, None, "calls/day"),
-    SettingDef("ZOHO_GUARD_CACHE_ONLY_PCT", "Zoho guard: cache-only at", "Percentage of the daily budget at which non-essential Zoho calls (order lists, item details, ...) pause and the app serves cached data. Sales Order details, acknowledge and lock calls still run until 100%.", "int", 92, 50, 99, "% of budget"),
+    SettingDef("ZOHO_GUARD_CACHE_ONLY_PCT", "Zoho guard: cache-only at", "Percentage of the daily budget at which non-essential Zoho calls pause (decimal percentages allowed; rounded to the nearest call). Sales Order details, acknowledge and lock calls still run until 100%.", "float", 92, 50, 99, "% of budget"),
     SettingDef("ZOHO_FAILSAFE_SO_DETAIL_CAP", "Zoho fail-safe SO-detail cap", "While today's Zoho usage total could not be restored from the database, at most this many Sales Order detail calls are allowed.", "int", 50, 0, 1000, "calls"),
 )}
 
@@ -83,7 +84,7 @@ def _bounds(definition: SettingDef) -> tuple[int | None, int | None]:
     return definition.minimum, definition.maximum
 
 
-def parse(definition: SettingDef, raw: Any) -> int | str:
+def parse(definition: SettingDef, raw: Any) -> int | float | str:
     """Validate and normalise a submitted value. Raises SettingError with a human message."""
     if definition.kind in {"emails", "time"}:
         text = "" if raw is None else str(raw).strip()
@@ -103,7 +104,9 @@ def parse(definition: SettingDef, raw: Any) -> int | str:
     if isinstance(raw, bool) or raw is None or not clean_number(raw):
         raise SettingError(f"{definition.label} must be a whole number.")
     try:
-        number = int(clean_number(raw))
+        number = float(clean_number(raw)) if definition.kind == "float" else int(clean_number(raw))
+        if not math.isfinite(number):
+            raise ValueError()
     except ValueError as exc:
         raise SettingError(f"{definition.label} must be a whole number.") from exc
     low, high = _bounds(definition)
@@ -114,18 +117,23 @@ def parse(definition: SettingDef, raw: Any) -> int | str:
     return number
 
 
-def _env_or_default(definition: SettingDef) -> int | str:
+def _env_or_default(definition: SettingDef) -> int | float | str:
     raw = os.environ.get(definition.key)
     if raw is None:
         return definition.default
     try:
+        if definition.kind == "float":
+            value = float(clean_number(raw))
+            if not math.isfinite(value):
+                raise ValueError()
+            return value
         return int(clean_number(raw)) if definition.kind == "int" else parse(definition, raw)
     except (SettingError, ValueError):
         _warn_once(f"env:{definition.key}", "[SETTINGS] environment value for %s is invalid; using the built-in default (this is logged once per startup)", definition.key)
         return definition.default
 
 
-def get(key: str) -> int | str:
+def get(key: str) -> int | float | str:
     """Effective value: admin override > environment variable > built-in default. Memory only, never touches the DB."""
     definition = DEFINITIONS[key]
     stored = _overrides.get(key)
@@ -231,7 +239,7 @@ def describe_one(key: str) -> dict:
         "key": key,
         "label": definition.label,
         "description": definition.description,
-        "type": "number" if definition.kind == "int" else "text",
+        "type": "number" if definition.kind in {"int", "float"} else "text",
         "unit": definition.unit,
         "min": low,
         "max": high,
