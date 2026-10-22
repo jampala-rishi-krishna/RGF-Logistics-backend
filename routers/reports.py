@@ -12,7 +12,7 @@ from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, Depends, HTTPException
 
-from auth.dependencies import require_role
+from auth.dependencies import CurrentUser, require_role
 from services import zoho_acquisition, zoho_client
 from services.zoho_client import (
     ZohoError,
@@ -29,10 +29,10 @@ from services.zoho_client import (
 router = APIRouter(prefix="/api/reports", tags=["reports"], dependencies=[Depends(require_role("admin", "dispatcher", "warehouse"))])
 
 PHT = ZoneInfo("Asia/Manila")
-_CACHE_TTL_SECONDS = 60
+_CACHE_TTL_SECONDS = 15 * 60
 _DETAIL_CAP = 80
 _cache_lock = Lock()
-_cache: dict = {"payload": None, "fetched_at": 0.0}
+_cache: dict[tuple, tuple[float, dict]] = {}
 _report_inflight: dict[tuple, Future] = {}
 
 _TRANSFER_OPEN_STATUSES = {"draft", "pending_approval", "approved", "in_transit"}
@@ -499,15 +499,18 @@ def _build_report(section: str | None = None) -> dict:
 
 
 @router.get("/rgf-logistics")
-def get_rgf_logistics_report(force: bool = False, section: str | None = None):
+def get_rgf_logistics_report(force: bool = False, section: str | None = None, current_user: CurrentUser = Depends(require_role("admin", "dispatcher", "warehouse"))):
+    if force and getattr(current_user, "role", None) != "admin":
+        raise HTTPException(403, "Only Admin can force a report refresh.")
     epoch = zoho_acquisition.generation()
     identity = (zoho_client.api_domain(), os.environ.get("ZOHO_ORG_ID", ""), _today().isoformat())
     key = (identity, section, epoch)
     with _cache_lock:
         future = _report_inflight.get(key)
-        if future is None and section is None and not force and _cache.get("identity") == identity and _cache["payload"] is not None and (time.time() - _cache["fetched_at"]) < _CACHE_TTL_SECONDS:
+        cached = _cache.get(key)
+        if future is None and not force and cached is not None and (time.time() - cached[0]) < _CACHE_TTL_SECONDS:
             zoho_acquisition.event("cache_hit", resource="report", section=section, force=force)
-            return deepcopy(_cache["payload"])
+            return deepcopy(cached[1])
         owner = future is None
         if owner:
             future = Future()
@@ -518,9 +521,13 @@ def get_rgf_logistics_report(force: bool = False, section: str | None = None):
     try:
         payload = _build_report(section) if section is not None else _build_report()
         with zoho_acquisition.publication(epoch) as current:
-            if current and section is None:
+            if current:
                 with _cache_lock:
-                    _cache.update(payload=deepcopy(payload), fetched_at=time.time(), identity=identity)
+                    _cache[key] = (time.time(), deepcopy(payload))
+                    # Drop old credentials/dates/generations and expired entries.
+                    for stale_key, (fetched_at, _) in list(_cache.items()):
+                        if stale_key[0] != identity or stale_key[2] != epoch or time.time() - fetched_at >= _CACHE_TTL_SECONDS:
+                            _cache.pop(stale_key, None)
         future.set_result(deepcopy(payload))
         return payload
     except BaseException as exc:

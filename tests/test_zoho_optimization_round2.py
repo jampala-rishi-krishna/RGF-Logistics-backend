@@ -251,7 +251,9 @@ class Round2OptimizationTests(unittest.TestCase):
                 return SimpleNamespace(status_code=200, headers={}, json=lambda: {"code": 0, "salesorders": [], "page_context": {"has_more_page": False}})
             return SimpleNamespace(status_code=200, headers={}, json=lambda: {"code": 0, "salesorder": {"salesorder_id": "1"}})
 
-        with patch.dict(os.environ, {"ZOHO_DAILY_BUDGET": "3"}), \
+        # Explicit guard setting: the default 92% rounds a 3-call budget to 3,
+        # so it cannot test a cache-only stop after 2 calls.
+        with patch.dict(os.environ, {"ZOHO_DAILY_BUDGET": "3", "ZOHO_GUARD_CACHE_ONLY_PCT": "66"}), \
                 patch.object(zoho_client, "get_access_token", return_value="token"), \
                 patch.object(zoho_client.httpx, "request", side_effect=fake_request):
             zoho_client.fetch_sales_order_detail("1")
@@ -261,7 +263,7 @@ class Round2OptimizationTests(unittest.TestCase):
             snap = zoho_usage.snapshot()
         self.assertEqual(snap["by_feature"]["so_detail"], 1)
         self.assertEqual(snap["by_feature"]["inventory_list"], 1)
-        self.assertEqual(snap["guard"], "warn")
+        self.assertEqual(snap["guard"], "cache_only")
 
 
 if __name__ == "__main__":

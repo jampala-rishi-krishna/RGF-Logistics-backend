@@ -83,7 +83,7 @@ def _vehicle_payload(vehicle: Vehicle, db: Session, fresh_orders: dict[str, dict
         assigned = [o for o in live_sales_order_cache.get_assigned_snapshot() if o.vehicle_id == plate and o.assignment_status == "assigned"]
     capacity = OPERATIONAL_CAPACITY_KG.get(plate) or (float(vehicle.rated_capacity_kg) if vehicle.rated_capacity_kg is not None else None)
     def line_weight(item: dict) -> float | None:
-        return calculate_line_weight_kg(item.get("quantity"), item.get("unit") or item.get("unit_name"), item.get("item_id") or item.get("itemid"), item=item, context="fleet")
+        return calculate_line_weight_kg(item.get("quantity"), item.get("unit") or item.get("unit_name"), item.get("item_id") or item.get("itemid"), item=item, context="fleet", allow_fetch=False)
     def order_metrics(o, raw=None):
         raw = raw or o.raw_json or {}
         items = raw.get("line_items") or []
@@ -344,11 +344,8 @@ def warm_fleet_cache() -> None:
 @router.post("/vehicles/refresh", dependencies=[WRITE_ROLES])
 @zoho_acquisition.operation("fleet-refresh", reuse_details=True)
 def refresh_vehicles(force: bool = False, db: Session = Depends(get_db)):
-    """Recompute Fleet from live Zoho data for currently-assigned SOs only (never a bulk
-    sync of every SO). `force` is accepted for API compatibility (the 60-min scheduled sync
-    and the manual Refresh button both call this) but every call already re-fetches Zoho
-    for the assigned set and only writes sales_order_history rows that actually changed -
-    there is no "skip because still fresh" path to force past.
+    """Recompute Fleet from assigned-only memory; hydrate only missing SO/PO/TO IDs.
+    `force` is accepted for API compatibility but never expands the acquisition scope.
 
     This is idempotent: no stored load is decremented; every value is rebuilt
     from the assigned orders and their delivery statuses.
@@ -357,8 +354,7 @@ def refresh_vehicles(force: bool = False, db: Session = Depends(get_db)):
         raise HTTPException(409, "Fleet refresh already in progress")
     started = time.monotonic()
     try:
-        live_sales_order_cache.refresh_shared_window()
-        assigned = [o for o in live_sales_order_cache.get_assigned_snapshot() if o.assignment_status == "assigned"]
+        assigned, had_failures = live_sales_order_cache.get_assigned_snapshot_ex(include_window=False, statuses=ASSIGNED_ONLY)
         fresh_orders: dict[str, dict] = {}
         sync_errors: list[str] = []
         request_cache: dict[str, dict] = {}
@@ -397,14 +393,19 @@ def refresh_vehicles(force: bool = False, db: Session = Depends(get_db)):
         # changed this cycle, or that just completed - never every assigned order every cycle.
         for order in assigned:
             if str(order.id) in fresh_orders or order.assignment_status == "completed":
-                sync_history_row(db, order)
+                sync_history_row(db, order, allow_fetch=False)
         db.commit()
         vehicles = db.execute(select(Vehicle)).scalars().all()
         logger.info("[FLEET_SYNC] trucks_processed=%d sos_released=%d unresolved_count=%d duration_ms=%d", len(vehicles), sum(1 for order in assigned if order.assignment_status == "completed"), sum(1 for order in assigned if sales_order_delivery_status(order.raw_json or {}) == "Unresolved"), int((time.monotonic() - started) * 1000))
         global _fleet_cache, _fleet_cache_built, _stale_fleet_cache
-        _fleet_cache = [_vehicle_payload(v, db, sync_errors=sync_errors) for v in vehicles]
-        _fleet_cache_built = True
-        _stale_fleet_cache = _fleet_cache
+        by_plate: dict[str, list] = {}
+        for order in assigned:
+            if order.assignment_status == "assigned":
+                by_plate.setdefault(str(order.vehicle_id or "").strip().upper(), []).append(order)
+        _fleet_cache = [_vehicle_payload(v, db, sync_errors=sync_errors, assigned_by_vehicle=by_plate) for v in vehicles]
+        _fleet_cache_built = not had_failures
+        if not had_failures:
+            _stale_fleet_cache = _fleet_cache
         return [_merge_live(v) for v in _fleet_cache]
     finally:
         _sync_lock.release()

@@ -77,6 +77,12 @@ services:
         sync: false
       - key: ZOHO_SCOPES
         sync: false
+      - key: ZOHO_WEBHOOKS_ENABLED
+        value: "false"
+      - key: ZOHO_WEBHOOK_CAPTURE
+        value: "false"
+      - key: ZOHO_WEBHOOK_SECRET
+        sync: false
       - key: ZOHO_ACKNOWLEDGED_CUSTOMVIEW_ID
         sync: false
       - key: ZOHO_LOCK_CLIENT_ID

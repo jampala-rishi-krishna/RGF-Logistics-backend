@@ -29,11 +29,12 @@ def _is_reefer(raw: dict) -> bool:
     return any(term in text for term in _REEFER_TERMS)
 
 
-def sync_history_row(db: Session, order: SalesOrderCache) -> None:
+def sync_history_row(db: Session, order: SalesOrderCache, *, allow_fetch: bool = True) -> None:
     """Write-on-event: call this whenever an SO's assignment/status/delivery state actually
     changes (assign, manifest confirm, checklist complete, scheduled Zoho sync detecting a
     delivery-status change) - never on a bulk/unassigned sync. Upserts within the caller's
-    existing transaction; the caller still owns db.commit().
+    existing transaction; the caller still owns db.commit(). Fleet passes allow_fetch=False
+    so recording the existing snapshot never acquires item data from Zoho.
 
     sales_orders is slim (no raw_json, Step 6) - delivery_status/is_reefer are computed here,
     once, from the live order's raw_json (still present on the transient/live-cache object
@@ -74,7 +75,7 @@ def sync_history_row(db: Session, order: SalesOrderCache) -> None:
         unit = item.get("unit") or item.get("unit_name") or item.get("usage_unit")
         nested_item = item.get("item") if isinstance(item.get("item"), dict) else {}
         item_id = item.get("item_id") or item.get("itemid") or nested_item.get("item_id") or nested_item.get("id")
-        weight_kg = calculate_line_weight_kg(quantity, unit, item_id, item=item, context=f"SO={order.salesorder_number or order.id}")
+        weight_kg = calculate_line_weight_kg(quantity, unit, item_id, item=item, context=f"SO={order.salesorder_number or order.id}", allow_fetch=allow_fetch)
         location_obj = item.get("location") if isinstance(item.get("location"), dict) else {}
         warehouse_obj = item.get("warehouse") if isinstance(item.get("warehouse"), dict) else {}
         location_name = item.get("location_name") or item.get("warehouse_name") or location_obj.get("location_name") or warehouse_obj.get("warehouse_name")

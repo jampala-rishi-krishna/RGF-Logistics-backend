@@ -911,11 +911,11 @@ def export_pdf(date_from: str | None = Query(None), date_to: str | None = Query(
 
 
 def _run_sales_order_sync(start: date | None, end: date | None) -> None:
-    """The "Refresh" button: force-invalidate the live Zoho window cache (and every
-    currently-assigned SO's cached Zoho data) so the next read re-pulls fresh from Zoho.
-    No Neon writes here at all any more - Zoho is re-fetched live, on demand."""
+    """Refresh only the selected shipment-date slice; omitted dates mean today Manila."""
     try:
-        synced = live_sales_order_cache.refresh_shared_window()
+        start = start or datetime.now(PHT).date()
+        end = end or start
+        synced = live_sales_order_cache.refresh_window(start, end)
         _invalidate_ack_cache()
         item_detail_cache.mark_all_stale()
         with _refresh_lock:

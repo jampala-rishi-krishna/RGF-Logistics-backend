@@ -10,7 +10,7 @@ class ItemDetailCacheTests(unittest.TestCase):
 
     @patch("services.item_detail_cache.fetch_item_details_batch")
     @patch("services.item_detail_cache.fetch_item_detail")
-    def test_batch_without_warehouses_is_rehydrated_from_detail(self, fetch_detail, fetch_batch):
+    def test_batch_without_warehouses_is_valid_unknown_stock(self, fetch_detail, fetch_batch):
         fetch_batch.return_value = {
             "items": [
                 {
@@ -30,8 +30,9 @@ class ItemDetailCacheTests(unittest.TestCase):
 
         cached, fresh = item_detail_cache.get_cached("i1")
         self.assertTrue(fresh)
-        self.assertEqual(cached["warehouses"][0]["warehouse_available_for_sale_stock"], 7)
-        fetch_detail.assert_called_once_with("i1")
+        self.assertEqual(cached["warehouses"], [])
+        self.assertEqual(item_detail_cache.request_refresh(["i1"]), 0)
+        fetch_detail.assert_not_called()
 
     @patch("services.item_detail_cache.fetch_item_details_batch")
     @patch("services.item_detail_cache.fetch_item_detail")
@@ -52,13 +53,13 @@ class ItemDetailCacheTests(unittest.TestCase):
         self.assertEqual(cached["warehouses"][0]["warehouse_available_for_sale_stock"], 3)
         fetch_detail.assert_not_called()
 
-    def test_fresh_cache_without_warehouses_is_still_pending_for_lists(self):
+    def test_fresh_cache_without_warehouses_is_not_pending_for_lists(self):
         with item_detail_cache._lock:
             item_detail_cache._items["i1"] = (999999999.0, {"package_details": {"weight": 1}, "warehouses": []})
             item_detail_cache._inflight.add("i1")
 
         try:
-            self.assertEqual(item_detail_cache.request_refresh(["i1"]), 1)
+            self.assertEqual(item_detail_cache.request_refresh(["i1"]), 0)
         finally:
             with item_detail_cache._lock:
                 item_detail_cache._inflight.discard("i1")

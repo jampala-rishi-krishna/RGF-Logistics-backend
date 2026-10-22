@@ -353,7 +353,8 @@ def fetch_sales_orders_by_customview(customview_id: str, page: int = 1, per_page
 
 def fetch_sales_orders_by_shipment_date(start: date, end: date, page: int = 1, per_page: int = 200, sort_column: str | None = None) -> dict:
     """Zoho shipment-date list filter. The caller still filters locally because
-    Zoho tenants vary in whether this filter is honored."""
+    Zoho tenants vary in whether this filter is honored. The shared-window caller
+    checks page_context.search_criteria; its 90-day fallback is capped at 3 pages."""
     params = {"shipment_date_start": start.isoformat(), "shipment_date_end": end.isoformat(), "page": page, "per_page": min(per_page, 200), "branch_ids": branches.branch_param()}
     if sort_column:
         params["sort_column"] = sort_column

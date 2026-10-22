@@ -94,7 +94,6 @@ def _refresh_worker(key: str) -> None:
 
 def _batch_refresh_worker(keys: list[str]) -> None:
     try:
-        missing_warehouse_keys = set(keys)
         try:
             payload = fetch_item_details_batch(keys)
             items = payload.get("items") if isinstance(payload, dict) else []
@@ -113,20 +112,19 @@ def _batch_refresh_worker(keys: list[str]) -> None:
                         by_id[item_id] = _trim(item)
             now = time.monotonic()
             with _lock:
-                for key, entry in by_id.items():
+                for key in keys:
+                    # A successful batch with omitted stock (or item) is an unknown,
+                    # valid TTL result, never a reason to fan out individual GETs.
+                    entry = by_id.get(key, _trim({}))
                     _items[key] = (now, entry)
                     _failed.pop(key, None)
-                    if entry.get("warehouses"):
-                        missing_warehouse_keys.discard(key)
-            # Zoho's list/batch item endpoint can omit warehouse stock even when
-            # the item detail endpoint has it. Keep the list response fast, but
-            # hydrate stock-bearing details in this background worker.
-            for key in list(missing_warehouse_keys):
-                fetch(key)
+                while len(_items) > MAX_ENTRIES:
+                    _items.pop(next(iter(_items)))
         except ZohoError as exc:
             logger.warning("[ITEM_DETAIL] batch unavailable=%s", exc)
-            for key in keys:
-                fetch(key)
+            with _lock:
+                for key in keys:
+                    _failed[key] = time.monotonic()
     finally:
         with _lock:
             for key in keys:
@@ -143,9 +141,8 @@ def request_refresh(item_ids: Iterable[str]) -> int:
     with _lock:
         for raw_id in dict.fromkeys(str(i) for i in item_ids if i):
             cached = _items.get(raw_id)
-            has_warehouse_stock = bool(cached and cached[1].get("warehouses"))
-            fresh = cached is not None and now - cached[0] < FRESH_SECONDS and has_warehouse_stock
-            if not has_warehouse_stock and not _recently_failed(raw_id, now):
+            fresh = cached is not None and now - cached[0] < FRESH_SECONDS
+            if cached is None and not _recently_failed(raw_id, now):
                 waiting += 1
             if fresh or raw_id in _inflight or _recently_failed(raw_id, now):
                 continue

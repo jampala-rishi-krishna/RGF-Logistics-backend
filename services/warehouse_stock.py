@@ -46,7 +46,7 @@ def _parse_stock(entry: dict | None, item_id: str = "", branch_id: str | None = 
 
 
 def fetch_item_stock(item_id: str, branch_id: str | None = None) -> dict[str, float | None]:
-    """Blocking: fetches from Zoho if the cached value is stale or missing."""
+    """Fetch only on cache miss/expiry; fresh unknown stock remains None, never zero."""
     return _parse_stock(item_detail_cache.get(str(item_id), allow_fetch=True), str(item_id), branch_id)
 
 

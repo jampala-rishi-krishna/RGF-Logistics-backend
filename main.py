@@ -308,6 +308,7 @@ app.include_router(voice.router, dependencies=[Depends(workspace_access)])
 app.include_router(voice.webhook_router, dependencies=[Depends(workspace_access)])
 app.include_router(voice.admin_router, dependencies=[Depends(workspace_access)])
 app.include_router(zoho_webhooks.router, dependencies=[Depends(workspace_access)])
+app.include_router(zoho_webhooks.admin_router, dependencies=[Depends(workspace_access)])
 
 
 def health_payload():

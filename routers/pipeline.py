@@ -206,28 +206,30 @@ async def complete_checklist(manifest_id: int, body: ChecklistBody, current_user
 
 @router.get("/dispatch-dashboard", dependencies=[Depends(OPS)])
 def dispatch_dashboard(date: str | None = None, refresh: bool = False, db: Session = Depends(get_db)):
-    """Live Dispatch Manifest. Current dates use assigned in-memory state + Zoho;
-    only the small manifest lookup is read from Neon for departed status."""
+    """Current/future dates use Zoho; past Manila dates use recorded history only."""
     target = date_type.fromisoformat(date) if date else datetime.now(PHT).date()
+    historical = target < datetime.now(PHT).date()
     key = target.isoformat()
     egress_before = db_egress_stats["query_count"]
     try:
         started = time.monotonic()
         zoho_client.begin_request_metrics()
-        if refresh:
+        if refresh and not historical:
             live_sales_order_cache.invalidate_windows()
             live_sales_order_cache.invalidate_assigned_zoho()
-        records, zoho_stats = _zoho_date_records(target, refresh)
+        history_by_id = {}
+        if historical:
+            history_by_id = {str(row.id): row for row in db.execute(
+                select(SalesOrderHistory).where(SalesOrderHistory.expected_shipment_date == target)
+            ).scalars().all()}
+            records, zoho_stats = {}, {"pages_fetched": 0, "cache": "history", "rows_before_filter": 0, "rows_after_filter": 0}
+        else:
+            records, zoho_stats = _zoho_date_records(target, refresh)
         list_status_counts = {}
         for record in records.values():
             status_name = live_sales_order_cache._normalized_order_status(record) or "unknown"
             list_status_counts[status_name] = list_status_counts.get(status_name, 0) + 1
         records = {oid: record for oid, record in records.items() if live_sales_order_cache._normalized_order_status(record) not in {"void", "draft"}}
-        # Past dates use history only for the assignment join. Zoho remains the
-        # authoritative order list and status source for every selected date.
-        history_by_id = {}
-        if target < datetime.now(PHT).date():
-            history_by_id = {str(row.id): row for row in db.execute(select(SalesOrderHistory)).scalars().all()}
         detail_jobs = {}
         detail_cache_hits = 0
         for oid, record in records.items():
@@ -255,15 +257,12 @@ def dispatch_dashboard(date: str | None = None, refresh: bool = False, db: Sessi
             for future in as_completed(futures):
                 oid, merged = future.result()
                 records[oid] = merged
-        rows = []
+        # Never overlay today's in-memory assignment state on a historical day.
+        rows = list(history_by_id.values())
         for oid, record in records.items():
             if live_sales_order_cache._normalized_order_status(record) in {"void", "draft"}: continue
             detail_record = record if oid in detail_jobs else _zoho_detail_cache.get(oid, ("", record))[1]  # just hydrated: `record` is the merged detail
             row = live_sales_order_cache._build_transient(detail_record)
-            if oid in history_by_id:
-                history = history_by_id[oid]
-                for field in ("vehicle_id", "driver_id", "route_id", "manifest_id", "assigned_at", "assigned_by", "assignment_status", "completed_at", "helper_ids"):
-                    setattr(row, field, getattr(history, field, None))
             row = live_sales_order_cache._apply_assignment(row)
             rows.append(row)
         had_fetch_failures = False
@@ -280,7 +279,7 @@ def dispatch_dashboard(date: str | None = None, refresh: bool = False, db: Sessi
             shipment = str(getattr(o, "shipment_status", None) or raw.get("shipment_status") or "").lower()
             order_status = str(getattr(o, "order_status", None) or raw.get("order_status") or "").lower()
             manifest = manifests.get(str(o.manifest_id)) if o.manifest_id else None
-            if shipment == "fulfilled" or order_status == "closed": status = "Delivered"
+            if shipment == "fulfilled" or order_status == "closed" or (historical and getattr(o, "delivery_status", None) == "Delivered"): status = "Delivered"
             elif shipment in {"shipped", "partially_shipped"} or (manifest and manifest.status == "departed"): status = "In Transit"
             else: status = "Pending"
             profile = vehicles.get(str(o.vehicle_id)) if o.vehicle_id else None
@@ -310,6 +309,8 @@ def dispatch_dashboard(date: str | None = None, refresh: bool = False, db: Sessi
         total = counts["sales_orders_today"] or 1
         payload = {"date": key, "synced_at": datetime.now(PHT).isoformat(), "source": "Confirmed SO — IntelliFleet", "cross_checked": "Zoho Inventory", "sync_error": None, "moved_without_assignment": moved_without_assignment, "kpis": {**counts, "exceptions_count": len(exceptions), **{f"{k}_pct": round(counts[k] * 100 / total, 1) for k in ("pending", "in_transit", "delivered")}}, "exceptions": exceptions, "trucks": group("truck_plate"), "salespeople": group("salesperson"), "pending_orders": [{"so_number": x["so_number"], "customer": x["customer"], "truck": x["truck_plate"]} for x in order_rows if x["status"] == "Pending"], "orders": order_rows}
         payload["neon_queries"] = db_egress_stats["query_count"] - egress_before
+        if historical:
+            payload.update(source="Recorded assignment / delivery history", cross_checked="Historical records only")
         payload["zoho_api_calls"] = zoho_client.api_call_count()
         payload["zoho_diagnostics"] = {**zoho_stats, "rows_after_void_draft": len(records), "detail_hydrations": len(detail_jobs), "detail_cache_hits": detail_cache_hits, "shipment_date_count": len(records), "order_date_count": sum(live_sales_order_cache._as_date(r.get("date") or r.get("order_date")) == target for r in records.values()), "status_counts": status_counts, "neon_queries": payload["neon_queries"], "elapsed_ms": int((time.monotonic() - started) * 1000)}
         logger.info("[DISPATCH_DASHBOARD] date=%s neon_queries=%s orders=%s", key, payload["neon_queries"], len(order_rows))

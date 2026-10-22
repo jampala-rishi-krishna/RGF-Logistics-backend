@@ -413,7 +413,7 @@ def _ensure_purchase_order(order_id: str, *, validate: bool = False) -> SalesOrd
         return existing
     epoch = zoho_acquisition.generation()
     try:
-        row = purchase_orders.ensure_row(order_id, validate=validate)
+        row = purchase_orders.ensure_row(order_id, validate=validate, enrich_vendor=validate)
     except ZohoError:
         return None
     except purchase_orders.NotAssignable as exc:
@@ -748,12 +748,16 @@ def _pull_window_legacy(start: date | None, end: date | None) -> dict[str, dict]
     from datetime import timedelta
 
     lookup_start = start - timedelta(days=90) if start else None
+    pages_fetched = 0
+    rows_scanned = 0
     while True:
         payload = fetch_sales_orders(date_from=lookup_start, date_to=end, page=page, per_page=200)
+        pages_fetched += 1
         # Paging decisions use the raw page; only allowed-branch rows are kept (and so cached/hydrated).
         raw_page = payload.get("salesorders") or []
         page_records = branches.filter_allowed(raw_page)
         raw_count = payload.get("raw_count", len(raw_page))  # pre-filter size when zoho_client already filtered
+        rows_scanned += raw_count
         fingerprint = tuple(str(r.get("salesorder_id") or r.get("id") or "") for r in page_records)
         if fingerprint and fingerprint in seen_fingerprints:
             break
@@ -770,7 +774,14 @@ def _pull_window_legacy(start: date | None, end: date | None) -> dict[str, dict]
             has_more = has_more.strip().lower() == "true"
         if not raw_count or not has_more or raw_count < 200:
             break
+        if pages_fetched >= 3:
+            break
         page += 1
+    logger.warning(
+        "[LiveSalesOrderCache] legacy shipment fallback start=%s end=%s pages=%d rows_scanned=%d rows_matched=%d page_cap=3 potentially_truncated=%s",
+        start, end, pages_fetched, rows_scanned, len(records),
+        bool(pages_fetched >= 3 and has_more and raw_count >= 200),
+    )
     return records
 
 
@@ -894,6 +905,10 @@ def get_window(start: date, end: date, *, hydrate: bool = True, block: bool = Tr
     with _window_lock:
         for cache in ((_windows,) if hydrate else (_windows, _windows_unhydrated)):
             _prune_windows_locked(cache, now)
+            # Explicit date refreshes are reusable even inside the shared wide range.
+            exact = _read_window_locked(cache, (start.isoformat(), end.isoformat()), now)
+            if exact is not None:
+                return _rows_between(exact, start, end)
             rows = _read_window_locked(cache, key, now)
             if rows is not None:
                 return _rows_between(rows, start, end)
@@ -922,6 +937,32 @@ def get_window(start: date, end: date, *, hydrate: bool = True, block: bool = Tr
                 _store_window_locked(_windows if hydrate else _windows_unhydrated, key, rows)
     memory_debug.log_rss(f"window-built {key[0]}..{key[1]} rows={len(rows)} windows={len(_windows)}")
     return _rows_between(rows, start, end)
+
+
+def refresh_window(start: date, end: date) -> int:
+    """Force only this shipment slice, preserving other cached dates and detail reuse."""
+    epoch = zoho_acquisition.generation()
+    raw = _pull_window(start, end)
+    _hydrate_details(raw)
+    rows = {rid: _build_transient(record) for rid, record in raw.items()}
+    _observe_dates(raw.values())
+    with zoho_acquisition.publication(epoch) as current:
+        if current:
+            with _window_lock:
+                for cache in (_windows, _windows_unhydrated):
+                    for key, (_, existing) in list(cache.items()):
+                        if key[0] <= end.isoformat() and start.isoformat() <= key[1]:
+                            merged = {rid: row for rid, row in existing.items()
+                                      if not (row.expected_shipment_date and start <= row.expected_shipment_date <= end)
+                                      and rid not in rows}
+                            merged.update({rid: row for rid, row in rows.items()
+                                           if row.expected_shipment_date and key[0] <= row.expected_shipment_date.isoformat() <= key[1]})
+                            _store_window_locked(cache, key, merged)
+                _store_window_locked(_windows, (start.isoformat(), end.isoformat()), rows)
+            for rid, row in rows.items():
+                if rid in _assigned_zoho:
+                    _assigned_zoho[rid] = _apply_assignment(row)
+    return len(raw)
 
 
 def refresh_shared_window(*, force_full: bool = False) -> int:

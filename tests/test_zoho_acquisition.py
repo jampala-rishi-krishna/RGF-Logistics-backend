@@ -261,7 +261,7 @@ class FleetRefreshTests(ZohoTestCase):
         db = MagicMock()
         db.execute.return_value.scalars.return_value.all.return_value = []
         with patch.object(live_sales_order_cache, "refresh_shared_window", return_value=len(orders)), \
-                patch.object(live_sales_order_cache, "get_assigned_snapshot", return_value=orders), \
+                patch.object(live_sales_order_cache, "get_assigned_snapshot_ex", return_value=(orders, False)), \
                 patch.object(live_sales_order_cache, "merge_zoho_payload", side_effect=lambda o, f: merged.append((o.id, f))), \
                 patch.object(live_sales_order_cache, "set_assignment"), \
                 patch.object(fleet, "sync_history_row") as history:
@@ -280,14 +280,13 @@ class FleetRefreshTests(ZohoTestCase):
         fake, _, _ = self._refresh(orders)
         self.assertEqual(fake.gets(), 0)
         fake2, _, _ = self._refresh([self._order("1")])
-        self.assertEqual(fake2.gets(), 0)  # scheduled refresh uses shared window/delta, not per-SO detail
+        self.assertEqual(fake2.gets(), 0)  # warm assigned-only refresh does no provider work
 
 
 class ReportCoalescingTests(ZohoTestCase):
     def setUp(self):
         super().setUp()
-        reports._cache.update(payload=None, fetched_at=0.0)
-        reports._cache.pop("identity", None)
+        reports._cache.clear()
         self.builds = Counter()
 
         def build(section=None):
@@ -305,13 +304,13 @@ class ReportCoalescingTests(ZohoTestCase):
         self.assertTrue(all(r == results[0] for r in results))
 
     def test_three_forced_requests_share_one_generation(self):
-        _, errors = self.run_threads(lambda i: reports.get_rgf_logistics_report(force=True), 3)
+        _, errors = self.run_threads(lambda i: reports.get_rgf_logistics_report(force=True, current_user=SimpleNamespace(role="admin")), 3)
         self.assertEqual(errors, [None] * 3)
         self.assertEqual(self.builds[None], 1)
 
     def test_forced_request_after_completion_really_refreshes(self):
         reports.get_rgf_logistics_report()
-        reports.get_rgf_logistics_report(force=True)
+        reports.get_rgf_logistics_report(force=True, current_user=SimpleNamespace(role="admin"))
         self.assertEqual(self.builds[None], 2)
 
     def test_warm_cache_still_served_and_force_bypasses_it(self):

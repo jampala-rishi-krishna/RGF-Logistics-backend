@@ -163,7 +163,7 @@ def pickup_state(record):
     return state
 
 
-def vendor_contact(record):
+def vendor_contact(record, *, allow_fetch: bool = True):
     vid = _s(record.get("vendor_id"))
     if not vid:
         return {}
@@ -172,6 +172,8 @@ def vendor_contact(record):
         hit = _vendors.get(vid)
         if hit and time.monotonic() - hit[0] < 3600:
             return hit[1]
+        if not allow_fetch:
+            return hit[1] if hit else {}
         try:
             contact = fetch_vendor_contact(vid).get("contact") or {}
         except ZohoError:
@@ -360,13 +362,17 @@ def cached_detail(pid: str, record: dict | None = None) -> dict | None:
     return hit[1]
 
 
-def fetch_detail(pid: str, record: dict | None = None) -> dict:
+def fetch_detail(pid: str, record: dict | None = None, *, enrich_vendor: bool = True) -> dict:
     """Fetch the lines now (one Zoho call) and cache them."""
     payload = fetch_purchase_order_detail(pid)
     detail = payload.get("purchaseorder") if isinstance(payload, dict) and isinstance(payload.get("purchaseorder"), dict) else payload
     if not isinstance(detail, dict) or not (detail.get("line_items") is not None or detail.get("purchaseorder_id") or detail.get("purchaseorder_number")):
         raise ZohoError("Zoho returned no purchase order detail.")
-    detail = {**detail, "vendor_contact": vendor_contact({**(record or {}), **detail})}
+    detail = {**detail, "vendor_contact": vendor_contact({**(record or {}), **detail}, allow_fetch=enrich_vendor)}
+    if not enrich_vendor:
+        # Assigned-only Fleet hydration must be one PO detail call. Its row is
+        # retained by the assigned cache; don't suppress later Inventory enrichment.
+        return detail
     with _lock:
         _details.pop(pid, None)  # re-insert at the end: the oldest entries are the ones dropped over the cap
         _details[pid] = (_modified(record) or _modified(detail), detail)
@@ -503,7 +509,7 @@ class NotAssignable(Exception):
     pass
 
 
-def ensure_row(order_id: str, *, validate: bool = False) -> SalesOrderCache:
+def ensure_row(order_id: str, *, validate: bool = False, enrich_vendor: bool = True) -> SalesOrderCache:
     """Row with its lines for an id, fetching the detail from Zoho (one call) when it is not in memory. `validate` (assigning a fresh PO)
     re-checks the PO- / not-SariSuki rule; an already-assigned PO is loaded without it."""
     pid = zoho_id(order_id)
@@ -511,7 +517,7 @@ def ensure_row(order_id: str, *, validate: bool = False) -> SalesOrderCache:
         record = (_list["records"] or {}).get(pid)
     detail = cached_detail(pid, record)
     if detail is None:
-        detail = fetch_detail(pid, record)
+        detail = fetch_detail(pid, record, enrich_vendor=enrich_vendor)
     base = {**(record or {}), **detail}
     if validate and (not is_wanted(base) or pickup_state(base) != "scheduled"):
         raise NotAssignable(f"{_number(base) or pid} is not a purchase order Load Planning handles (only tomorrow, For Pickup, Issued, pre-cutoff or manager-approved; never SariSuki).")
