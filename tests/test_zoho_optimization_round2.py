@@ -240,6 +240,7 @@ class Round2OptimizationTests(unittest.TestCase):
                 body = {"event_id": "evt-1", "salesorder": {"salesorder_id": "1", "status": "confirmed", "last_modified_time": "t1"}}
                 ok = client.post("/api/zoho/webhooks/salesorder", headers={"X-Zoho-Webhook-Secret": "secret"}, json=body)
                 dup = client.post("/api/zoho/webhooks/salesorder", headers={"X-Zoho-Webhook-Secret": "secret"}, json=body)
+                zoho_webhooks.flush_pending_webhooks()
         self.assertEqual(ok.json()["updated"], True)
         self.assertEqual(dup.json()["duplicate"], True)
         apply.assert_called_once()

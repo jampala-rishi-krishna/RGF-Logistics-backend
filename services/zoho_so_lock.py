@@ -233,14 +233,33 @@ def get_lock_status(so_id: str) -> dict:
     return lock_status_from_record(payload.get("salesorder") if isinstance(payload.get("salesorder"), dict) else payload)
 
 
-# Webhook mode: after the POST, read the order back up to 3 times, 1.5s apart, until lock_details says locked.
-WEBHOOK_VERIFY_ATTEMPTS = 3
-WEBHOOK_VERIFY_DELAY_S = 1.5
+# Webhook mode waits for the lock-result callback. A single status GET is the
+# fallback when Zoho does not deliver that callback.
+WEBHOOK_RESULT_WAIT_S = 10.0
+_lock_result_lock = threading.Lock()
+_lock_result_events: dict[str, tuple[threading.Event, dict | None]] = {}
+
+
+def receive_lock_result(record: dict) -> None:
+    """Wake a pending webhook lock request when Zoho calls lock-result."""
+    so_id = str(record.get("salesorder_id") or record.get("sales_order_id") or record.get("id") or "")
+    if not so_id:
+        return
+    result = record.get("lock_details") or record.get("lock_detail") or record.get("lock") or record
+    with _lock_result_lock:
+        pending = _lock_result_events.get(so_id)
+        if pending:
+            event, _ = pending
+            _lock_result_events[so_id] = (event, result if isinstance(result, dict) else {})
+            event.set()
 
 
 def _lock_via_webhook(so_id: str, status: dict) -> dict:
     """POST {"salesorder_id": id} to the incoming webhook (the API key lives in the URL, which is never logged),
     then verify through lock_details. Never raises."""
+    event = threading.Event()
+    with _lock_result_lock:
+        _lock_result_events[so_id] = (event, None)
     try:
         url = _required("ZOHO_SO_LOCK_WEBHOOK_URL")
         limiter = zoho_rate_limiter.limiter_for(_required("ZOHO_ORG_ID"))
@@ -248,10 +267,14 @@ def _lock_via_webhook(so_id: str, status: dict) -> dict:
             zoho_usage.record_call("lock_webhook", background=zoho_acquisition.route_context().get("route") == "background")
             response = httpx.request("POST", url, json={"salesorder_id": so_id}, timeout=REQUEST_TIMEOUT)
     except ZohoError as exc:
+        with _lock_result_lock:
+            _lock_result_events.pop(so_id, None)
         return {"locked": False, "already_locked": False, "lock_status": status, "lock_error": _connection_error(exc)}
     except httpx.HTTPError as exc:
         # Log only the exception type: httpx messages can contain the request URL, and the URL carries the key.
         logger.error("[ZOHO_SO_LOCK] webhook request failed: %s", type(exc).__name__)
+        with _lock_result_lock:
+            _lock_result_events.pop(so_id, None)
         return {"locked": False, "already_locked": False, "lock_status": status, "lock_error": "lock_connection_error"}
     payload = _payload(response)
     details = _post_details(response, payload)
@@ -260,12 +283,16 @@ def _lock_via_webhook(so_id: str, status: dict) -> dict:
     code_ok = "code" not in payload or str(payload.get("code")) in {"0", "success"}
     if not (200 <= response.status_code < 300 and code_ok):
         return {"locked": False, "already_locked": False, "lock_status": status, "lock_error": message or f"HTTP {response.status_code}", "message": message, **details}
-    verified: dict = status
-    for attempt in range(WEBHOOK_VERIFY_ATTEMPTS):
-        time.sleep(WEBHOOK_VERIFY_DELAY_S)
-        verified = get_lock_status(so_id)
-        if verified.get("is_locked"):
-            return {"locked": True, "already_locked": False, "lock_status": verified, "lock_error": None, "message": message, **details}
+    event.wait(WEBHOOK_RESULT_WAIT_S)
+    with _lock_result_lock:
+        _, callback = _lock_result_events.pop(so_id, (event, None))
+    if isinstance(callback, dict):
+        verified = callback if "is_locked" in callback else lock_status_from_record(callback)
+        return {"locked": bool(verified.get("is_locked")), "already_locked": False, "lock_status": verified, "lock_error": None if verified.get("is_locked") else "lock_verify_failed", "message": message, **details}
+    # No callback arrived: exactly one fallback status read.
+    verified = get_lock_status(so_id)
+    if verified.get("is_locked"):
+        return {"locked": True, "already_locked": False, "lock_status": verified, "lock_error": None, "message": message, **details}
     return {"locked": False, "already_locked": False, "lock_status": verified, "lock_error": verified.get("lock_error") or "lock_verify_failed", "message": message, **details}
 
 

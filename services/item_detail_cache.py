@@ -161,6 +161,15 @@ def mark_all_stale() -> None:
             _items[key] = (float("-inf"), entry)
 
 
+def invalidate_items(item_ids: Iterable[str]) -> None:
+    """Mark only the stock entries touched by a pushed order as stale."""
+    with _lock:
+        for raw_id in dict.fromkeys(str(item_id) for item_id in item_ids if item_id):
+            cached = _items.get(raw_id)
+            if cached is not None:
+                _items[raw_id] = (float("-inf"), cached[1])
+
+
 def invalidate() -> None:
     with _lock:
         _items.clear()

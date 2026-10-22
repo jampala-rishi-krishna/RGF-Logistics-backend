@@ -217,6 +217,29 @@ class Warming(Exception):
     """The first PO list pull is still running after the request deadline; it keeps filling the cache in the background."""
 
 
+def apply_webhook(record: dict) -> bool:
+    """Merge a pushed purchase order into the list/detail caches.
+
+    The webhook body is already a detail-shaped record, so no list or detail Zoho
+    request is needed when the PO tab renders it.
+    """
+    pid = _record_id(record)
+    if not pid:
+        return False
+    modified = _modified(record)
+    with _lock:
+        old = _details.get(pid)
+        if old and modified and old[0] and modified <= old[0]:
+            return False
+        records = dict(_list["records"] or {})
+        records[pid] = {**records.get(pid, {}), **record, "source": "webhook"}
+        _list.update(records=records, at=time.monotonic(), refreshed_at=datetime.now(timezone.utc), error=None)
+        _details.pop(pid, None)
+        _details[pid] = (modified, {**record, "source": "webhook"})
+        _prune_details_locked(set(records))
+    return True
+
+
 def _pull() -> tuple[dict[str, dict], dict[str, int]]:
     floor = datetime.now(PHT).date() - timedelta(days=LOOKBACK_DAYS)
     wanted: dict[str, dict] = {}

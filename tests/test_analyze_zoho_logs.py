@@ -161,7 +161,7 @@ class AnalyzerTests(unittest.TestCase):
         self.assertEqual(len(ids), 2)
         self.assertEqual(analyzer.analyze(self.handler.lines)["per_feature"]["Inventory drawer/ack"]["http"], 2)
 
-    def test_scheduled_fleet_sync_runs_get_distinct_request_ids(self):
+    def test_scheduled_fleet_sync_is_assigned_only_and_does_not_repull_window(self):
         from unittest.mock import MagicMock
         from routers import fleet
         from services import live_sales_order_cache
@@ -170,13 +170,12 @@ class AnalyzerTests(unittest.TestCase):
         session = MagicMock()
         session.__enter__.return_value = session
         session.execute.return_value.scalars.return_value.all.return_value = []
-        with patch.object(zoho_client.httpx, "request", FakeZoho()), patch.object(fleet, "SessionLocal", return_value=session),                 patch.object(live_sales_order_cache, "has_active_assignments", return_value=True), patch("services.zoho_usage.is_working_time", return_value=True),                 patch.object(live_sales_order_cache, "get_assigned_snapshot", return_value=[order]),                 patch.object(live_sales_order_cache, "merge_zoho_payload"), patch.object(live_sales_order_cache, "set_assignment"),                 patch.object(fleet, "sync_history_row"):
+        with patch.object(zoho_client.httpx, "request", FakeZoho()), patch.object(fleet, "SessionLocal", return_value=session),                 patch.object(live_sales_order_cache, "has_active_assignments", return_value=True), patch("services.zoho_usage.is_working_time", return_value=True),                 patch.object(live_sales_order_cache, "get_assigned_snapshot_ex", return_value=([order], False)), patch.object(live_sales_order_cache, "refresh_shared_window") as shared,                 patch.object(live_sales_order_cache, "merge_zoho_payload"), patch.object(live_sales_order_cache, "set_assignment"),                 patch.object(fleet, "sync_history_row"):
             fleet.scheduled_fleet_sync()
             fleet.scheduled_fleet_sync()
         attempts = [l for l in self.handler.lines if "event=http_attempt" in l]
-        self.assertGreaterEqual(len(attempts), 2)
-        self.assertTrue(all("route=background" in l and "source=fleet-refresh" in l for l in attempts))
-        self.assertEqual(len({l.split("request_id=")[1].split()[0] for l in attempts}), 2)
+        self.assertEqual(attempts, [])
+        shared.assert_not_called()
 
     def test_date_window_and_unparseable_lines_are_ignored(self):
         lines = ["garbage", "2026-10-01 10:00:00,123 zoho INFO [ZOHO_ACQUIRE] event=logical_request source=x route=/api/fleet request_id=a logical_id=1 generation=0",
@@ -186,3 +185,6 @@ class AnalyzerTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+

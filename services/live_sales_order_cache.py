@@ -15,7 +15,7 @@ from fastapi import HTTPException
 
 from models.inventory import SalesOrderCache
 from services.zoho_client import ZohoError, fetch_sales_order_detail, fetch_sales_orders, fetch_sales_orders_by_shipment_date
-from services import branches, memory_debug, order_types, purchase_orders, text_repair, transfer_orders, zoho_acquisition, zoho_resilience
+from services import branches, memory_debug, order_types, purchase_orders, text_repair, transfer_orders, zoho_acquisition, zoho_resilience, zoho_usage
 
 logger = logging.getLogger("live_sales_order_cache")
 
@@ -24,6 +24,7 @@ PHT = ZoneInfo("Asia/Manila")
 WIDE_WINDOW_PAST_DAYS = int(os.environ.get("ZOHO_WINDOW_PAST_DAYS", "1"))
 WIDE_WINDOW_FUTURE_DAYS = int(os.environ.get("ZOHO_WINDOW_FUTURE_DAYS", "14"))
 FULL_REPULL_SECONDS = int(os.environ.get("ZOHO_FULL_REPULL_SECONDS", "7200"))
+RECONCILE_SECONDS = int(os.environ.get("ZOHO_RECONCILE_SECONDS", "7200"))
 
 # --- Assignment state: the ONLY thing that's actually persisted for "current" SOs. Loaded
 # once from sales_order_history at startup, updated in memory on every assignment mutation,
@@ -117,6 +118,8 @@ _windows_unhydrated: dict[tuple[str, str], tuple[float, dict[str, SalesOrderCach
 # re-fetches the orders Zoho says changed. Memory only, bounded.
 _detail_lock = threading.Lock()
 _details: dict[str, tuple[str, dict]] = {}
+_webhook_copies: dict[str, tuple[str, dict]] = {}
+_hybrid_details: dict[tuple[str, str], dict] = {}
 DETAIL_CACHE_MAX = 1500
 _wide_window_key: tuple[str, str] | None = None
 _wide_window_last_sync: datetime | None = None
@@ -202,6 +205,7 @@ repair_deep = text_repair.repair_deep
 
 def record_payload(record: dict) -> dict:
     record = repair_deep(record)
+    custom = record.get("custom_field_hash") if isinstance(record.get("custom_field_hash"), dict) else {}
     customer = record.get("customer_name") or (record.get("customer") or {}).get("customer_name") or (record.get("customer") or {}).get("display_name")
     return {
         "id": str(_pick(record, "salesorder_id", "sales_order_id", "id")),
@@ -217,11 +221,11 @@ def record_payload(record: dict) -> dict:
         "total": _pick(record, "total", "total_amount"),
         "delivery_method": record.get("delivery_method"),
         "salesperson_name": (record.get("salesperson_name") or (record.get("salesperson") or {}).get("name")),
-        "customer_po_number": record.get("customer_po_number"),
+        "customer_po_number": record.get("customer_po_number") or custom.get("cf_customer_po_number") or custom.get("cf_customer_po_number_formatted"),
         "billing_address": record.get("billing_address") or {},
         "shipping_address": record.get("shipping_address") or {},
         "payment_terms_label": record.get("payment_terms_label"),
-        "mode_of_transport": record.get("mode_of_transport"),
+        "mode_of_transport": record.get("mode_of_transport") or custom.get("cf_mode_of_transportation_for_") or custom.get("cf_mode_of_transportation_for__formatted"),
         "raw_json": record,
         "synced_at": datetime.now(timezone.utc),
         "assignment_status": "unassigned",
@@ -802,17 +806,69 @@ def cached_detail_has_acknowledged_sub_status(order_id: str) -> bool:
     return bool(hit and record_has_acknowledged_sub_status(hit[1]))
 
 
+_SHADOW_FIELDS = ("status", "current_sub_status", "shipment_date", "delivery_method")
+
+
+def _shadow_in_shared_window(record: dict) -> bool:
+    expected = _as_date(record.get("shipment_date") or record.get("expected_shipment_date"))
+    if expected is None:
+        return False
+    start, end = _wide_bounds()
+    return start <= expected <= end
+
+
+def _shadow_value(record: dict, field: str):
+    if field == "current_sub_status":
+        custom = record.get("custom_field_hash") if isinstance(record.get("custom_field_hash"), dict) else {}
+        return record.get("current_sub_status") or record.get("order_sub_status") or custom.get("cf_sub_status")
+    if field == "line_items":
+        return tuple(sorted((str(item.get("item_id") or item.get("item_code") or ""), item.get("quantity"))
+                            for item in (record.get("line_items") or []) if isinstance(item, dict)))
+    if field == "lock_details.is_locked":
+        lock = record.get("lock_details") or record.get("lock_detail") or record.get("lock") or {}
+        return lock.get("is_locked") if isinstance(lock, dict) else None
+    return record.get(field)
+
+
+def _shadow_compare(api_record: dict) -> None:
+    """Compare an API SO with the newest webhook copy while shadow mode is enabled."""
+    if not _shadow_mode() or not isinstance(api_record, dict) or not _shadow_in_shared_window(api_record):
+        return
+    record_id = str(api_record.get("salesorder_id") or api_record.get("sales_order_id") or api_record.get("id") or "")
+    if not record_id or not branches.is_allowed(api_record):
+        return
+    with _detail_lock:
+        webhook = _webhook_copies.get(record_id)
+    if webhook is None:
+        zoho_usage.record_shadow("shadow_missing")
+        return
+    webhook_ts, webhook_record = webhook
+    api_ts = str(api_record.get("last_modified_time") or "")
+    fields = list(_SHADOW_FIELDS) + ["line_items", "lock_details.is_locked"]
+    differing = [field for field in fields if _shadow_value(api_record, field) != _shadow_value(webhook_record, field)]
+    if (api_ts and webhook_ts and api_ts > webhook_ts) or (api_ts == webhook_ts and differing):
+        zoho_usage.record_shadow("shadow_mismatch")
+        logger.warning("[WEBHOOK_SHADOW_MISMATCH] so_id=%s so_number=%s api_ts=%s webhook_ts=%s fields_differing=%s",
+                       record_id, api_record.get("salesorder_number") or api_record.get("order_number") or "",
+                       api_ts, webhook_ts, differing)
+    else:
+        zoho_usage.record_shadow("shadow_ok")
+
+
 def _hydrate_details(records: dict[str, dict]) -> None:
     # Reuse cached detail for every order whose last_modified_time is unchanged; fetch only
     # the rest. Keep fetching below Zoho's approximate 100 requests/minute ceiling.
     to_fetch: list[str] = []
     for rid, record in records.items():
+        _shadow_compare(record)
         modified = str(record.get("last_modified_time") or "")
         with _detail_lock:
             hit = _details.get(rid)
         if modified and hit is not None and hit[0] == modified:
             records[rid] = {**record, **hit[1]}
         else:
+            if hit is not None and _shadow_mode() and modified and hit[0] and modified > hit[0]:
+                logger.warning("[WEBHOOK_SHADOW_MISMATCH] salesorder_id=%s webhook_last_modified_time=%s api_last_modified_time=%s", rid, hit[0], modified)
             to_fetch.append(rid)
     if not to_fetch:
         return
@@ -823,6 +879,7 @@ def _hydrate_details(records: dict[str, dict]) -> None:
             try:
                 detail = future.result()
                 full = detail.get("salesorder") or detail
+                _shadow_compare(full)
                 fields = {k: v for k, v in full.items() if v not in (None, "", [], {})}
                 modified = str(records[rid].get("last_modified_time") or "")
                 records[rid] = {**records[rid], **fields}
@@ -848,6 +905,15 @@ FORCE_BLOCKING_READS = False  # test hook; the environment variable below does t
 def _blocking_reads_forced() -> bool:
     """Kill switch: LOAD_PLANNING_BLOCKING_READS=true makes Load Planning wait for a cold Zoho fill again (the pre-2026-10-13 behaviour)."""
     return FORCE_BLOCKING_READS or os.environ.get("LOAD_PLANNING_BLOCKING_READS", "").strip().lower() in {"1", "true", "yes"}
+
+
+def _webhook_reconcile_mode() -> bool:
+    return (os.environ.get("ZOHO_WEBHOOKS_ENABLED", "false").strip().lower() == "true"
+            and os.environ.get("ZOHO_WEBHOOK_SHADOW", "false").strip().lower() != "true")
+
+
+def _shadow_mode() -> bool:
+    return os.environ.get("ZOHO_WEBHOOK_SHADOW", "false").strip().lower() == "true"
 
 
 def _start_background_warm(token: tuple, work) -> None:
@@ -980,7 +1046,11 @@ def refresh_shared_window(*, force_full: bool = False) -> int:
     working = 6 <= datetime.now(PHT).hour < 20
     with _window_lock:
         existing = _windows.get(key)
-    do_full = force_full or existing is None or (_wide_window_last_sync is None) or (working and mono - _wide_window_last_full >= FULL_REPULL_SECONDS)
+    reconcile = _webhook_reconcile_mode()
+    if reconcile and existing is not None and _wide_window_last_sync is not None and now - _wide_window_last_sync < timedelta(seconds=RECONCILE_SECONDS):
+        return len(existing[1])
+    force = force_full if not reconcile else False
+    do_full = force or existing is None or (_wide_window_last_sync is None) or (working and mono - _wide_window_last_full >= (RECONCILE_SECONDS if reconcile else FULL_REPULL_SECONDS))
     if not working and existing is not None:
         return len(existing[1])
     raw = _pull_window(start, end) if do_full else _pull_delta_since(start, end, _wide_window_last_sync)
@@ -998,20 +1068,36 @@ def refresh_shared_window(*, force_full: bool = False) -> int:
     return len(raw)
 
 
-def get_detail(order_id: str, loader=None) -> dict:
+def get_detail(order_id: str, loader=None, *, needs_hybrid: bool = False) -> dict:
+    """Return the webhook detail; optionally enrich once for invoice/comments consumers.
+
+    ``needs_hybrid`` is used only by the SO drawer/export paths that need fields Zoho
+    does not include in the push body. The cache key includes last_modified_time, so a
+    new webhook version gets at most one fallback detail request.
+    """
     row = find_cached(order_id)
     raw = getattr(row, "raw_json", None) if row is not None else None
     modified = str(((raw if isinstance(raw, dict) else {}) or {}).get("last_modified_time") or "")
+    hybrid_key = (str(order_id), modified)
+    if needs_hybrid:
+        with _detail_lock:
+            hybrid = _hybrid_details.get(hybrid_key)
+        if hybrid is not None:
+            return {"salesorder": dict(hybrid)}
     if modified:
         with _detail_lock:
             hit = _details.get(str(order_id))
-        if hit is not None and hit[0] == modified:
+        if hit is not None and hit[0] == modified and not needs_hybrid:
             return {"salesorder": {**(row.raw_json or {}), **hit[1]}}
     detail = (loader or fetch_sales_order_detail)(order_id)
     record = detail.get("salesorder") or detail
+    _shadow_compare(record)
     fields = {k: v for k, v in record.items() if v not in (None, "", [], {})}
     if modified:
         _remember_detail(str(order_id), modified, fields)
+        if needs_hybrid:
+            with _detail_lock:
+                _hybrid_details[hybrid_key] = dict(record)
     return detail
 
 
@@ -1066,27 +1152,98 @@ def mark_acknowledged(order_id: str, acknowledged: bool) -> None:
 
 
 def apply_salesorder_webhook(record: dict) -> bool:
-    """Patch in-memory rows from a Zoho Sales Order workflow webhook. No DB writes."""
+    """Apply a newest Sales Order webhook to the live caches.
+
+    Webhooks are the push path for current orders.  This function deliberately stays
+    memory-only: the existing history writer remains responsible for durable state
+    transitions.  A caller may safely replay an event; ``last_modified_time`` makes
+    older deliveries no-ops.
+    """
     record_id = str(record.get("salesorder_id") or record.get("sales_order_id") or record.get("id") or "")
     if not record_id:
         return False
+    modified = str(record.get("last_modified_time") or "")
+    with _detail_lock:
+        previous = _details.get(record_id)
+    if modified and previous is not None and previous[0] and modified <= previous[0]:
+        return False
+    record = {**record, "source": "webhook"}
+    # Zoho's webhook puts fulfillment counters on each line, while the list/report
+    # consumers historically read the aggregate order fields. Preserve that shape.
+    lines = [item for item in (record.get("line_items") or []) if isinstance(item, dict)]
+    for aggregate in ("quantity_packed", "quantity_shipped", "quantity_delivered", "quantity_invoiced"):
+        if record.get(aggregate) in (None, "") and lines:
+            total = 0.0
+            for item in lines:
+                try:
+                    total += float(item.get(aggregate) or 0)
+                except (TypeError, ValueError):
+                    continue
+            record[aggregate] = total
+    closed = str(record.get("status") or record.get("order_status") or "").casefold() in {"fulfilled", "closed", "void"}
+    closed = closed or str(record.get("current_sub_status") or record.get("order_sub_status") or "").casefold() in {"closed", "void"}
+    new_row = _build_transient(record) if not closed and branches.is_allowed(record) else None
+    changed_item_ids = {str(item.get("item_id")) for item in (record.get("line_items") or []) if isinstance(item, dict) and item.get("item_id")}
     with _window_lock:
+        found = False
         for _, rows in _windows.values():
             row = rows.get(record_id)
             if row is not None:
                 merge_zoho_payload(row, record)
+                found = True
         for _, rows in _windows_unhydrated.values():
             row = rows.get(record_id)
             if row is not None:
                 merge_zoho_payload(row, record)
+                found = True
+        if closed:
+            for cache in (_windows, _windows_unhydrated):
+                for _, rows in cache.values():
+                    rows.pop(record_id, None)
+        elif new_row is not None and not found:
+            start, end = _wide_bounds()
+            if new_row.expected_shipment_date and start <= new_row.expected_shipment_date <= end:
+                key = (start.isoformat(), end.isoformat())
+                existing = _windows.get(key)
+                if existing is None:
+                    _windows[key] = (time.monotonic(), {record_id: new_row})
+                else:
+                    existing[1][record_id] = new_row
     assigned = _assigned_zoho.get(record_id)
-    if assigned is not None:
+    if assigned is not None and not closed:
         merge_zoho_payload(assigned, record)
     _observe_dates([record])
-    modified = str(record.get("last_modified_time") or "")
     if modified:
         _remember_detail(record_id, modified, {k: v for k, v in record.items() if v not in (None, "", [], {})})
+        with _detail_lock:
+            _webhook_copies[record_id] = (modified, {k: v for k, v in record.items() if v not in (None, "", [], {})})
+        with _detail_lock:
+            for key in [key for key in _hybrid_details if key[0] == record_id and key[1] != modified]:
+                _hybrid_details.pop(key, None)
+    if changed_item_ids:
+        try:
+            from services import item_detail_cache
+            item_detail_cache.invalidate_items(changed_item_ids)
+        except Exception:  # cache invalidation must never reject a webhook
+            logger.debug("item cache invalidation skipped", exc_info=True)
     return True
+
+
+def apply_lock_webhook(record: dict) -> bool:
+    """Merge a lock-result payload into the cached SO without a Zoho read."""
+    order_id = str(record.get("salesorder_id") or record.get("sales_order_id") or record.get("id") or "")
+    if not order_id:
+        return False
+    lock = record.get("lock_details") or record.get("lock_detail") or record.get("lock") or record
+    if not isinstance(lock, dict):
+        return False
+    for row in list(_assigned_zoho.values()):
+        if str(getattr(row, "id", "")) == order_id:
+            raw = row.raw_json if isinstance(row.raw_json, dict) else {}
+            merge_zoho_payload(row, {"lock_details": lock, "lock_detail": {"lock_details": lock}, "source": "webhook"})
+            row.raw_json = {**raw, "lock_details": lock, "lock_detail": {"lock_details": lock}, "source": "webhook"}
+            return True
+    return False
 
 
 def prewarm_default_windows() -> None:

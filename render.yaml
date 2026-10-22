@@ -82,6 +82,8 @@ services:
       - key: ZOHO_WEBHOOK_CAPTURE
         value: "false"
       - key: ZOHO_WEBHOOK_SECRET
+      - key: ZOHO_RECONCILE_SECONDS
+      - key: ZOHO_WEBHOOK_SHADOW
         sync: false
       - key: ZOHO_ACKNOWLEDGED_CUSTOMVIEW_ID
         sync: false
@@ -196,3 +198,4 @@ services:
         sync: false
       - key: VOICE_CALLS_DEFAULT
         value: "paused"
+

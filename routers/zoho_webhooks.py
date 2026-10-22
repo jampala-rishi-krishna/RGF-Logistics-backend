@@ -7,11 +7,12 @@ import hmac
 import json
 from datetime import datetime, timezone
 from urllib.parse import parse_qsl
+from concurrent.futures import ThreadPoolExecutor
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Request
 
 from auth.dependencies import require_role
-from services import live_sales_order_cache
+from services import live_sales_order_cache, zoho_usage
 
 router = APIRouter(prefix="/api/zoho/webhooks", tags=["zoho-webhooks"])
 admin_router = APIRouter(prefix="/api/admin", tags=["admin"], dependencies=[Depends(require_role("admin"))])
@@ -22,6 +23,11 @@ _TTL_SECONDS = 24 * 60 * 60
 _CAPTURE_MAX_PER_ROUTE = 5
 _CAPTURE_MAX_BY_ROUTE = {"salesorder": 15}
 _captures: dict[str, list[dict]] = {}
+_apply_pool = ThreadPoolExecutor(max_workers=4, thread_name_prefix="zoho-webhook")
+_pending_lock = threading.Lock()
+_pending: dict[tuple[str, str], dict] = {}
+_pending_timers: dict[tuple[str, str], threading.Timer] = {}
+DEBOUNCE_SECONDS = float(os.environ.get("ZOHO_WEBHOOK_DEBOUNCE_SECONDS", "30"))
 
 _SENSITIVE_EXACT = {
     "customer_name", "customername", "contact_name", "contactname", "first_name", "firstname",
@@ -45,8 +51,9 @@ def _capture_enabled() -> bool:
 
 def _verify_secret(header_secret: str | None, query_key: str | None) -> None:
     expected = _secret()
-    supplied = header_secret if header_secret is not None else query_key
-    if not expected or supplied is None or not hmac.compare_digest(str(supplied), expected):
+    supplied = [value for value in (header_secret, query_key) if value is not None]
+    valid = any(hmac.compare_digest(str(value), expected) for value in supplied) if expected else False
+    if not valid:
         raise HTTPException(401, "Invalid webhook secret.")
 
 
@@ -119,11 +126,94 @@ def _store_capture(route: str, request: Request, body) -> None:
 
 async def _capture_or_none(route: str, request: Request, header_secret: str | None, query_key: str | None):
     _verify_secret(header_secret, query_key)
+    zoho_usage.record_webhook(route)
     if not _capture_enabled():
         return None
     body = await _parse_body(request)
     _store_capture(route, request, body)
     return {"captured": True}
+
+
+def _record_for_route(route: str, body):
+    if not isinstance(body, dict):
+        return body
+    key = {"salesorder": "salesorder", "purchaseorder": "purchaseorder", "transferorder": "transfer_order"}.get(route)
+    if key and isinstance(body.get(key), dict):
+        return body[key]
+    return body
+
+
+def _entity_id(route: str, record: dict) -> str:
+    keys = {
+        "salesorder": ("salesorder_id", "sales_order_id", "id"),
+        "purchaseorder": ("purchaseorder_id", "purchase_order_id", "id"),
+        "transferorder": ("transfer_order_id", "transferorder_id", "id"),
+        "lock-result": ("salesorder_id", "sales_order_id", "id"),
+        "package": ("package_id", "salesorder_id", "id"),
+    }.get(route, ("id",))
+    return next((str(record.get(key)) for key in keys if record.get(key) not in (None, "")), "")
+
+
+def _apply(route: str, record: dict) -> bool:
+    if route == "salesorder":
+        return live_sales_order_cache.apply_salesorder_webhook(record)
+    if route == "purchaseorder":
+        from services import purchase_orders
+        return purchase_orders.apply_webhook(record)
+    if route == "transferorder":
+        from services import transfer_orders
+        return transfer_orders.apply_webhook(record)
+    if route == "lock-result":
+        from services import zoho_so_lock
+        zoho_so_lock.receive_lock_result(record)
+        return live_sales_order_cache.apply_lock_webhook(record)
+    # Shipment data is carried by the SO webhook's packages[] field. The package
+    # endpoint remains a compatibility receiver and intentionally causes no Zoho read.
+    return False
+
+
+def _flush_key(key: tuple[str, str]) -> None:
+    with _pending_lock:
+        record = _pending.pop(key, None)
+        _pending_timers.pop(key, None)
+    if record is not None:
+        _apply_pool.submit(_apply, key[0], record)
+
+
+def _queue_apply(route: str, record: dict) -> tuple[str, str]:
+    entity = _entity_id(route, record) or f"event:{time.monotonic_ns()}"
+    key = (route, entity)
+    with _pending_lock:
+        old = _pending.get(key)
+        old_modified = str((old or {}).get("last_modified_time") or "")
+        new_modified = str(record.get("last_modified_time") or "")
+        if old is None or not old_modified or not new_modified or new_modified > old_modified:
+            _pending[key] = record
+        timer = _pending_timers.get(key)
+        if timer is None or not timer.is_alive():
+            timer = threading.Timer(DEBOUNCE_SECONDS, _flush_key, args=(key,))
+            timer.daemon = True
+            _pending_timers[key] = timer
+            timer.start()
+    return key
+
+
+def flush_pending_webhooks() -> None:
+    """Test/support hook: apply all debounced events immediately."""
+    with _pending_lock:
+        keys = list(_pending)
+        timers = [t for t in _pending_timers.values() if t.is_alive()]
+    for timer in timers:
+        timer.cancel()
+    futures = []
+    for key in keys:
+        with _pending_lock:
+            record = _pending.pop(key, None)
+            _pending_timers.pop(key, None)
+        if record is not None:
+            futures.append(_apply_pool.submit(_apply, key[0], record))
+    for future in futures:
+        future.result(timeout=5)
 
 
 @admin_router.get("/zoho-webhook-captures")
@@ -153,10 +243,9 @@ async def salesorder_webhook(request: Request, key: str | None = None, x_zoho_we
     if captured is not None:
         return captured
     if not _enabled():
-        raise HTTPException(404, "Zoho webhooks are disabled.")
-    _verify_secret(x_zoho_webhook_secret, key)
+        return {"ignored": True}
     body = await request.json()
-    record = body.get("salesorder") if isinstance(body, dict) and isinstance(body.get("salesorder"), dict) else body
+    record = _record_for_route("salesorder", body)
     if not isinstance(record, dict):
         raise HTTPException(400, "Expected a salesorder object.")
     order_id = str(record.get("salesorder_id") or record.get("sales_order_id") or record.get("id") or "")
@@ -166,8 +255,8 @@ async def salesorder_webhook(request: Request, key: str | None = None, x_zoho_we
         raise HTTPException(400, "salesorder_id is required.")
     if not _remember_once(event_id):
         return {"ok": True, "duplicate": True, "salesorder_id": order_id}
-    updated = live_sales_order_cache.apply_salesorder_webhook(record)
-    return {"ok": True, "duplicate": False, "updated": updated, "salesorder_id": order_id}
+    _queue_apply("salesorder", record)
+    return {"ok": True, "queued": True, "updated": True, "salesorder_id": order_id}
 
 
 def _capture_route(route: str):
@@ -176,10 +265,15 @@ def _capture_route(route: str):
         if captured is not None:
             return captured
         if not _enabled():
-            raise HTTPException(404, "Zoho webhooks are disabled.")
-        # Phase 1 applies these routes; capture mode is deliberately the only
-        # behavior enabled here until their real payloads are captured.
-        return {"ignored": True}
+            return {"ignored": True}
+        body = await request.json()
+        record = _record_for_route(route, body)
+        if not isinstance(record, dict):
+            raise HTTPException(400, f"Expected a {route} object.")
+        if route == "package":
+            return {"ok": True, "ignored": True, "reason": "packages are applied from salesorder payloads"}
+        _queue_apply(route, record)
+        return {"ok": True, "queued": True, "id": _entity_id(route, record)}
     handler.__name__ = f"{route}_webhook"
     return handler
 

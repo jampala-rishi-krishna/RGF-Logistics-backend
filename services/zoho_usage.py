@@ -67,6 +67,9 @@ _lock = threading.Lock()
 _day = ""
 _base: Counter = Counter()    # (category, source) -> count already in Neon for _day
 _delta: Counter = Counter()   # (day, category, source) -> count not yet flushed
+_webhook_in: Counter = Counter()  # inbound webhook events; deliberately outside the Zoho API budget
+_shadow_counts: Counter = Counter()
+_webhook_warned = False
 _enabled = False              # True once start() ran: the fail-safe guard only applies to the running service
 _restored = False
 _restored_total = 0
@@ -81,6 +84,25 @@ _store = None
 _stop = threading.Event()
 _thread: threading.Thread | None = None
 PROCESS_STARTED_AT = datetime.now(timezone.utc)
+
+
+def record_webhook(module: str) -> None:
+    """Count an inbound Zoho webhook in memory; it is not a Zoho API call."""
+    global _webhook_warned
+    with _lock:
+        _webhook_in[str(module or "other")] += 1
+        total = sum(_webhook_in.values())
+        if total >= 700 and not _webhook_warned:
+            _webhook_warned = True
+            logger.warning("[ZOHO_WEBHOOK] inbound webhook count reached %d", total)
+
+
+def record_shadow(kind: str) -> None:
+    """Record a webhook shadow comparison result in memory only."""
+    if kind not in {"shadow_ok", "shadow_mismatch", "shadow_missing"}:
+        return
+    with _lock:
+        _shadow_counts[kind] += 1
 
 _metadata = sa.MetaData()
 usage_table = sa.Table(
@@ -464,6 +486,10 @@ def snapshot() -> dict:
             "by_source": {"request": by_source.get("request", 0), "background": by_source.get("background", 0)},
             "token_refresh": by_cat.get("token_refresh", 0),
             "not_counted": {k: by_cat.get(k, 0) for k in ("rate_limited", "lock_webhook", "lock_status")},
+            "webhook_in": dict(_webhook_in),
+            "shadow_ok": _shadow_counts.get("shadow_ok", 0),
+            "shadow_mismatch": _shadow_counts.get("shadow_mismatch", 0),
+            "shadow_missing": _shadow_counts.get("shadow_missing", 0),
             "unflushed": sum(v for v in _delta.values()),
             "percent_used": round(total / limit * 100, 1),
             "guard": guard_state_locked(total),
@@ -475,11 +501,14 @@ def snapshot() -> dict:
 
 def reset(*, restored: bool = True) -> None:
     """Test helper: clear all memory state."""
-    global _day, _base, _delta, _restored, _restored_total, _restore_error, _enabled, _failsafe_so_detail
+    global _day, _base, _delta, _webhook_in, _shadow_counts, _webhook_warned, _restored, _restored_total, _restore_error, _enabled, _failsafe_so_detail
     with _lock:
         _day = ""
         _base = Counter()
         _delta = Counter()
+        _webhook_in = Counter()
+        _shadow_counts = Counter()
+        _webhook_warned = False
         _restored = restored
         _restored_total = 0
         _restore_error = None

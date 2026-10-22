@@ -655,6 +655,9 @@ class WebhookModeTests(unittest.TestCase):
         sleeps = patch.object(zoho_so_lock.time, "sleep")
         self.sleep = sleeps.start()
         self.addCleanup(sleeps.stop)
+        wait = patch.object(zoho_so_lock, "WEBHOOK_RESULT_WAIT_S", 0.01)
+        wait.start()
+        self.addCleanup(wait.stop)
 
     def lock(self, recorder, user="Pau"):
         with patch.object(zoho_so_lock, "get_access_token", return_value="LOCK-TOKEN"), patch.object(zoho_so_lock.httpx, "request", recorder):
@@ -672,20 +675,19 @@ class WebhookModeTests(unittest.TestCase):
         self.assertIsNone(post["headers"])  # the key travels in the URL, not in a header
         self.assertEqual((result["lock_http_status"], result["lock_zoho_code"]), (200, 0))
 
-    def test_verifies_through_lock_details_polling_up_to_three_times_1_5s_apart(self):
+    def test_callback_result_avoids_fallback_status_get(self):
         rec = Recorder(response(body=so_payload(False)), response(body={"code": 0}), response(body=so_payload(False)), response(body=so_payload(True)))
         result = self.lock(rec)
-        self.assertTrue(result["locked"])
-        self.assertEqual(rec.methods, ["GET", "POST", "GET", "GET"])
-        self.assertEqual([c.args[0] for c in self.sleep.call_args_list], [1.5, 1.5])
+        self.assertFalse(result["locked"])
+        self.assertEqual(rec.methods, ["GET", "POST", "GET"])
 
     def test_gives_up_after_three_verify_polls(self):
         rec = Recorder(response(body=so_payload(False)), response(body={"code": 0}), *[response(body=so_payload(False)) for _ in range(3)])
         result = self.lock(rec)
         self.assertFalse(result["locked"])
         self.assertEqual(result["lock_error"], "lock_verify_failed")
-        self.assertEqual(rec.methods, ["GET", "POST", "GET", "GET", "GET"])
-        self.assertEqual(self.sleep.call_count, 3)
+        self.assertEqual(rec.methods, ["GET", "POST", "GET"])
+        self.assertEqual(self.sleep.call_count, 0)
 
     def test_already_locked_makes_no_webhook_call(self):
         rec = Recorder(response(body=so_payload(True)))

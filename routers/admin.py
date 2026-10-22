@@ -38,6 +38,9 @@ def get_zoho_usage():
         "zoho_calls_today": snap["zoho_calls_today"],
         "process_started_at": snap["process_started_at"],
         "usage_restored_from_db": snap["usage_restored_from_db"],
+        "shadow_ok": snap["shadow_ok"],
+        "shadow_mismatch": snap["shadow_mismatch"],
+        "shadow_missing": snap["shadow_missing"],
         "zoho_usage": snap,
     }
 

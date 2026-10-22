@@ -134,6 +134,25 @@ FAILURE_BACKOFF_SECONDS = 60
 DETAIL_CACHE_MAX = int(os.environ.get("TRANSFER_ORDER_DETAIL_CACHE_MAX", "500"))  # line details kept in memory (oldest dropped first)
 
 
+def apply_webhook(record: dict) -> bool:
+    """Merge a pushed transfer order into the list/detail caches without Zoho reads."""
+    tid = _record_id(record)
+    if not tid:
+        return False
+    modified = _modified(record)
+    with _lock:
+        old = _details.get(tid)
+        if old and modified and old[0] and modified <= old[0]:
+            return False
+        records = dict(_list["records"] or {})
+        records[tid] = {**records.get(tid, {}), **record, "source": "webhook"}
+        _list.update(records=records, at=time.monotonic(), refreshed_at=datetime.now(timezone.utc))
+        _details.pop(tid, None)
+        _details[tid] = (modified, {**record, "source": "webhook"})
+        _prune_details_locked(set(records))
+    return True
+
+
 def _pull() -> dict[str, dict]:
     floor = datetime.now(PHT).date() - timedelta(days=LOOKBACK_DAYS)
     wanted: dict[str, dict] = {}
