@@ -266,6 +266,15 @@ def crew_names(row):
     return [safe_text((staff_directory_cache.get_by_id(i) or {}).get("name")) for i in ids if i is not None]
 
 
+def crew_details(row):
+    from services import staff_directory_cache
+    driver = row.get("driver_id")
+    ids = list(dict.fromkeys([driver, *row.get("helper_ids", [])]))
+    return [{"staff_id": i, "role": "driver" if i == driver else "helper",
+             "name": safe_text((staff_directory_cache.get_by_id(i) or {}).get("name")) or "Name not recorded"}
+            for i in ids if i is not None]
+
+
 def order_card(row):
     reader = snapshots.facts.get if row["date"] and row["date"] < today().isoformat() else snapshots.current
     snapshot = reader(row.get("batch")) if row.get("batch") else None
@@ -277,6 +286,8 @@ def order_card(row):
     at = snapshot.get("as_of") if snapshot else None
     answers = answer_map(stop.get("answers"))
     bucket = day_model.outcome_bucket(stop.get("outcome"))
+    if bucket is None:
+        bucket = {"not delivered": "failed", "not_delivered": "failed", "partly delivered": "partial"}.get(norm(stop.get("outcome")))
     status = "Cancelled" if str(stop.get("outcome") or "").strip().lower() == "cancelled_by_request" else {"delivered": "Delivered", "partial": "Partly delivered", "failed": "Not delivered"}.get(bucket)
     if not status:
         status = ("Back at warehouse" if trip.get("status") in {"returned", "handover_submitted", "closed"} else
@@ -300,6 +311,7 @@ def order_card(row):
     sections = {
         "status_now": fact("trip workflow read snapshot", at, {"status": status, "truck": plate_of(row),
                              "trip": row.get("batch"), "crew": crew_names(row),
+                             "crew_detail": crew_details(row), "trip_status": trip.get("status"), "returned_at": trip.get("ended_at"),
                              "stop": stop.get("sequence"), "total_stops": len(snapshot.get("stops", {})) if snapshot else None},
                             None if snapshot else "Trip facts are unavailable. Try Refresh orders."),
         "location": location(row, snapshot, stop),
@@ -377,34 +389,87 @@ def is_problem(card):
     return card["status"] in {"Partly delivered", "Not delivered", "Cancelled"} or bool(card["sections"]["problems"]["value"])
 
 
+PENDING_STATUSES = {"Loaded", "Not yet loaded", "Out for delivery", "Arrived", "Back at warehouse", "Status unavailable"}
+
+
+def status_matches(card, status):
+    wanted = norm(status).replace("_", " ")
+    aliases = {"failed": "not delivered", "undelivered": "incomplete", "not delivered successfully": "incomplete",
+               "partial": "partly delivered", "partially delivered": "partly delivered", "returned": "back at warehouse"}
+    wanted = aliases.get(wanted, wanted)
+    if wanted in {"", "all"}:
+        return True
+    if wanted == "pending":
+        return card["status"] in PENDING_STATUSES
+    if wanted == "incomplete":
+        return card["status"] != "Delivered"
+    if wanted == "problems":
+        return is_problem(card)
+    if wanted == "rejected":
+        result = card["sections"]["delivery_result"].get("value") or {}
+        return isinstance(result.get("rejected_items"), list) and bool(result["rejected_items"]) or "reject" in norm(str(result.get("outcome") or "") + " " + str(result.get("reason") or ""))
+    if wanted == "out for delivery":
+        return card["status"] in {"Out for delivery", "Arrived"}
+    known = {"delivered", "partly delivered", "not delivered", "cancelled", "loaded", "not yet loaded", "arrived", "back at warehouse", "status unavailable"}
+    if wanted not in known:
+        raise HTTPException(422, "Unknown status filter. Use all, pending, incomplete, rejected, delivered, not delivered, or a recorded workflow status.")
+    return norm(card["status"]) == wanted
+
+
+def delivery_summary(user, start, end, status="all", db=None):
+    """One full scoped projection, never counts inferred from a paginated/filter-only list."""
+    start, end = dates(start, end)
+    cards = [order_card(row) for row in rows_for(user, start, end, db)]
+    counts = {}
+    for card in cards:
+        counts[card["status"]] = counts.get(card["status"], 0) + 1
+    matched = [c for c in cards if status_matches(c, status)]
+    orders = []
+    for card in matched[:100]:
+        workflow = card["sections"]["status_now"]["value"]
+        result = card["sections"]["delivery_result"]["value"]
+        orders.append({k: card[k] for k in ("number", "customer", "status", "truck", "link")} |
+                      {"crew": workflow["crew_detail"], "trip_status": workflow["trip_status"], "returned_at": workflow["returned_at"],
+                       "reason": result.get("reason"), "outcome": result.get("outcome"), "rejected_items": result.get("rejected_items")})
+    stamps = [c["last_update"] for c in cards if c.get("last_update")]
+    return {"date_from": str(start), "date_to": str(end), "filter": status, "total_assigned": len(cards), "status_counts": counts,
+            "delivered": counts.get("Delivered", 0), "incomplete": sum(n for s, n in counts.items() if s != "Delivered"),
+            "pending": sum(n for s, n in counts.items() if s in PENDING_STATUSES), "explicit_not_delivered": counts.get("Not delivered", 0),
+            "matched": len(matched), "orders": orders, "truncated": len(matched) > 100,
+            "returned_matched": sum(c["sections"]["status_now"]["value"]["trip_status"] in {"returned", "handover_submitted", "closed"} for c in matched),
+            "source": "Confirmed assigned orders / trip workflow", "as_of": min(stamps, default=None),
+            "freshness": "Record snapshot time; unknown for some records" if len(stamps) < len(cards) else "Record snapshot time",
+            "coverage": "Accessible records only; missing records are not proof of no orders. Incomplete is not the same as an explicit failed delivery."}
+
+
 def find_orders(user, query, start, end, status=None, db=None, offset=0):
     result = []
     # Quick-filter counts come from the same scoped, searched rows already projected here: no extra reads.
     counts = {"all": 0, "Out for delivery": 0, "Delivered": 0, "problems": 0}
+    as_of = []
     for row in rows_for(user, start, end, db):
         needle = norm(query)
         card = order_card(row)
         if needle and needle not in norm(" ".join(str(v or "") for v in [row["number"], row["customer"], row.get("po_number"), card["truck"], card["sections"]["delivery_result"]["value"]["invoice_dr"], *[i.get("invoice_number") for i in row["invoices"]]])):
             continue
         counts["all"] += 1
+        if card["last_update"]:
+            as_of.append(card["last_update"])
         if card["status"] == "Arrived":
             counts["Out for delivery"] += 1
         elif card["status"] in counts:
             counts[card["status"]] += 1
         if is_problem(card):
             counts["problems"] += 1
-        if status and status != "all":
-            if status == "problems" and not is_problem(card):
-                continue
-            if status != "problems" and card["status"] != status and not (status == "Out for delivery" and card["status"] == "Arrived"):
-                continue
+        if not status_matches(card, status):
+            continue
         status_now = card["sections"]["status_now"]["value"]
         result.append({k: card[k] for k in ("number", "customer", "delivery_date", "order_type", "status", "truck", "last_update", "link")} |
                       {"payment": card["sections"]["payment"]["value"]["status"], "stop": status_now["stop"],
                        "total_stops": status_now["total_stops"], "event": latest_event(card)})
     result.sort(key=lambda r: (r["delivery_date"] or "", r["number"]), reverse=True)
     return {"orders": result[offset:offset + 50], "total": len(result), "offset": offset, "counts": counts,
-            "source": "Confirmed assigned orders / trip workflow", "as_of": min((r["last_update"] for r in result if r["last_update"]), default=None),
+            "source": "Confirmed assigned orders / trip workflow", "as_of": min(as_of, default=None),
             "coverage": "Accessible cached records only; missing or cold records are not proof of no orders.",
             "scope": "All assigned orders"}
 

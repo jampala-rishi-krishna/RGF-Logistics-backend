@@ -178,6 +178,11 @@ def build_blocks(results, language, question=""):
                 if isinstance(order, dict):
                     add_row({"number": order.get("number"), "customer": order.get("customer") or "", "status": order.get("status") or "",
                              "reason": None, "rejected": None, "link": order.get("link")}, result.get("source"), result.get("as_of"))
+        elif name == "delivery_summary":
+            for order in result.get("orders") or []:
+                add_row({"number": order.get("number"), "customer": order.get("customer") or "", "status": order.get("status") or "",
+                         "reason": order.get("reason"), "rejected": rejected_summary(order.get("rejected_items")),
+                         "link": order.get("link")}, result.get("source"), result.get("as_of"))
         elif name == "get_order":
             sections = result.get("sections") or {}
             status_now = sections.get("status_now") or {}

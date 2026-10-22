@@ -61,6 +61,7 @@ def test_scope_list(tracker_env, role):
 def test_tools_enforce_scope(tracker_env, tool):
     env = tracker_env
     args = ({"query": "SO-200", "date_from": None, "date_to": None, "status": None} if tool == "find_orders" else
+            {"date_from": None, "date_to": None, "status": None} if tool == "delivery_summary" else
             {"customer": "Fresh Foods"} if tool == "customer_rules" else
             {"date_from": None, "date_to": None, "filters": {"trip": None, "customer": None, "area": None}} if tool == "buyers_per_sku" else
             {"so_number": "SO-200"})
