@@ -662,6 +662,20 @@ def get_assigned_snapshot_ex(include_window: bool = True, statuses: frozenset[st
                 row, excluded = future.result()
                 if row is None and not excluded:
                     had_failures = True
+    # Only after a failed G4 refill, use one list walk as a last-resort row source.
+    # The reconciliation list is allowed even when G4 is capped; detail hydration
+    # remains best-effort and cannot make assigned orders disappear from Fleet.
+    if had_failures and block:
+        start, end = _wide_bounds()
+        try:
+            get_window(start, end, block=True)
+        except (ZohoError, WindowWarming):
+            pass
+        with _window_lock:
+            for _, records in _windows.values():
+                for oid in ids:
+                    if oid not in _assigned_zoho and records.get(oid) is not None:
+                        _assigned_zoho[oid] = _apply_assignment(records[oid])
     rows = []
     for order_id in ids:
         if order_id in _excluded_ids:
