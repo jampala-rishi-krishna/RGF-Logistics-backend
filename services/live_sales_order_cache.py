@@ -547,7 +547,12 @@ def _observe_dates(records) -> None:
 
 
 def _persist_live_snapshot(record: dict, source: str) -> None:
-    """Persist current data in the separate live table; never affect the request on DB failure."""
+    """Persist current data in the separate live table; never affect the request on DB failure.
+
+    Off unless ZOHO_LIVE_CACHE_PERSIST=true: this is a synchronous Neon round trip per SO, and inside
+    detail hydration it stalled every window fill ("Details unavailable" on every tab)."""
+    if os.environ.get("ZOHO_LIVE_CACHE_PERSIST", "false").strip().lower() not in {"1", "true", "yes"}:
+        return
     try:
         from services import zoho_so_live_cache
         zoho_so_live_cache.upsert_snapshot(record, source=source)
