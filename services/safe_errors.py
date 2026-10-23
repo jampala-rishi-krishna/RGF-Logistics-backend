@@ -13,7 +13,7 @@ import logging
 from fastapi import Request
 from fastapi.responses import JSONResponse
 
-from services.http_hardening import REQUEST_ID_HEADER, request_id_for, server_error_body
+from services.http_hardening import REQUEST_ID_HEADER, log_server_error, request_id_for, server_error_body
 from services.live_sales_order_cache import WindowWarming
 
 logger = logging.getLogger("safe_errors")
@@ -38,14 +38,13 @@ def install_catch_all(app) -> None:
         except Exception as exc:  # noqa: BLE001
             # Full traceback goes to the log with the request id; the browser only gets the id, never the exception text.
             request_id = request_id_for(request.scope)
-            logger.exception("[ERROR] request_id=%s %s %s -> 500 (%s)", request_id, request.method, request.url.path, type(exc).__name__)
+            log_server_error(logger, "[ERROR]", request, request_id, exc)
             return JSONResponse(status_code=500, content=server_error_body(request_id), headers={REQUEST_ID_HEADER: request_id})
 
 
 async def sqlalchemy_error_handler(request: Request, exc: Exception) -> JSONResponse:
     """Database failures: log the details server-side, never return str(exc) (it can contain SQL, parameters and hosts)."""
     request_id = request_id_for(request.scope)
-    logger.error("[DB] request_id=%s %s %s -> 500 (%s)", request_id, request.method, request.url.path, type(exc).__name__,
-                 exc_info=(type(exc), exc, exc.__traceback__))
+    log_server_error(logger, "[DB]", request, request_id, exc)
     return JSONResponse(status_code=500, content={"error": "Database operation failed", **server_error_body(request_id)},
                         headers={REQUEST_ID_HEADER: request_id})

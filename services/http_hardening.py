@@ -20,6 +20,7 @@ import contextvars
 import logging
 import os
 import re
+import traceback
 import uuid
 from dataclasses import dataclass, field
 from typing import Mapping
@@ -163,12 +164,20 @@ def server_error_body(request_id: str) -> dict:
     return {"detail": "Server error", "code": "internal_error", "request_id": request_id}
 
 
+def log_server_error(log: logging.Logger, tag: str, request: Request, request_id: str, exc: BaseException) -> None:
+    """Full traceback at ERROR: once multi-line, and once on a single line carrying the request id, because Render
+    shows each traceback line as its own log entry and a search for the request id would otherwise miss them."""
+    log.error("%s request_id=%s %s %s -> 500 (%s)", tag, request_id, request.method, request.url.path, type(exc).__name__,
+              exc_info=(type(exc), exc, exc.__traceback__))
+    flat = "".join(traceback.format_exception(type(exc), exc, exc.__traceback__)).strip().replace("\n", " ⏎ ")
+    log.error("[TRACEBACK] request_id=%s %s %s %s", request_id, request.method, request.url.path, flat)
+
+
 async def server_error_handler(request: Request, exc: Exception) -> JSONResponse:
     """Registered for `Exception`, so Starlette runs it from ServerErrorMiddleware (outside CORS). It therefore adds the
     CORS and request-id headers itself. Never echoes exception text."""
     request_id = request_id_for(request.scope)
-    logger.error("[ERROR] request_id=%s %s %s -> 500 (%s)", request_id, request.method, request.url.path, type(exc).__name__,
-                 exc_info=(type(exc), exc, exc.__traceback__))
+    log_server_error(logger, "[ERROR]", request, request_id, exc)
     response = JSONResponse(status_code=500, content=server_error_body(request_id))
     response.headers[REQUEST_ID_HEADER] = request_id
     origin = request.headers.get("origin")

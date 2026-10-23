@@ -71,6 +71,34 @@ def test_asgi_app_does_not_duplicate_cors_headers_on_normal_responses(monkeypatc
     assert response.headers["x-request-id"]
 
 
+@pytest.mark.parametrize("target", ["app", "asgi_app"])
+def test_500_logs_full_traceback_at_error_on_a_line_with_the_request_id(broken_health, target, caplog):
+    client = TestClient(getattr(main, target), raise_server_exceptions=False)
+    with caplog.at_level("ERROR"):
+        response = client.get("/health", headers={"X-Request-ID": "474f0ac49b404215"})
+    assert response.status_code == 500 and response.json()["request_id"] == "474f0ac49b404215"
+    errors = [r for r in caplog.records if r.levelname == "ERROR"]
+    assert any(r.exc_info for r in errors)  # multi-line traceback still logged
+    flat = [r.getMessage() for r in errors if r.getMessage().startswith("[TRACEBACK] request_id=474f0ac49b404215")]
+    assert len(flat) == 1 and "\n" not in flat[0]
+    assert "Traceback (most recent call last)" in flat[0] and "in boom" in flat[0] and "RuntimeError" in flat[0]
+
+
+def test_sqlalchemy_error_logs_single_line_traceback(caplog):
+    app = FastAPI()
+    safe_errors.install_catch_all(app)
+    safe_errors.register(app)
+
+    @app.get("/db")
+    def db():
+        raise OperationalError("SELECT 1", {}, Exception("neon down"))
+
+    with caplog.at_level("ERROR"):
+        rid = TestClient(app, raise_server_exceptions=False).get("/db").json()["request_id"]
+    assert any(r.getMessage().startswith(f"[TRACEBACK] request_id={rid} GET /db") and "OperationalError" in r.getMessage()
+               for r in caplog.records)
+
+
 def test_sqlalchemy_errors_never_leak_their_text():
     app = FastAPI()
     safe_errors.install_catch_all(app)
