@@ -115,7 +115,7 @@ def _vehicle_payload(vehicle: Vehicle, db: Session, fresh_orders: dict[str, dict
         top = raw.get("location_name") or raw.get("warehouse_name") or (raw.get("warehouse") if isinstance(raw.get("warehouse"), str) else None) or location_obj.get("location_name") or warehouse_obj.get("warehouse_name")
         if top: names.append(str(top).strip())
         return list(dict.fromkeys(name for name in names if name))
-    associated = [{"soNumber": o.salesorder_number or o.id, "orderType": transfer_orders.order_type_of(o), "clientName": o.customer_name, "destinationCity": shipping_city(o), "warehouse": ", ".join(warehouses_for(o)) or None, "orderedWeightKg": order_metrics(o, order_raw(o))[0], "shippedWeightKg": order_metrics(o, order_raw(o))[1], "remainingWeightKg": max(0, (order_metrics(o, order_raw(o))[0] or 0) - (order_metrics(o, order_raw(o))[1] or 0)), "status": o.order_status, "shipmentStatus": o.shipment_status, "deliveryStatus": sales_order_delivery_status(order_raw(o)), **unassign_guard.stop_fact(o)} for o in assigned]
+    associated = [{"soId": str(o.id), "soNumber": o.salesorder_number or o.id, "orderType": transfer_orders.order_type_of(o), "clientName": o.customer_name, "destinationCity": shipping_city(o), "warehouse": ", ".join(warehouses_for(o)) or None, "orderedWeightKg": order_metrics(o, order_raw(o))[0], "shippedWeightKg": order_metrics(o, order_raw(o))[1], "remainingWeightKg": max(0, (order_metrics(o, order_raw(o))[0] or 0) - (order_metrics(o, order_raw(o))[1] or 0)), "status": o.order_status, "shipmentStatus": o.shipment_status, "deliveryStatus": sales_order_delivery_status(order_raw(o)), "driverId": o.driver_id, "helperIds": list(o.helper_ids or []), **unassign_guard.stop_fact(o)} for o in assigned]
     warehouses = sorted({str(item["warehouse"]).strip() for item in associated if item["warehouse"]})
     unavailable = plate in LOCKED_VEHICLES or not assigned
     fulfillment_status = "none" if not assigned else ("fulfilled" if delivered_count == len(assigned) else "partial" if delivered_count else "pending")
@@ -204,6 +204,7 @@ def _historical_vehicle_payload(vehicle: Vehicle, rows: list[SalesOrderHistory],
         names = {line.location_name.strip() for line in order_lines if line.location_name and line.location_name.strip()}
         warehouses.update(names)
         associated.append({
+            "soId": str(row.id),
             "soNumber": row.salesorder_number or row.id,
             "orderType": transfer_orders.order_type_of(row),
             "clientName": row.customer_name,
@@ -215,6 +216,8 @@ def _historical_vehicle_payload(vehicle: Vehicle, rows: list[SalesOrderHistory],
             "status": row.order_status,
             "shipmentStatus": row.shipment_status,
             "deliveryStatus": "Delivered" if delivery_status == "delivered" else row.delivery_status or "Unknown",
+            "driverId": row.driver_id,
+            "helperIds": list(row.helper_ids or []),
             **unassign_guard.stop_fact(row),
         })
     capacity = OPERATIONAL_CAPACITY_KG.get(plate) or (float(vehicle.rated_capacity_kg) if vehicle.rated_capacity_kg is not None else None)

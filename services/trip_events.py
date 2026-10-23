@@ -29,7 +29,7 @@ MAX_CLIENT_PAST = timedelta(days=3)  # a phone queued offline for longer than th
 MAX_CLIENT_FUTURE = timedelta(minutes=10)
 FAR_THRESHOLD_M = 500.0  # check-in further than this from the address is flagged (a warning, never a block)
 
-EVENT_TYPES = ("acknowledged", "trip_started", "checked_in", "checked_out", "trip_ended", "handover_submitted", "officer_acknowledged", "invoice_validated", "invoice_resolved", "trip_closed", "order_unassigned")
+EVENT_TYPES = ("acknowledged", "trip_started", "checked_in", "checked_out", "trip_ended", "handover_submitted", "officer_acknowledged", "invoice_validated", "invoice_resolved", "trip_closed", "order_unassigned", "assignment_transferred")
 
 
 def fail(status: int, message: str, code: str, errors: list[dict] | None = None):

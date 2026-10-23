@@ -140,7 +140,7 @@ class TripEvent(TimestampedBase):
 
     trip_id: Mapped[int | None] = mapped_column(BigInteger, ForeignKey("trips.id", ondelete="CASCADE"), index=True)
     batch_id: Mapped[str] = mapped_column(Text, nullable=False, index=True)
-    event_type: Mapped[str] = mapped_column(Text, nullable=False)  # acknowledged | trip_started | checked_in | checked_out | trip_ended | handover_submitted | officer_acknowledged | invoice_validated | invoice_resolved | trip_closed
+    event_type: Mapped[str] = mapped_column(Text, nullable=False)  # acknowledged | trip_started | checked_in | checked_out | trip_ended | handover_submitted | officer_acknowledged | invoice_validated | invoice_resolved | trip_closed | assignment_transferred
     so_id: Mapped[str | None] = mapped_column(Text, index=True)
     user_id: Mapped[int] = mapped_column(BigInteger, nullable=False, index=True)
     role: Mapped[str] = mapped_column(Text, nullable=False)

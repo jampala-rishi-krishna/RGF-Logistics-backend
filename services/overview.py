@@ -208,7 +208,7 @@ def outstanding_invoices(db: Session, warehouse: str | None, driver_id: int | No
 
 EVENT_LABELS = {"acknowledged": "Loaded (acknowledged) {so}", "trip_started": "Started the trip", "checked_in": "Arrived at {so}", "checked_out": "Checked out of {so}", "trip_ended": "Ended the trip",
                 "handover_submitted": "Handed over invoices", "officer_acknowledged": "Officer received the invoices", "invoice_validated": "Invoice validated {so}", "invoice_resolved": "Invoice resolved {so}", "trip_closed": "Trip closed",
-                "order_unassigned": "{so} removed by dispatch"}
+                "order_unassigned": "{so} removed by dispatch", "assignment_transferred": "{so} crew assignment transferred"}
 
 
 def _event_actor_name(event: TripEvent) -> str | None:

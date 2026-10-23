@@ -23,13 +23,15 @@ from types import SimpleNamespace
 from models.dispatch_pipeline import ClientDeliveryConstraint
 from models.vehicle import Vehicle
 from models.inventory import SalesOrderCache
+from models.sales_order_history import SalesOrderHistory
+from models.trip import Trip
 from services import optimizer
 from services.rarechain_email_template import render_rarechain_email
 from services import gmail_sender, assignment_email_status, weight_display
 from services.pack_units import pack_total
 from services.sales_order_location import address_lines
 from services.item_weight import calculate_line_weight_kg, calculate_order_weight_kg
-from services.delivery_status import is_delivered
+from services.delivery_status import is_delivered, sales_order_delivery_status
 from services.staff_roles import crew_kind, helper_ids_of, staff_kind
 from services import order_types, transfer_orders
 from services import order_fields
@@ -189,6 +191,37 @@ class AssignmentBody(BaseModel):
         """Driver first, then everyone else selected (helpers); no duplicates."""
         ordered = [self.driver_id] if self.driver_id is not None else []
         return list(dict.fromkeys([*ordered, *self.helper_ids, *self.driver_ids]))
+
+
+class TransferAssignmentBody(BaseModel):
+    salesorder_ids: list[str]
+    vehicle_id: str | None = None
+    driver_id: int | None = None
+    helper_ids: list[int] = []
+    reason: str
+    note: str | None = None
+    confirm_conflict: bool = False
+
+
+TRANSFER_REASONS = {"phone issue", "sick/absent", "vehicle breakdown/PMS", "other"}
+
+
+def _staff_display(staff_id: int | None) -> str | None:
+    if staff_id is None:
+        return None
+    return (staff_directory_cache.get_by_id(staff_id) or {}).get("name") or f"Staff #{staff_id}"
+
+
+def _transfer_order_blocker(row) -> str | None:
+    """Transfers preserve workflow state but cannot move cargo already shipped."""
+    status = str(getattr(row, "assignment_status", "") or "").casefold()
+    if status in {"completed", "delivered", "manifested"}:
+        return "Delivered, completed, or manifested orders cannot be transferred."
+    raw = getattr(row, "raw_json", None) or {}
+    delivery_status = sales_order_delivery_status(raw)
+    if is_delivered(raw) or delivery_status in {"Shipped", "Partially delivered", "Delivered"} or str(getattr(row, "shipment_status", None) or "").casefold() in {"shipped", "partially shipped", "partially delivered", "delivered"}:
+        return "Zoho shows this order as shipped or delivered; it cannot be transferred."
+    return None
 
 
 class AssignmentEmailBody(AssignmentBody):
@@ -579,6 +612,88 @@ def _pickup_block(order) -> dict | None:
     if transfer_orders.order_type_of(order) in {"TO", "PO"}:
         return None
     return unassign_guard.pickup_block(order)
+
+
+@router.post("/transfer")
+def transfer_assignment(body: TransferAssignmentBody, current_user: CurrentUser = Depends(require_role("admin", "dispatcher")), db: Session = Depends(get_db)):
+    """Manager-only in-place crew/vehicle transfer. It never calls Zoho and never resets trip progress."""
+    if not getattr(current_user, "is_manager", False):
+        raise HTTPException(403, "Manager permission required to transfer an assignment.")
+    ids = list(dict.fromkeys(str(value).strip() for value in body.salesorder_ids if str(value).strip()))
+    if not ids or len(ids) > 100:
+        raise HTTPException(400, "Select between 1 and 100 sales orders.")
+    reason = (body.reason or "").strip().casefold()
+    if reason not in TRANSFER_REASONS:
+        raise HTTPException(422, "Choose a valid transfer reason.")
+    note = (body.note or "").strip() or None
+    if reason == "other" and not note:
+        raise HTTPException(422, "Add a note when the reason is Other.")
+    rows = db.execute(select(SalesOrderHistory).where(SalesOrderHistory.id.in_(ids))).scalars().all()
+    by_id = {str(row.id): row for row in rows}
+    missing = [oid for oid in ids if oid not in by_id]
+    if missing:
+        raise HTTPException(404, {"message": "One or more assignments were not found.", "ids": missing})
+    blocked = [{"id": row.id, "number": row.salesorder_number, "reason": blocker} for row in rows if (blocker := _transfer_order_blocker(row))]
+    if blocked:
+        raise HTTPException(409, {"message": "Shipped or completed orders stay with their original crew.", "blocked": blocked})
+    current_vehicle = {str(row.vehicle_id or "") for row in rows}
+    current_driver = {row.driver_id for row in rows}
+    current_helpers = {int(helper) for row in rows for helper in (row.helper_ids or []) if helper is not None}
+    vehicle_id = (body.vehicle_id or next(iter(current_vehicle), "")).strip().upper()
+    if not vehicle_id:
+        raise HTTPException(422, "A vehicle is required.")
+    profile = db.execute(select(Vehicle).where(Vehicle.plate_no == vehicle_id)).scalar_one_or_none()
+    if profile is None:
+        raise HTTPException(404, "Vehicle was not found.")
+    if vehicle_id in LOCKED_VEHICLES:
+        raise HTTPException(409, f"Vehicle unavailable: {LOCKED_VEHICLES[vehicle_id]}")
+    driver_id = body.driver_id if body.driver_id is not None else next(iter(current_driver), None)
+    if driver_id is not None:
+        driver = staff_directory_cache.get_by_id(driver_id)
+        if not driver or driver.get("active") is False or crew_kind(driver) != "driver":
+            raise HTTPException(400, "Select an active delivery driver.")
+    helpers = list(dict.fromkeys(int(value) for value in body.helper_ids if value is not None))
+    if len(helpers) > MAX_HELPERS_PER_TRUCK:
+        raise HTTPException(400, "Only one helper per truck.")
+    if driver_id is not None and driver_id in helpers:
+        raise HTTPException(400, "The driver cannot also be the helper.")
+    for helper_id in helpers:
+        helper = staff_directory_cache.get_by_id(helper_id)
+        if not helper or helper.get("active") is False or crew_kind(helper) != "helper":
+            raise HTTPException(400, "Target helper must be an active Helper staff record with a linked login.")
+    # Warn before moving someone who is already assigned to another active truck.
+    conflicts = []
+    target_day = rows[0].expected_shipment_date
+    if helpers:
+        active = db.execute(select(SalesOrderHistory).where(SalesOrderHistory.assignment_status == "assigned", SalesOrderHistory.expected_shipment_date == target_day)).scalars().all()
+        for helper_id in helpers:
+            trucks = sorted({str(item.vehicle_id) for item in active if item.vehicle_id and helper_id in (item.helper_ids or []) and str(item.vehicle_id) not in current_vehicle})
+            if trucks:
+                conflicts.append({"staff_id": helper_id, "name": _staff_display(helper_id), "vehicles": trucks})
+    if conflicts and not body.confirm_conflict:
+        raise HTTPException(409, {"message": "The target helper has an active assignment on another truck.", "conflicts": conflicts, "requires_confirmation": True})
+    all_ids = [driver_id, *helpers] if driver_id is not None else helpers
+    received_at = trip_events.now_utc()
+    actor = trip_events.Actor(user_id=current_user.id, role=current_user.role, staff_id=getattr(current_user, "staff_id", None), name=current_user.full_name or current_user.email)
+    changed = []
+    for row in rows:
+        old = {"vehicle_id": row.vehicle_id, "driver_id": row.driver_id, "helper_ids": list(row.helper_ids or [])}
+        row.vehicle_id, row.driver_id, row.helper_ids = vehicle_id, driver_id, all_ids
+        row.assigned_by, row.assigned_by_name = current_user.id, current_user.full_name
+        live = live_sales_order_cache.find_cached(str(row.id))
+        if live is not None:
+            live.vehicle_id, live.driver_id, live.helper_ids = vehicle_id, driver_id, all_ids
+            live_sales_order_cache.set_assignment(str(row.id), vehicle_id=vehicle_id, driver_id=driver_id, helper_ids=all_ids, assigned_by=current_user.id, assigned_by_name=current_user.full_name)
+        batch_id = row.assignment_batch_id or f"transfer-{row.id}"
+        trip = db.execute(select(Trip).where(Trip.batch_id == batch_id)).scalar_one_or_none()
+        trip_events.add_event(db, trip_id=trip.id if trip else None, batch_id=batch_id, event_type="assignment_transferred", actor=actor, received_at=received_at, client_ts=received_at, so_id=str(row.id), payload={"from": old, "to": {"vehicle_id": vehicle_id, "driver_id": driver_id, "helper_ids": all_ids}, "reason": reason, "note": note}, result={"ok": True})
+        changed.append({"id": row.id, "number": row.salesorder_number})
+    db.commit()
+    live_sales_order_cache.bump_assignment_generation()
+    trip_events.bump()
+    invalidate_fleet_cache()
+    _invalidate_assignment_options_cache()
+    return {"success": True, "transferred": changed, "vehicle_id": vehicle_id, "driver_id": driver_id, "helper_ids": helpers, "reason": reason, "conflicts": conflicts}
 
 
 @router.post("/{salesorder_id}")
