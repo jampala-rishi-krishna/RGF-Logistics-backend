@@ -381,21 +381,27 @@ def startup_seed() -> dict:
     start, end = today - timedelta(days=1), today + timedelta(days=14)
     try:
         rows, approx_bytes = zoho_so_live_cache.load_window(start, end, branches.allowed_branch_ids())
-        for record in rows:
-            _seed_row(record)
-        watermark = zoho_so_live_cache.max_modified(rows) or datetime.min.replace(tzinfo=timezone.utc)
-        delta = _pull_delta_since(start, end, watermark)
-        _hydrate_details(delta)
-        for record in delta.values():
-            _seed_row(record)
-            zoho_so_live_cache.upsert_snapshot(record, source="api")
-        deleted = zoho_so_live_cache.cleanup(today)
-        logger.info("[ZOHO_STARTUP_SEED] rows=%d approx_bytes=%d delta_rows=%d deleted=%d", len(rows), approx_bytes, len(delta), deleted)
-        return {"enabled": True, "rows": len(rows), "neon_bytes": approx_bytes, "zoho_pages": 1, "zoho_details": len(delta)}
     except Exception as exc:
         logger.warning("[ZOHO_STARTUP_SEED] Neon unavailable; falling back to full hydration: %s", type(exc).__name__)
         refresh_shared_window(force_full=True)
         return {"enabled": True, "rows": 0, "neon_bytes": 0, "zoho_pages": 1, "zoho_details": len(_details), "fallback": True}
+    for record in rows:
+        _seed_row(record)
+    watermark = zoho_so_live_cache.max_modified(rows) or datetime.min.replace(tzinfo=timezone.utc)
+    try:
+        delta = _pull_delta_since(start, end, watermark)
+        _hydrate_details(delta)
+    except Exception as exc:
+        # A provider/list failure must not be mistaken for a Neon outage and
+        # must never turn a restart into a second full-window hydration.
+        logger.warning("[ZOHO_STARTUP_SEED] delta walk skipped: %s", type(exc).__name__)
+        delta = {}
+    for record in delta.values():
+        _seed_row(record)
+        zoho_so_live_cache.upsert_snapshot(record, source="api")
+    deleted = zoho_so_live_cache.cleanup(today)
+    logger.info("[ZOHO_STARTUP_SEED] rows=%d approx_bytes=%d delta_rows=%d deleted=%d", len(rows), approx_bytes, len(delta), deleted)
+    return {"enabled": True, "rows": len(rows), "neon_bytes": approx_bytes, "zoho_pages": 1, "zoho_details": len(delta)}
 
 
 def cleanup_live_cache_daily() -> int:
