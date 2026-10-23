@@ -132,3 +132,26 @@ def test_startup_seed_neon_failure_falls_back_with_warning(monkeypatch, caplog):
     assert fallback == [{"force_full": True}]
     assert "Neon unavailable" in caplog.text
 
+
+
+def test_seeded_pre_ack_snapshot_never_overrides_acknowledged_sub_status(monkeypatch):
+    """Unassigning an acknowledged SO must return it to Load Planning, not Inventory: a slim
+    pre-acknowledge seed snapshot must never be merged over Zoho's fresh cs_acknowl."""
+    import services.live_sales_order_cache as live
+
+    monkeypatch.setattr(live, "_details", {})
+    monkeypatch.setattr(live, "_webhook_copies", {})
+    monkeypatch.setattr(live, "_windows", {})
+    monkeypatch.setattr(live, "_observe_dates", lambda records: None)
+    monkeypatch.setattr(live, "_persist_live_snapshot", lambda record, source: None)
+    monkeypatch.setattr(live.branches, "is_allowed", lambda record: True)
+    ts = "2026-10-23T09:00:00+0800"  # a Zoho sub-status change need not bump last_modified_time
+    live._seed_row({"salesorder_id": "SO-ACK", "salesorder_number": "SO26-1", "shipment_date": "2026-10-24",
+                    "status": "confirmed", "current_sub_status": "confirmed", "last_modified_time": ts, "line_items": []})
+    fresh = {"salesorder_id": "SO-ACK", "status": "confirmed", "current_sub_status": "cs_acknowl", "last_modified_time": ts}
+    monkeypatch.setattr(live, "fetch_sales_order_detail",
+                        lambda rid: {"salesorder": {**fresh, "line_items": [{"sku": "FISH-1", "quantity": 4}]}})
+    records = {"SO-ACK": dict(fresh)}
+    live._hydrate_details(records)
+    assert live.record_has_acknowledged_sub_status(records["SO-ACK"])
+    assert records["SO-ACK"].get("line_items")  # full detail fetched, not the slim seed
