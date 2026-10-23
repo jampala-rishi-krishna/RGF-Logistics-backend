@@ -747,7 +747,7 @@ def _rows_any_branch(db: Session, date_from: str | None, date_to: str | None, st
         if is_delivered(raw):
             return "Delivered"
         return str(raw.get("shipment_status") or raw.get("shipping_status") or "Pending")
-    return [row for row in rows if assignment_match(row) and not (assignment == "unassigned" and live_sales_order_cache.is_on_hold(row)) and not (assignment == "assigned" and is_delivered(getattr(row, "raw_json", None) or {}) and row.assignment_status != "completed") and matches_status(row) and (not wanted_cities or (_shipping_city(row) or "").casefold() in wanted_cities) and (not vehicle_needle or vehicle_needle in str(row.vehicle_id or "").casefold()) and (not customer_needle or customer_needle in str(row.customer_name or "").casefold()) and (not delivery_needle or delivery_needle in row_delivery_status(row).casefold()) and (not needle or search_match(row))]
+    return [row for row in rows if assignment_match(row) and not (assignment == "unassigned" and live_sales_order_cache.is_on_hold(row)) and matches_status(row) and (not wanted_cities or (_shipping_city(row) or "").casefold() in wanted_cities) and (not vehicle_needle or vehicle_needle in str(row.vehicle_id or "").casefold()) and (not customer_needle or customer_needle in str(row.customer_name or "").casefold()) and (not delivery_needle or delivery_needle in row_delivery_status(row).casefold()) and (not needle or search_match(row))]
 
 
 def _hydrate_export_rows(db: Session, rows: list[SalesOrderCache]) -> list[SalesOrderCache]:

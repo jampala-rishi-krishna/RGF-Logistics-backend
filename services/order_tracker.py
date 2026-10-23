@@ -96,16 +96,16 @@ def project(row, historical=False):
 def live_rows(start, end):
     # Same assigned working set as Confirmed Orders; never call its provider loader.
     from services.order_types import order_type_of
-    from services.delivery_status import is_delivered
     for row in live.cached_assigned_records():
         item = project(row)
         status = norm(getattr(row, "order_status", None) or (getattr(row, "raw_json", None) or {}).get("status"))
+        # A delivered order remains part of the assigned-day record until its
+        # assignment is explicitly completed. Delivery alone must not hide it.
         if (item["assignment_status"] not in {"assigned", "completed"} or not item["vehicle"]
                 or not item["date"] or not str(start) <= item["date"] <= str(end)
                 or order_type_of(row) not in {"SO", "WM", "PO", "TO"}
                 or status in {"void", "cancelled", "canceled"}
-                or (item["order_type"] in {"SO", "WM"} and status == "draft")
-                or (is_delivered(getattr(row, "raw_json", None) or {}) and item["assignment_status"] != "completed")):
+                or (item["order_type"] in {"SO", "WM"} and status == "draft")):
             continue
         yield item
 

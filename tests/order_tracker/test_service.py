@@ -26,6 +26,13 @@ def test_today_uses_no_db_or_provider(tracker_env, monkeypatch):
     assert card["sections"]["documents"]["value"]["client_po_number"] == "PO-001"
 
 
+def test_delivered_assigned_order_stays_in_today_tracker(tracker_env):
+    env = tracker_env
+    env.rows[0].raw_json["packages"] = [{"status": "DELIVERED"}]
+    rows = list(tracker.rows_for(env.user, env.day, env.day, object()))
+    assert "SO-100" in {row["number"] for row in rows}
+
+
 @pytest.mark.parametrize("trip_status", [None, "not_started", "closed"])
 def test_assigned_truck_is_available_without_active_trip_or_gps(tracker_env, monkeypatch, trip_status):
     env = tracker_env
