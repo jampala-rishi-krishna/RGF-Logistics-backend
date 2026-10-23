@@ -998,6 +998,7 @@ def _hydrate_details(records: dict[str, dict]) -> None:
             to_fetch.append(rid)
     if not to_fetch:
         return
+    stale_count = 0
     with ThreadPoolExecutor(max_workers=5) as executor:
         futures = {executor.submit(contextvars.copy_context().run, fetch_sales_order_detail, rid): rid for rid in to_fetch}
         for future in as_completed(futures):
@@ -1013,7 +1014,18 @@ def _hydrate_details(records: dict[str, dict]) -> None:
                     _remember_detail(rid, modified, fields)
                 _persist_live_snapshot(records[rid], "api")
             except ZohoError:
+                # Capped / failed detail call: keep the last detail already in memory (lines, address) under the
+                # fresh list fields, so a refresh never turns full rows into "Details unavailable". Not
+                # re-remembered under the new timestamp, so the next refresh asks Zoho again.
+                with _detail_lock:
+                    stale = _details.get(rid)
+                if stale is not None:
+                    records[rid] = {**stale[1], **records[rid]}
+                    stale_count += 1
                 continue
+    if stale_count:
+        logger.warning("[LiveSalesOrderCache] %d SO detail call(s) refused/failed; served last cached detail", stale_count)
+        zoho_resilience.note_stale(None, "zoho_failed")
 
 
 class WindowWarming(Exception):
