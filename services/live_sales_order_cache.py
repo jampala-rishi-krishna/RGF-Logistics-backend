@@ -355,9 +355,8 @@ def _seed_row(record: dict) -> None:
         return
     modified = str(record.get("last_modified_time") or "")
     row = _build_transient(record)
-    _remember_detail(record_id, modified, record)
-    with _detail_lock:
-        _webhook_copies[record_id] = (modified, dict(record))
+    # A slim Neon snapshot is NOT a full Zoho detail: never cache it as one, or
+    # hydration reuses it and the SO shows no lines/SKUs ("Details unavailable").
     _observe_dates([record])
     with _window_lock:
         start, end = _wide_bounds()
