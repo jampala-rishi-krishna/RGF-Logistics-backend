@@ -440,7 +440,7 @@ def enforce_budget(feature_name: str | None = None) -> None:
             # SO-detail hydration to render usable rows.  Do not turn this category
             # cap into an empty/"tails unavailable" production view; the global daily
             # budget guard below remains the hard stop for all non-write traffic.
-            if category_used >= app_settings.get_int(setting) and category != "so_detail_reconcile":
+            if category_used >= app_settings.get_int(setting) and category not in {"so_detail_reconcile", "items"}:
                 raise ZohoBudgetGuard(f"Zoho {category} category cap reached; serving cache only.")
     limit = budget()
     if used >= limit:  # 100%: hard stop for everything except acknowledge / lock
