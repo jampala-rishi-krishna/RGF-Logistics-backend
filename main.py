@@ -123,6 +123,9 @@ async def lifespan(app: FastAPI):
     # Zoho counter starts so the budget guard uses the saved budget. Env values stay in force if this fails.
     from services import app_settings
     app_settings.load()
+    from services import zoho_writeback
+    with SessionLocal() as db:
+        zoho_writeback.load_pending(db)
     zoho_usage.start(INSTANCE_ID)
     if not schema_state["ok"]:
         logger.error("[SCHEMA] Startup stopped before cache queries; run 'python -m alembic upgrade head'.")
@@ -159,6 +162,18 @@ async def lifespan(app: FastAPI):
         )
     from services import pickup_email
     scheduler.add_job(pickup_email.scheduled_tick, "interval", seconds=30, id="pickup_email", max_instances=1, coalesce=True)
+    for hour, minute in ((6, 30), (11, 0), (15, 0)):
+        scheduler.add_job(
+            reports.scheduled_report_build,
+            trigger="cron",
+            hour=hour,
+            minute=minute,
+            timezone="Asia/Manila",
+            id=f"logistics_report_{hour:02d}{minute:02d}",
+            replace_existing=True,
+            max_instances=1,
+            coalesce=True,
+        )
     scheduler.start()
     memory_task = memory_debug.start_periodic_logging()  # no-op unless MEMORY_DEBUG_LOG=1
     gmail_sender.log_identity_config_at_startup()

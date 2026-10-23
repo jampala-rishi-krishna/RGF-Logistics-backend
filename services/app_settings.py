@@ -44,9 +44,13 @@ DEFINITIONS: dict[str, SettingDef] = {d.key: d for d in (
     SettingDef("PICKUP_EMAIL_ENABLED", "Pickup email enabled", "0 = off, 1 = on. Recipients must be configured before sending.", "int", 0, 0, 1),
     SettingDef("DISPATCH_PHONE", "Dispatch phone", "Number the driver app's 'Call dispatch' button dials. Leave empty to hide the button.", "phone", ""),
     SettingDef("DRIVER_STALE_MINUTES", "Driver stale threshold", "A driver on a trip with no action for this long is flagged stale in Driver Overview.", "int", 15, 1, 1440, "minutes"),
-    SettingDef("ZOHO_DAILY_BUDGET", "Zoho daily budget", "Platform soft budget of Zoho API calls per day. Once usage reaches the cache-only percentage non-essential Zoho calls pause; at 100% everything stops except acknowledge and lock calls. Cannot exceed the organisation limit.", "int", 4500, 100, None, "calls/day"),
+    SettingDef("ZOHO_DAILY_BUDGET", "Zoho daily budget", "Platform soft budget of Zoho API calls per day. Once usage reaches the cache-only percentage non-essential Zoho calls pause; at 100% everything stops except acknowledge and lock calls. Cannot exceed the organisation limit.", "int", 2700, 100, None, "calls/day"),
     SettingDef("ZOHO_GUARD_CACHE_ONLY_PCT", "Zoho guard: cache-only at", "Percentage of the daily budget at which non-essential Zoho calls pause (decimal percentages allowed; rounded to the nearest call). Sales Order details, acknowledge and lock calls still run until 100%.", "float", 92, 50, 99, "% of budget"),
     SettingDef("ZOHO_FAILSAFE_SO_DETAIL_CAP", "Zoho fail-safe SO-detail cap", "While today's Zoho usage total could not be restored from the database, at most this many Sales Order detail calls are allowed.", "int", 50, 0, 1000, "calls"),
+    SettingDef("ZOHO_CAP_ITEMS", "Zoho cap: items", "Daily soft cap for item list/detail calls.", "int", 1000, 0, None, "calls/day"),
+    SettingDef("ZOHO_CAP_REPORTS", "Zoho cap: reports", "Daily soft cap for report calls.", "int", 650, 0, None, "calls/day"),
+    SettingDef("ZOHO_CAP_SO_DETAIL_RECONCILE", "Zoho cap: SO detail and reconcile", "Daily soft cap shared by SO detail and reconcile calls.", "int", 450, 0, None, "calls/day"),
+    SettingDef("ZOHO_CAP_PO_TO", "Zoho cap: PO and TO", "Daily soft cap shared by purchase and transfer order calls.", "int", 200, 0, None, "calls/day"),
 )}
 
 _PHONE = re.compile(r"^[0-9+()\-\s]{0,32}$")

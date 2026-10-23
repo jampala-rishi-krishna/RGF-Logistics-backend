@@ -831,8 +831,10 @@ def _shadow_value(record: dict, field: str):
 
 
 def _shadow_compare(api_record: dict) -> None:
-    """Compare an API SO with the newest webhook copy while shadow mode is enabled."""
-    if not _shadow_mode() or not isinstance(api_record, dict) or not _shadow_in_shared_window(api_record):
+    """Compare API data with the webhook copy; reconcile mode repairs mapping drift."""
+    shadow = _shadow_mode()
+    reconcile = _webhook_reconcile_mode()
+    if (not shadow and not reconcile) or not isinstance(api_record, dict) or not _shadow_in_shared_window(api_record):
         return
     record_id = str(api_record.get("salesorder_id") or api_record.get("sales_order_id") or api_record.get("id") or "")
     if not record_id or not branches.is_allowed(api_record):
@@ -840,19 +842,28 @@ def _shadow_compare(api_record: dict) -> None:
     with _detail_lock:
         webhook = _webhook_copies.get(record_id)
     if webhook is None:
-        zoho_usage.record_shadow("shadow_missing")
+        if shadow:
+            zoho_usage.record_shadow("shadow_missing")
         return
     webhook_ts, webhook_record = webhook
     api_ts = str(api_record.get("last_modified_time") or "")
     fields = list(_SHADOW_FIELDS) + ["line_items", "lock_details.is_locked"]
     differing = [field for field in fields if _shadow_value(api_record, field) != _shadow_value(webhook_record, field)]
-    if (api_ts and webhook_ts and api_ts > webhook_ts) or (api_ts == webhook_ts and differing):
-        zoho_usage.record_shadow("shadow_mismatch")
-        logger.warning("[WEBHOOK_SHADOW_MISMATCH] so_id=%s so_number=%s api_ts=%s webhook_ts=%s fields_differing=%s",
-                       record_id, api_record.get("salesorder_number") or api_record.get("order_number") or "",
-                       api_ts, webhook_ts, differing)
+    newer = bool(api_ts and webhook_ts and api_ts > webhook_ts)
+    equal_mapping_drift = api_ts == webhook_ts and bool(differing)
+    if newer or equal_mapping_drift:
+        if shadow:
+            zoho_usage.record_shadow("shadow_mismatch")
+            logger.warning("[WEBHOOK_SHADOW_MISMATCH] so_id=%s so_number=%s api_ts=%s webhook_ts=%s fields_differing=%s",
+                           record_id, api_record.get("salesorder_number") or api_record.get("order_number") or "",
+                           api_ts, webhook_ts, differing)
+        if reconcile:
+            with _detail_lock:
+                _webhook_copies[record_id] = (api_ts or webhook_ts, dict(api_record))
+            logger.info("[WEBHOOK_MAPPING_FIX] so_id=%s fields=%s", record_id, differing or ["last_modified_time"])
     else:
-        zoho_usage.record_shadow("shadow_ok")
+        if shadow:
+            zoho_usage.record_shadow("shadow_ok")
 
 
 def _hydrate_details(records: dict[str, dict]) -> None:

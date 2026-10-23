@@ -30,7 +30,7 @@ CLOSE_EVENT = "zoho_so_closed"
 ATTACH_EVENT = "zoho_so_attachment"
 SYSTEM_USER_ID = 0  # trip_events.user_id is NOT NULL; 0 = the system (no login has id 0)
 SYSTEM_ROLE = "system"
-RETRY_DELAYS = (60, 300, 900, 3600, 3 * 3600, 6 * 3600)  # seconds before attempt 2, 3, ...; then the job is given up
+RETRY_DELAYS = (60, 300, 900)  # seconds before attempts 2, 3, 4; then the job is given up
 MAX_PENDING = 500
 POD_FIELD_KEYS = frozenset({"delivery_photo"})
 CLOSE_OUTCOMES = frozenset({"delivered", "partial"})
@@ -102,6 +102,40 @@ def reset() -> None:
     with _lock:
         _jobs.clear()
         _worker_running = False
+
+
+def load_pending(db=None) -> int:
+    """Reload retrying write-back events from the existing trip_events history path."""
+    from models.trip import TripEvent
+    own_session = db is None
+    session = _open_session() if own_session else db
+    try:
+        rows = session.execute(select(TripEvent).where(TripEvent.event_type.in_((CLOSE_EVENT, ATTACH_EVENT)))).scalars().all()
+        loaded = 0
+        for event in rows:
+            result = event.result or {}
+            if result.get("status") != "retrying":
+                continue
+            payload = event.payload or {}
+            key = event.idempotency_key or (f"zoho-close:{event.so_id}" if event.event_type == CLOSE_EVENT else f"zoho-attach:{payload.get('upload_key') or event.so_id}")
+            extra = {k: v for k, v in payload.items() if k not in {"so_number", "kind"}}
+            job = Job(kind="close" if event.event_type == CLOSE_EVENT else "attach", key=key, so_id=str(event.so_id),
+                      batch_id=event.batch_id or "", so_number=payload.get("so_number"), trip_id=event.trip_id,
+                      attempts=int(result.get("attempts") or 1), next_at=_now(), extra=extra)
+            with _lock:
+                if key not in _jobs and len(_jobs) < MAX_PENDING:
+                    _jobs[key] = job
+                    loaded += 1
+        global _worker_running
+        if loaded and not _worker_running:
+            _worker_running = True
+            _spawn(_worker)
+        if loaded:
+            _wake.set()
+        return loaded
+    finally:
+        if own_session:
+            session.close()
 
 
 def _enqueue(job: Job) -> None:

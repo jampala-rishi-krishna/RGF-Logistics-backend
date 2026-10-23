@@ -7,6 +7,7 @@ from fastapi.testclient import TestClient
 
 from auth.dependencies import get_current_user
 from routers import zoho_webhooks
+from services import zoho_usage
 
 
 @pytest.fixture()
@@ -105,3 +106,21 @@ def test_capture_does_not_apply_salesorder(capture_app, monkeypatch):
     monkeypatch.setattr(zoho_webhooks.live_sales_order_cache, "apply_salesorder_webhook", lambda record: applied.append(record))
     assert capture_app.post("/api/zoho/webhooks/salesorder", headers={"X-Zoho-Webhook-Secret": "capture-secret"}, json={"salesorder_id": "SO-2"}).status_code == 200
     assert applied == []
+
+
+def test_webhook_in_log_and_outcome_counter(monkeypatch, caplog):
+    caplog.set_level("INFO", logger="zoho_webhooks")
+    monkeypatch.setenv("ZOHO_WEBHOOK_CAPTURE", "false")
+    monkeypatch.setenv("ZOHO_WEBHOOKS_ENABLED", "true")
+    monkeypatch.setenv("ZOHO_WEBHOOK_SECRET", "capture-secret")
+    zoho_usage.reset()
+    monkeypatch.setattr(zoho_webhooks, "_queue_apply", lambda route, record: (route, record.get("salesorder_id")))
+    app = FastAPI()
+    app.include_router(zoho_webhooks.router)
+    with TestClient(app) as client:
+        response = client.post("/api/zoho/webhooks/salesorder", headers={"X-Zoho-Webhook-Secret": "capture-secret"}, json={
+            "salesorder_id": "SO-LOG-1", "salesorder_number": "SO26-LOG-1", "last_modified_time": "2026-10-23T01:00:00+00:00"
+        })
+    assert response.status_code == 200
+    assert "[WEBHOOK_IN] module=salesorder entity_id=SO-LOG-1" in caplog.text
+    assert zoho_usage.snapshot()["webhook_outcomes"]["applied"] == 1

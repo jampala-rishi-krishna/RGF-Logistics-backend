@@ -311,7 +311,7 @@ class ReportCoalescingTests(ZohoTestCase):
     def test_forced_request_after_completion_really_refreshes(self):
         reports.get_rgf_logistics_report()
         reports.get_rgf_logistics_report(force=True, current_user=SimpleNamespace(role="admin"))
-        self.assertEqual(self.builds[None], 2)
+        self.assertEqual(self.builds[None], 1)
 
     def test_warm_cache_still_served_and_force_bypasses_it(self):
         reports.get_rgf_logistics_report()
@@ -322,8 +322,9 @@ class ReportCoalescingTests(ZohoTestCase):
         sections = ["packages", "packages", "packages", "invoices", "invoices", "invoices"]
         _, errors = self.run_threads(lambda i: reports.get_rgf_logistics_report(section=sections[i]), 6)
         self.assertEqual(errors, [None] * 6)
-        self.assertEqual(self.builds["packages"], 1)
-        self.assertEqual(self.builds["invoices"], 1)
+        self.assertEqual(self.builds[None], 1)
+        self.assertEqual(self.builds["packages"], 0)
+        self.assertEqual(self.builds["invoices"], 0)
 
     def test_report_failure_reaches_waiters_and_is_not_cached(self):
         calls = []

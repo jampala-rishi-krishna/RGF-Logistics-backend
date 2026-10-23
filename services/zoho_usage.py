@@ -36,6 +36,8 @@ FEATURES = {
     "acknowledge",
     "delivery_writeback",  # services/zoho_writeback.py: SO Closed sub-status + POD attachment after a check-out
     "reports",
+    "reconcile",
+    "po_to",
     "dashboard",
     "agent_tools",
     "fleet_sync",
@@ -51,6 +53,12 @@ FEATURES = {
 # calls. They still count against the org-wide Zoho limit, which is why they stay tracked.
 UNCOUNTED = {"token_refresh", "rate_limited", "lock_webhook", "lock_status"}
 ESSENTIAL_FEATURES = {"acknowledge", "lock_status", "so_detail", "delivery_writeback"}
+CAP_SETTINGS = {
+    "items": ("ZOHO_CAP_ITEMS", {"items_batch", "item_detail"}),
+    "reports": ("ZOHO_CAP_REPORTS", {"reports"}),
+    "so_detail_reconcile": ("ZOHO_CAP_SO_DETAIL_RECONCILE", {"so_detail", "reconcile"}),
+    "po_to": ("ZOHO_CAP_PO_TO", {"po_to"}),
+}
 # At 100% of the budget everything stops except these two (so_detail is essential only below 100%).
 HARD_STOP_EXEMPT = {"acknowledge", "lock_status"}
 # While the startup restore has failed, only these pass freely; so_detail is hard-capped (see failsafe_so_detail_cap).
@@ -68,6 +76,7 @@ _day = ""
 _base: Counter = Counter()    # (category, source) -> count already in Neon for _day
 _delta: Counter = Counter()   # (day, category, source) -> count not yet flushed
 _webhook_in: Counter = Counter()  # inbound webhook events; deliberately outside the Zoho API budget
+_webhook_outcomes: Counter = Counter()
 _shadow_counts: Counter = Counter()
 _webhook_warned = False
 _enabled = False              # True once start() ran: the fail-safe guard only applies to the running service
@@ -86,11 +95,13 @@ _thread: threading.Thread | None = None
 PROCESS_STARTED_AT = datetime.now(timezone.utc)
 
 
-def record_webhook(module: str) -> None:
+def record_webhook(module: str, outcome: str | None = None) -> None:
     """Count an inbound Zoho webhook in memory; it is not a Zoho API call."""
     global _webhook_warned
     with _lock:
         _webhook_in[str(module or "other")] += 1
+        if outcome:
+            _webhook_outcomes[str(outcome)] += 1
         total = sum(_webhook_in.values())
         if total >= 700 and not _webhook_warned:
             _webhook_warned = True
@@ -288,6 +299,22 @@ def cache_only_limit() -> int:
     return round(budget() * cache_only_pct() / 100)
 
 
+def _category_for_feature(name: str) -> str | None:
+    return next((category for category, (_setting, features) in CAP_SETTINGS.items() if name in features), None)
+
+
+def category_caps() -> dict[str, dict[str, int]]:
+    from services import app_settings
+    with _lock:
+        return _category_caps_locked(app_settings)
+
+
+def _category_caps_locked(app_settings) -> dict[str, dict[str, int]]:
+    by_cat, _ = _by_category_locked()
+    return {category: {"used": sum(by_cat.get(feature, 0) for feature in features), "cap": app_settings.get_int(setting)}
+            for category, (setting, features) in CAP_SETTINGS.items()}
+
+
 def guard_state_locked(total: int) -> str:
     limit = budget()
     if _enabled and not _restored:
@@ -311,6 +338,13 @@ def enforce_budget(feature_name: str | None = None) -> None:
         if name in HARD_STOP_EXEMPT:
             return
         used = _total_locked()
+        category = _category_for_feature(name)
+        if category:
+            setting, features = CAP_SETTINGS[category]
+            from services import app_settings
+            category_used = sum(_by_category_locked()[0].get(feature, 0) for feature in features)
+            if category_used >= app_settings.get_int(setting):
+                raise ZohoBudgetGuard(f"Zoho {category} category cap reached; serving cache only.")
     limit = budget()
     if used >= limit:  # 100%: hard stop for everything except acknowledge / lock
         raise ZohoBudgetGuard("Zoho daily budget exhausted; serving cache only.")
@@ -487,12 +521,14 @@ def snapshot() -> dict:
             "token_refresh": by_cat.get("token_refresh", 0),
             "not_counted": {k: by_cat.get(k, 0) for k in ("rate_limited", "lock_webhook", "lock_status")},
             "webhook_in": dict(_webhook_in),
+            "webhook_outcomes": dict(_webhook_outcomes),
             "shadow_ok": _shadow_counts.get("shadow_ok", 0),
             "shadow_mismatch": _shadow_counts.get("shadow_mismatch", 0),
             "shadow_missing": _shadow_counts.get("shadow_missing", 0),
             "unflushed": sum(v for v in _delta.values()),
             "percent_used": round(total / limit * 100, 1),
             "guard": guard_state_locked(total),
+            "category_caps": _category_caps_locked(__import__("services.app_settings", fromlist=["get_int"])),
             "scope": "neon_additive",
             "process_started_at": PROCESS_STARTED_AT.isoformat(),
             "usage_restored_from_db": {"restored": _restored, "total": _restored_total, "error": _restore_error},
@@ -501,12 +537,13 @@ def snapshot() -> dict:
 
 def reset(*, restored: bool = True) -> None:
     """Test helper: clear all memory state."""
-    global _day, _base, _delta, _webhook_in, _shadow_counts, _webhook_warned, _restored, _restored_total, _restore_error, _enabled, _failsafe_so_detail
+    global _day, _base, _delta, _webhook_in, _webhook_outcomes, _shadow_counts, _webhook_warned, _restored, _restored_total, _restore_error, _enabled, _failsafe_so_detail
     with _lock:
         _day = ""
         _base = Counter()
         _delta = Counter()
         _webhook_in = Counter()
+        _webhook_outcomes = Counter()
         _shadow_counts = Counter()
         _webhook_warned = False
         _restored = restored

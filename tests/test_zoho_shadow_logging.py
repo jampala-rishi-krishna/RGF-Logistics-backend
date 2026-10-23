@@ -37,3 +37,40 @@ def test_shadow_ignores_disallowed_or_outside_window(monkeypatch):
     lc._shadow_compare({**_so(), "shipment_date": "2026-12-01"})
     counts = zoho_usage.snapshot()
     assert counts["shadow_ok"] == counts["shadow_mismatch"] == counts["shadow_missing"] == 0
+
+
+def test_reconcile_equal_timestamp_mapping_fix_overwrites_webhook_copy(monkeypatch, caplog):
+    monkeypatch.setenv("ZOHO_WEBHOOKS_ENABLED", "true")
+    monkeypatch.setenv("ZOHO_WEBHOOK_SHADOW", "false")
+    monkeypatch.setattr(lc, "_wide_bounds", lambda: (date(2026, 10, 21), date(2026, 11, 4)))
+    base = _so()
+    api = {**base, "current_sub_status": "acknowledged", "line_items": [{"item_id": "i1", "quantity": 9}]}
+    with lc._detail_lock:
+        lc._webhook_copies.clear()
+        lc._webhook_copies["100"] = (base["last_modified_time"], base)
+    caplog.set_level("INFO", logger="live_sales_order_cache")
+    lc._shadow_compare(api)
+    with lc._detail_lock:
+        timestamp, repaired = lc._webhook_copies["100"]
+    assert timestamp == base["last_modified_time"]
+    assert repaired["current_sub_status"] == "acknowledged"
+    assert repaired["line_items"][0]["quantity"] == 9
+    assert "[WEBHOOK_MAPPING_FIX]" in caplog.text
+
+
+def test_reconcile_newer_api_copy_overwrites_webhook_copy(monkeypatch, caplog):
+    monkeypatch.setenv("ZOHO_WEBHOOKS_ENABLED", "true")
+    monkeypatch.setenv("ZOHO_WEBHOOK_SHADOW", "false")
+    monkeypatch.setattr(lc, "_wide_bounds", lambda: (date(2026, 10, 21), date(2026, 11, 4)))
+    webhook = _so(ts="2026-10-22T01:00:00+00:00")
+    api = _so(ts="2026-10-22T02:00:00+00:00", qty=4)
+    with lc._detail_lock:
+        lc._webhook_copies.clear()
+        lc._webhook_copies["100"] = (webhook["last_modified_time"], webhook)
+    caplog.set_level("INFO", logger="live_sales_order_cache")
+    lc._shadow_compare(api)
+    with lc._detail_lock:
+        timestamp, repaired = lc._webhook_copies["100"]
+    assert timestamp == api["last_modified_time"]
+    assert repaired["line_items"][0]["quantity"] == 4
+    assert "[WEBHOOK_MAPPING_FIX]" in caplog.text

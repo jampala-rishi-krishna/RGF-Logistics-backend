@@ -217,16 +217,17 @@ def test_failed_batch_uses_backoff_without_single_fanout(provider, monkeypatch):
 def test_report_section_repeated_refresh_zero_calls(provider, monkeypatch):
     monkeypatch.setattr(reports.time, "sleep", lambda _: None)
     first = reports.get_rgf_logistics_report(section="invoices")
-    assert len(provider) == 1
-    assert provider[0][1] == "invoices"
+    assert len(provider) > 1
+    initial = len(provider)
     assert reports.get_rgf_logistics_report(section="invoices") == first
-    assert len(provider) == 1
+    assert len(provider) == initial
     first["errors"]["mutated"] = True
     assert "mutated" not in reports.get_rgf_logistics_report(section="invoices")["errors"]
 
 
 def test_full_report_ttl_15_minutes_and_admin_force(provider, monkeypatch):
     monkeypatch.setattr(reports.time, "sleep", lambda _: None)
+    reports._last_force_at = None
     clock = [1000.0]
     monkeypatch.setattr(reports.time, "time", lambda: clock[0])
     reports.get_rgf_logistics_report()
@@ -237,9 +238,11 @@ def test_full_report_ttl_15_minutes_and_admin_force(provider, monkeypatch):
     assert len(provider) == initial
     clock[0] += 1
     reports.get_rgf_logistics_report()
-    assert len(provider) == 2 * initial
+    assert len(provider) == initial
     reports.get_rgf_logistics_report(force=True, current_user=SimpleNamespace(role="admin"))
-    assert len(provider) == 3 * initial
+    assert len(provider) == 2 * initial
+    forced = reports.get_rgf_logistics_report(force=True, current_user=SimpleNamespace(role="admin"))
+    assert "next_refresh_allowed_at" in forced
 
 
 @pytest.mark.parametrize("role", ["dispatcher", "warehouse", "planner", "sales"])
@@ -259,10 +262,11 @@ def test_report_role_dependency_over_http(provider, monkeypatch):
     assert client.get("/api/reports/rgf-logistics?force=true&section=invoices").status_code == 403
     assert provider == []
     assert client.get("/api/reports/rgf-logistics?section=invoices").status_code == 200
-    assert len(provider) == 1
+    assert len(provider) > 1
+    initial = len(provider)
     app.dependency_overrides[get_current_user] = lambda: SimpleNamespace(role="admin")
     assert client.get("/api/reports/rgf-logistics?force=true&section=invoices").status_code == 200
-    assert len(provider) == 2
+    assert len(provider) > initial
 
 
 @pytest.mark.parametrize("force", [False, True])

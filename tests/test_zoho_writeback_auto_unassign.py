@@ -118,6 +118,24 @@ def test_zoho_failure_never_blocks_and_is_retried_in_background(wb):
     assert zoho_writeback.pending() == []
 
 
+def test_failed_writeback_is_capped_at_four_attempts_and_reloaded(wb):
+    add_order(wb, "s1")
+    h = H(make_user(wb))
+    start_trip(wb, h)
+    wb.failures["close"].extend([zoho_client.ZohoError("timeout")] * 10)
+    _deliver(wb, h, "s1", "Delivered")
+    zoho_writeback.run_pending(force=True)
+    assert len(zoho_writeback.pending()) == 1
+    zoho_writeback.reset()
+    with wb.Session() as db:
+        assert zoho_writeback.load_pending(db) == 1
+    for _ in range(3):
+        zoho_writeback.run_pending(force=True)
+    assert zoho_writeback.pending() == []
+    assert len(wb.failures["close"]) == 6  # ten failures minus four HTTP attempts
+    assert zoho_writeback.RETRY_DELAYS == (60, 300, 900)
+
+
 def test_zoho_4xx_is_final(wb):
     add_order(wb, "s1")
     h = H(make_user(wb))

@@ -5,6 +5,7 @@ import threading
 import time
 import hmac
 import json
+import logging
 from datetime import datetime, timezone
 from urllib.parse import parse_qsl
 from concurrent.futures import ThreadPoolExecutor
@@ -13,6 +14,8 @@ from fastapi import APIRouter, Depends, Header, HTTPException, Request
 
 from auth.dependencies import require_role
 from services import live_sales_order_cache, zoho_usage
+
+logger = logging.getLogger("zoho_webhooks")
 
 router = APIRouter(prefix="/api/zoho/webhooks", tags=["zoho-webhooks"])
 admin_router = APIRouter(prefix="/api/admin", tags=["admin"], dependencies=[Depends(require_role("admin"))])
@@ -126,7 +129,6 @@ def _store_capture(route: str, request: Request, body) -> None:
 
 async def _capture_or_none(route: str, request: Request, header_secret: str | None, query_key: str | None):
     _verify_secret(header_secret, query_key)
-    zoho_usage.record_webhook(route)
     if not _capture_enabled():
         return None
     body = await _parse_body(request)
@@ -152,6 +154,12 @@ def _entity_id(route: str, record: dict) -> str:
         "package": ("package_id", "salesorder_id", "id"),
     }.get(route, ("id",))
     return next((str(record.get(key)) for key in keys if record.get(key) not in (None, "")), "")
+
+
+def _log_in(route: str, record: dict, outcome: str) -> None:
+    logger.info("[WEBHOOK_IN] module=%s entity_id=%s last_modified_time=%s outcome=%s",
+                route, _entity_id(route, record), record.get("last_modified_time") or record.get("event_time") or "", outcome)
+    zoho_usage.record_webhook(route, outcome)
 
 
 def _apply(route: str, record: dict) -> bool:
@@ -241,8 +249,10 @@ def _remember_once(key: str) -> bool:
 async def salesorder_webhook(request: Request, key: str | None = None, x_zoho_webhook_secret: str | None = Header(None)):
     captured = await _capture_or_none("salesorder", request, x_zoho_webhook_secret, key)
     if captured is not None:
+        _log_in("salesorder", {}, "applied")
         return captured
     if not _enabled():
+        _log_in("salesorder", {}, "skipped_window")
         return {"ignored": True}
     body = await request.json()
     record = _record_for_route("salesorder", body)
@@ -254,8 +264,12 @@ async def salesorder_webhook(request: Request, key: str | None = None, x_zoho_we
     if not order_id:
         raise HTTPException(400, "salesorder_id is required.")
     if not _remember_once(event_id):
+        _log_in("salesorder", record, "stale")
         return {"ok": True, "duplicate": True, "salesorder_id": order_id}
+    with _pending_lock:
+        debounced = ("salesorder", order_id) in _pending
     _queue_apply("salesorder", record)
+    _log_in("salesorder", record, "debounced" if debounced else "applied")
     return {"ok": True, "queued": True, "updated": True, "salesorder_id": order_id}
 
 
@@ -263,16 +277,22 @@ def _capture_route(route: str):
     async def handler(request: Request, key: str | None = None, x_zoho_webhook_secret: str | None = Header(None)):
         captured = await _capture_or_none(route, request, x_zoho_webhook_secret, key)
         if captured is not None:
+            _log_in(route, {}, "applied")
             return captured
         if not _enabled():
+            _log_in(route, {}, "skipped_window")
             return {"ignored": True}
         body = await request.json()
         record = _record_for_route(route, body)
         if not isinstance(record, dict):
             raise HTTPException(400, f"Expected a {route} object.")
         if route == "package":
+            _log_in(route, record, "skipped_window")
             return {"ok": True, "ignored": True, "reason": "packages are applied from salesorder payloads"}
+        with _pending_lock:
+            debounced = (_entity_id(route, record) and (route, _entity_id(route, record)) in _pending)
         _queue_apply(route, record)
+        _log_in(route, record, "debounced" if debounced else "applied")
         return {"ok": True, "queued": True, "id": _entity_id(route, record)}
     handler.__name__ = f"{route}_webhook"
     return handler

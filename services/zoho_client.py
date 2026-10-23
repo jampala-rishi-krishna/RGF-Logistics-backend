@@ -358,7 +358,7 @@ def fetch_sales_orders_by_shipment_date(start: date, end: date, page: int = 1, p
     params = {"shipment_date_start": start.isoformat(), "shipment_date_end": end.isoformat(), "page": page, "per_page": min(per_page, 200), "branch_ids": branches.branch_param()}
     if sort_column:
         params["sort_column"] = sort_column
-    return _only_allowed(_request_with_feature("GET", "salesorders", params, "inventory_list"), "salesorders")
+    return _only_allowed(_request_with_feature("GET", "salesorders", params, "reconcile"), "salesorders")
 
 
 def acknowledge_sales_order(salesorder_id: str, status_code: str = "cs_acknowl") -> dict:
@@ -416,33 +416,33 @@ def fetch_transfer_orders(page: int = 1, per_page: int = 200, sort_column: str |
     params: dict = {"page": page, "per_page": min(per_page, 200)}
     if sort_column:
         params["sort_column"] = sort_column
-    return _request_with_feature("GET", "transferorders", params, "reports")
+    return _request_with_feature("GET", "transferorders", params, "po_to")
 
 
 def fetch_transfer_orders_page(page: int = 1, per_page: int = 200) -> dict:
     """One page of the transfer-order list, newest date first (Load Planning's TO tab). Counted as an inventory list call, so
     the budget guard pauses it like every other list."""
-    return _request_with_feature("GET", "transferorders", {"page": page, "per_page": min(per_page, 200), "sort_column": "date", "sort_order": "D"}, "inventory_list")
+    return _request_with_feature("GET", "transferorders", {"page": page, "per_page": min(per_page, 200), "sort_column": "date", "sort_order": "D"}, "po_to")
 
 
 def fetch_transfer_order_detail(transfer_order_id: str) -> dict:
     """One transfer order with its line items (quantity_transfer, unit, item_id). Only called for orders being shown/assigned."""
-    return _request_with_feature("GET", f"transferorders/{transfer_order_id}", {}, "inventory_list")
+    return _request_with_feature("GET", f"transferorders/{transfer_order_id}", {}, "po_to")
 
 
 def fetch_purchase_orders_page(page: int = 1, per_page: int = 200) -> dict:
     """One page of the purchase-order list, newest date first (Load Planning's PO tab). No branch_ids filter: the PO rule drops only
     "SS PO-" numbers and the SariSuki branch itself (services/purchase_orders.py). Counted as an inventory list call."""
-    return _request_with_feature("GET", "purchaseorders", {"page": page, "per_page": min(per_page, 200), "sort_column": "date", "sort_order": "D"}, "inventory_list")
+    return _request_with_feature("GET", "purchaseorders", {"page": page, "per_page": min(per_page, 200), "sort_column": "date", "sort_order": "D"}, "po_to")
 
 
 def fetch_vendor_contact(contact_id: str) -> dict:
-    return _request_with_feature("GET", f"contacts/{contact_id}", {}, "inventory_list")
+    return _request_with_feature("GET", f"contacts/{contact_id}", {}, "po_to")
 
 
 def fetch_purchase_order_detail(purchaseorder_id: str) -> dict:
     """One purchase order with its line items (quantity, unit, item_id) and addresses. Only called for orders being shown/assigned."""
-    return _request_with_feature("GET", f"purchaseorders/{purchaseorder_id}", {}, "inventory_list")
+    return _request_with_feature("GET", f"purchaseorders/{purchaseorder_id}", {}, "po_to")
 
 
 def fetch_inventory_adjustments(page: int = 1, per_page: int = 200, sort_column: str | None = None) -> dict:
@@ -470,3 +470,4 @@ def fetch_purchase_receives(page: int = 1, per_page: int = 200, sort_column: str
 
 def fetch_purchase_receive_detail(purchasereceive_id: str) -> dict:
     return _request_with_feature("GET", f"purchasereceives/{purchasereceive_id}", {}, "reports")
+
