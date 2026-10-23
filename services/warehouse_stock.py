@@ -84,7 +84,7 @@ def stock_for_orders_cached(orders, extra_item_ids: Iterable[str] = ()) -> tuple
     orders = list(orders)
     order_items = order_item_ids(orders)
     item_ids = [i for ids in order_items.values() for i in ids]
-    waiting = item_detail_cache.request_refresh([*item_ids, *extra_item_ids])
+    waiting = item_detail_cache.request_refresh([*item_ids, *extra_item_ids], require_stock=True)
     return ({
         f"{order.id}:{site}": None
         for order in orders

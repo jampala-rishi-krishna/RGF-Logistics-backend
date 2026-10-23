@@ -92,7 +92,7 @@ def _refresh_worker(key: str) -> None:
             _inflight.discard(key)
 
 
-def _batch_refresh_worker(keys: list[str]) -> None:
+def _batch_refresh_worker(keys: list[str], require_stock: bool = False) -> None:
     try:
         try:
             payload = fetch_item_details_batch(keys)
@@ -110,6 +110,18 @@ def _batch_refresh_worker(keys: list[str]) -> None:
                     )
                     if item_id:
                         by_id[item_id] = _trim(item)
+            # Zoho's batch item response may omit warehouse stock entirely. Weight-only
+            # callers keep the cheap one-call behavior; stock callers fall back to the
+            # item-detail endpoint for only affected IDs so METS/GLACIER can render.
+            if require_stock:
+                for key in keys:
+                    if (not by_id.get(key)) or not by_id[key].get("warehouses"):
+                        try:
+                            detail_entry = _trim(fetch_item_detail(key))
+                        except ZohoError:
+                            detail_entry = _trim({})
+                        if detail_entry.get("warehouses"):
+                            by_id[key] = detail_entry
             now = time.monotonic()
             with _lock:
                 for key in keys:
@@ -131,7 +143,7 @@ def _batch_refresh_worker(keys: list[str]) -> None:
                 _inflight.discard(key)
 
 
-def request_refresh(item_ids: Iterable[str]) -> int:
+def request_refresh(item_ids: Iterable[str], *, require_stock: bool = False) -> int:
     """Queue a background fetch for every item that isn't fresh (missing or stale).
     Returns how many requested items have NO usable value yet and aren't in a failure
     back-off - i.e. how many a caller is still waiting on."""
@@ -149,7 +161,7 @@ def request_refresh(item_ids: Iterable[str]) -> int:
             _inflight.add(raw_id)
             to_start.append(raw_id)
     for index in range(0, len(to_start), 100):
-        _pool.submit(_batch_refresh_worker, to_start[index : index + 100])
+        _pool.submit(_batch_refresh_worker, to_start[index : index + 100], require_stock)
     return waiting
 
 
