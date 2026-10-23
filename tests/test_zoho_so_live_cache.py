@@ -95,6 +95,29 @@ def test_startup_seed_reads_cache_then_only_changed_delta(monkeypatch):
     assert calls == {"delta": 1, "g4": 5, "writes": 5}
 
 
+def test_startup_seed_write_failures_never_crash_startup(monkeypatch, caplog):
+    import services.live_sales_order_cache as live
+    import services.zoho_so_live_cache as cache
+
+    monkeypatch.setenv("ZOHO_STARTUP_SEED", "true")
+    changed = {f"SO-{i}": _record(f"SO-{i}", "2026-10-23T02:00:00+00:00") for i in range(3)}
+    seeded = []
+    boom = lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("neon down"))
+    monkeypatch.setattr(cache, "load_window", lambda *args: ([], 0))
+    monkeypatch.setattr(cache, "max_modified", lambda rows: None)
+    monkeypatch.setattr(cache, "upsert_snapshot", boom)
+    monkeypatch.setattr(cache, "cleanup", boom)
+    monkeypatch.setattr(live, "_seed_row", seeded.append)
+    monkeypatch.setattr(live, "_pull_delta_since", lambda *args: changed)
+    monkeypatch.setattr(live, "_hydrate_details", lambda rows: None)
+    with caplog.at_level("WARNING"):
+        result = live.startup_seed()
+    assert result["enabled"] is True and result["zoho_details"] == 3
+    assert len(seeded) == 3  # every delta row still reaches memory
+    assert "[ZOHO_STARTUP_SEED] write failed rows=3" in caplog.text
+    assert "[ZOHO_STARTUP_SEED] write failed cleanup" in caplog.text
+
+
 def test_startup_seed_neon_failure_falls_back_with_warning(monkeypatch, caplog):
     import services.live_sales_order_cache as live
     import services.zoho_so_live_cache as cache

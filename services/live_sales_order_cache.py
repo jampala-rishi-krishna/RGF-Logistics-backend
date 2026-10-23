@@ -346,7 +346,7 @@ def local_zoho_warmup_disabled() -> bool:
 
 
 def startup_seed_enabled() -> bool:
-    return os.environ.get("ZOHO_STARTUP_SEED", "true").strip().lower() in {"1", "true", "yes"}
+    return os.environ.get("ZOHO_STARTUP_SEED", "false").strip().lower() in {"1", "true", "yes"}
 
 
 def _seed_row(record: dict) -> None:
@@ -396,10 +396,21 @@ def startup_seed() -> dict:
         # must never turn a restart into a second full-window hydration.
         logger.warning("[ZOHO_STARTUP_SEED] delta walk skipped: %s", type(exc).__name__)
         delta = {}
+    # Memory is already seeded; a Neon write failure here must never stop startup.
+    failed = 0
     for record in delta.values():
         _seed_row(record)
-        zoho_so_live_cache.upsert_snapshot(record, source="api")
-    deleted = zoho_so_live_cache.cleanup(today)
+        try:
+            zoho_so_live_cache.upsert_snapshot(record, source="api")
+        except Exception:
+            failed += 1
+    if failed:
+        logger.warning("[ZOHO_STARTUP_SEED] write failed rows=%d; serving from memory", failed)
+    try:
+        deleted = zoho_so_live_cache.cleanup(today)
+    except Exception as exc:
+        logger.warning("[ZOHO_STARTUP_SEED] write failed cleanup error=%s; serving from memory", type(exc).__name__)
+        deleted = 0
     logger.info("[ZOHO_STARTUP_SEED] rows=%d approx_bytes=%d delta_rows=%d deleted=%d", len(rows), approx_bytes, len(delta), deleted)
     return {"enabled": True, "rows": len(rows), "neon_bytes": approx_bytes, "zoho_pages": 1, "zoho_details": len(delta)}
 
