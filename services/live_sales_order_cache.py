@@ -640,6 +640,14 @@ def get_assigned_snapshot_ex(include_window: bool = True, statuses: frozenset[st
                     row = records.get(oid)
                     if row is not None and oid not in _assigned_zoho:
                         _assigned_zoho[oid] = _apply_assignment(row)
+    # A webhook/detail copy is already sufficient to render the assigned row.  Reuse it
+    # before attempting another Zoho G4, especially when the SO-detail category is at
+    # its cap.  This keeps known assigned orders visible during cache-only periods.
+    with _detail_lock:
+        cached_details = {oid: hit[1] for oid, hit in _details.items() if oid in ids}
+    for oid, record in cached_details.items():
+        if oid not in _assigned_zoho and isinstance(record, dict) and branches.is_allowed(record):
+            _assigned_zoho[oid] = _apply_assignment(_build_transient(record))
     to_fetch = [oid for oid in ids if oid not in _assigned_zoho]
     had_failures = False
     if to_fetch and not block:
@@ -1302,8 +1310,14 @@ def apply_salesorder_webhook(record: dict) -> bool:
                 else:
                     existing[1][record_id] = new_row
     assigned = _assigned_zoho.get(record_id)
-    if assigned is not None and not closed:
-        merge_zoho_payload(assigned, record)
+    if not closed and branches.is_allowed(record):
+        if assigned is not None:
+            merge_zoho_payload(assigned, record)
+        else:
+            with _state_lock:
+                assignment = _assignment_state.get(record_id) or {}
+            if (assignment.get("assignment_status") or "unassigned") != "unassigned":
+                _assigned_zoho[record_id] = _apply_assignment(_build_transient(record))
     _observe_dates([record])
     if modified:
         _remember_detail(record_id, modified, {k: v for k, v in record.items() if v not in (None, "", [], {})})
