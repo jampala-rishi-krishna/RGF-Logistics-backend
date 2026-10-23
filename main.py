@@ -141,6 +141,8 @@ async def lifespan(app: FastAPI):
         live_sales_order_cache.load_assignment_state_from_history(db)
         from services import purchase_orders
         purchase_orders.load_decisions(db)
+    # Current SO snapshots live in their own cache table; history readers never see these rows.
+    live_sales_order_cache.startup_seed()
     # Build the Fleet cache once in the background (assigned SOs only) so the first Fleet view after a
     # deploy is instant. /vehicles shares a single-flight lock with this, so it never double-fetches.
     threading.Thread(target=fleet.warm_fleet_cache, name="fleet-cache-warmup", daemon=True).start()  # no-op under LOCAL_DISABLE_ZOHO_WARMUP
@@ -174,6 +176,17 @@ async def lifespan(app: FastAPI):
             max_instances=1,
             coalesce=True,
         )
+    scheduler.add_job(
+        live_sales_order_cache.cleanup_live_cache_daily,
+        trigger="cron",
+        hour=0,
+        minute=10,
+        timezone="Asia/Manila",
+        id="zoho_so_live_cache_cleanup",
+        replace_existing=True,
+        max_instances=1,
+        coalesce=True,
+    )
     scheduler.start()
     memory_task = memory_debug.start_periodic_logging()  # no-op unless MEMORY_DEBUG_LOG=1
     gmail_sender.log_identity_config_at_startup()

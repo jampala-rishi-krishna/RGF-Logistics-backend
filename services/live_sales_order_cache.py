@@ -345,6 +345,67 @@ def local_zoho_warmup_disabled() -> bool:
     return os.environ.get("LOCAL_DISABLE_ZOHO_WARMUP", "").strip().lower() in {"1", "true", "yes"}
 
 
+def startup_seed_enabled() -> bool:
+    return os.environ.get("ZOHO_STARTUP_SEED", "true").strip().lower() in {"1", "true", "yes"}
+
+
+def _seed_row(record: dict) -> None:
+    record_id = str(record.get("salesorder_id") or record.get("sales_order_id") or record.get("id") or "")
+    if not record_id or not branches.is_allowed(record):
+        return
+    modified = str(record.get("last_modified_time") or "")
+    row = _build_transient(record)
+    _remember_detail(record_id, modified, record)
+    with _detail_lock:
+        _webhook_copies[record_id] = (modified, dict(record))
+    _observe_dates([record])
+    with _window_lock:
+        start, end = _wide_bounds()
+        key = (start.isoformat(), end.isoformat())
+        existing = _windows.get(key)
+        rows = dict(existing[1]) if existing else {}
+        rows[record_id] = _apply_assignment(row)
+        _store_window_locked(_windows, key, rows)
+    with _state_lock:
+        assigned = (_assignment_state.get(record_id) or {}).get("assignment_status") not in (None, "unassigned")
+    if assigned:
+        _assigned_zoho[record_id] = _apply_assignment(row)
+
+
+def startup_seed() -> dict:
+    """Seed current SO memory from the separate Neon cache, then walk one Zoho list delta."""
+    if not startup_seed_enabled():
+        return {"enabled": False, "rows": 0, "neon_bytes": 0, "zoho_pages": 0, "zoho_details": 0}
+    from services import zoho_so_live_cache
+    today = datetime.now(PHT).date()
+    start, end = today - timedelta(days=1), today + timedelta(days=14)
+    try:
+        rows, approx_bytes = zoho_so_live_cache.load_window(start, end, branches.allowed_branch_ids())
+        for record in rows:
+            _seed_row(record)
+        watermark = zoho_so_live_cache.max_modified(rows) or datetime.min.replace(tzinfo=timezone.utc)
+        delta = _pull_delta_since(start, end, watermark)
+        _hydrate_details(delta)
+        for record in delta.values():
+            _seed_row(record)
+            zoho_so_live_cache.upsert_snapshot(record, source="api")
+        deleted = zoho_so_live_cache.cleanup(today)
+        logger.info("[ZOHO_STARTUP_SEED] rows=%d approx_bytes=%d delta_rows=%d deleted=%d", len(rows), approx_bytes, len(delta), deleted)
+        return {"enabled": True, "rows": len(rows), "neon_bytes": approx_bytes, "zoho_pages": 1, "zoho_details": len(delta)}
+    except Exception as exc:
+        logger.warning("[ZOHO_STARTUP_SEED] Neon unavailable; falling back to full hydration: %s", type(exc).__name__)
+        refresh_shared_window(force_full=True)
+        return {"enabled": True, "rows": 0, "neon_bytes": 0, "zoho_pages": 1, "zoho_details": len(_details), "fallback": True}
+
+
+def cleanup_live_cache_daily() -> int:
+    """Remove expired live snapshots without touching historical order tables."""
+    from services import zoho_so_live_cache
+    deleted = zoho_so_live_cache.cleanup(datetime.now(PHT).date())
+    logger.info("[ZOHO_LIVE_CACHE] daily_cleanup deleted=%d", deleted)
+    return deleted
+
+
 def has_active_assignments() -> bool:
     """True when at least one SO is in the "assigned" state. Memory only, never calls Zoho."""
     with _state_lock:
@@ -446,6 +507,7 @@ def transfer_order_rows(start: date, end: date, *, force: bool = False):
 def publish_zoho_data(order_id: str, detail: dict, epoch: int) -> SalesOrderCache:
     """Publish an already acquired full detail using the existing snapshot shaping."""
     record = deepcopy(detail.get("salesorder") or detail)
+    _persist_live_snapshot(record, "api")
     if not branches.is_allowed(record):
         _excluded_ids[str(order_id)] = record.get("salesorder_number")
         raise branches.BranchNotAllowed(record.get("salesorder_number"))
@@ -466,6 +528,15 @@ def _observe_dates(records) -> None:
         auto_unassign.observe_zoho_records(list(records))
     except Exception as exc:  # never break a sync
         logger.warning("[LiveSalesOrderCache] date-change check skipped: %s", type(exc).__name__)
+
+
+def _persist_live_snapshot(record: dict, source: str) -> None:
+    """Persist current data in the separate live table; never affect the request on DB failure."""
+    try:
+        from services import zoho_so_live_cache
+        zoho_so_live_cache.upsert_snapshot(record, source=source)
+    except Exception as exc:
+        logger.warning("[ZOHO_LIVE_CACHE] snapshot write skipped source=%s error=%s", source, type(exc).__name__)
 
 
 def require_allowed(order_id: str) -> None:
@@ -897,6 +968,7 @@ def _hydrate_details(records: dict[str, dict]) -> None:
                 records[rid] = {**records[rid], **fields}
                 if modified:
                     _remember_detail(rid, modified, fields)
+                _persist_live_snapshot(records[rid], "api")
             except ZohoError:
                 continue
 
@@ -1103,6 +1175,7 @@ def get_detail(order_id: str, loader=None, *, needs_hybrid: bool = False) -> dic
             return {"salesorder": {**(row.raw_json or {}), **hit[1]}}
     detail = (loader or fetch_sales_order_detail)(order_id)
     record = detail.get("salesorder") or detail
+    _persist_live_snapshot(record, "api")
     _shadow_compare(record)
     fields = {k: v for k, v in record.items() if v not in (None, "", [], {})}
     if modified:
@@ -1180,6 +1253,7 @@ def apply_salesorder_webhook(record: dict) -> bool:
     if modified and previous is not None and previous[0] and modified <= previous[0]:
         return False
     record = {**record, "source": "webhook"}
+    _persist_live_snapshot(record, "webhook")
     # Zoho's webhook puts fulfillment counters on each line, while the list/report
     # consumers historically read the aggregate order fields. Preserve that shape.
     lines = [item for item in (record.get("line_items") or []) if isinstance(item, dict)]
@@ -1249,6 +1323,7 @@ def apply_lock_webhook(record: dict) -> bool:
     lock = record.get("lock_details") or record.get("lock_detail") or record.get("lock") or record
     if not isinstance(lock, dict):
         return False
+    _persist_live_snapshot({"salesorder_id": order_id, "lock_details": lock, "last_modified_time": record.get("last_modified_time")}, "webhook")
     for row in list(_assigned_zoho.values()):
         if str(getattr(row, "id", "")) == order_id:
             raw = row.raw_json if isinstance(row.raw_json, dict) else {}
