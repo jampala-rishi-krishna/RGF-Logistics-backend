@@ -860,6 +860,7 @@ def _shadow_compare(api_record: dict) -> None:
         if reconcile:
             with _detail_lock:
                 _webhook_copies[record_id] = (api_ts or webhook_ts, dict(api_record))
+            zoho_usage.record_mapping_fix()
             logger.info("[WEBHOOK_MAPPING_FIX] so_id=%s fields=%s", record_id, differing or ["last_modified_time"])
     else:
         if shadow:

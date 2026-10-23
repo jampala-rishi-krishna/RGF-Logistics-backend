@@ -43,6 +43,10 @@ def get_zoho_usage():
         "shadow_mismatch": snap["shadow_mismatch"],
         "shadow_missing": snap["shadow_missing"],
         "webhook_outcomes": snap["webhook_outcomes"],
+        "webhook_last_received": snap.get("webhook_last_received", {}),
+        "webhook_mapping_fixes": snap.get("webhook_mapping_fixes", 0),
+        "webhook_org_quota": 1000,
+        "webhook_history": zoho_usage.webhook_history(7),
         "zoho_usage": snap,
     }
 

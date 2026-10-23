@@ -17,7 +17,7 @@ import time
 from collections import Counter
 from contextlib import contextmanager
 from contextvars import ContextVar
-from datetime import date, datetime, timezone, time as dtime
+from datetime import date, datetime, timezone, time as dtime, timedelta
 from zoneinfo import ZoneInfo
 
 import sqlalchemy as sa
@@ -78,7 +78,10 @@ _delta: Counter = Counter()   # (day, category, source) -> count not yet flushed
 _webhook_in: Counter = Counter()  # inbound webhook events; deliberately outside the Zoho API budget
 _webhook_outcomes: Counter = Counter()
 _shadow_counts: Counter = Counter()
+_webhook_mapping_fixes = 0
+_webhook_last_received: dict[str, str] = {}
 _webhook_warned = False
+_webhook_alert_sent = False
 _enabled = False              # True once start() ran: the fail-safe guard only applies to the running service
 _restored = False
 _restored_total = 0
@@ -95,17 +98,82 @@ _thread: threading.Thread | None = None
 PROCESS_STARTED_AT = datetime.now(timezone.utc)
 
 
-def record_webhook(module: str, outcome: str | None = None) -> None:
-    """Count an inbound Zoho webhook in memory; it is not a Zoho API call."""
-    global _webhook_warned
+def _event_category(kind: str, value: str) -> str:
+    return f"webhook_{kind}:{value}"
+
+
+def _is_uncounted_category(category: str) -> bool:
+    return category in UNCOUNTED or category.startswith("webhook_")
+
+
+def _event_count_locked(kind: str, value: str) -> int:
+    category = _event_category(kind, value)
+    return sum(v for (cat, _), v in _base.items() if cat == category) + sum(
+        v for (day, cat, _), v in _delta.items() if day == _day and cat == category
+    )
+
+
+def _rebuild_webhook_counters_locked() -> None:
+    global _webhook_in, _webhook_outcomes, _shadow_counts, _webhook_mapping_fixes
+    _webhook_in = Counter()
+    _webhook_outcomes = Counter()
+    _shadow_counts = Counter()
+    _webhook_mapping_fixes = 0
+    all_rows = list(_base.items()) + [((cat, src), value) for (day, cat, src), value in _delta.items() if day == _day]
+    for (category, _source), value in all_rows:
+        if category.startswith("webhook_in:"):
+            _webhook_in[category.split(":", 1)[1]] += value
+        elif category.startswith("webhook_outcome:"):
+            _webhook_outcomes[category.split(":", 1)[1]] += value
+        elif category.startswith("webhook_shadow:"):
+            _shadow_counts[category.split(":", 1)[1]] += value
+        elif category == "webhook_mapping:fix":
+            _webhook_mapping_fixes += value
+
+
+def _send_webhook_threshold_alert() -> None:
+    """Best-effort alert using the existing logistics/procurement recipients."""
+    try:
+        from services import app_settings, gmail_sender
+        raw = ",".join((app_settings.get("PICKUP_LOGISTICS_TO") or "", app_settings.get("PICKUP_PROCUREMENT_TO") or ""))
+        recipients = [x.strip() for x in raw.split(",") if x.strip()]
+        if not recipients:
+            logger.warning("[ZOHO_WEBHOOK] 700/day threshold reached but no admin alert recipient is configured")
+            return
+        gmail_sender.send_email(
+            to=recipients,
+            subject="IntelliFleet Zoho webhook volume warning",
+            text="IntelliFleet received 700 Zoho webhooks today (Asia/Manila). The 1,000/day org limit is shared with other integrations.",
+            html="<p>IntelliFleet received 700 Zoho webhooks today (Asia/Manila).</p><p>The 1,000/day org limit is shared with other integrations.</p>",
+            purpose="zoho-webhook-threshold",
+            dedupe_key=f"zoho-webhook-threshold|{_day}",
+            label_logistics=False,
+        )
+    except Exception:
+        logger.exception("[ZOHO_WEBHOOK] threshold alert email failed")
+
+
+def record_webhook(module: str, outcome: str | None = None, received_at: datetime | None = None) -> None:
+    """Count an inbound webhook and persist the event in the existing usage table."""
+    global _webhook_warned, _webhook_alert_sent
+    now = received_at or _now()
     with _lock:
+        _ensure_day_locked(now)
+        module = str(module or "other")
+        _delta[(_day, _event_category("in", module), "webhook")] += 1
         _webhook_in[str(module or "other")] += 1
         if outcome:
+            _delta[(_day, _event_category("outcome", str(outcome)), "webhook")] += 1
             _webhook_outcomes[str(outcome)] += 1
+        _webhook_last_received[module] = now.isoformat()
         total = sum(_webhook_in.values())
         if total >= 700 and not _webhook_warned:
             _webhook_warned = True
             logger.warning("[ZOHO_WEBHOOK] inbound webhook count reached %d", total)
+        if total >= 700 and not _webhook_alert_sent and _event_count_locked("alert", "700") == 0:
+            _webhook_alert_sent = True
+            _delta[(_day, _event_category("alert", "700"), "webhook")] += 1
+            threading.Thread(target=_send_webhook_threshold_alert, name="zoho-webhook-alert", daemon=True).start()
 
 
 def record_shadow(kind: str) -> None:
@@ -113,7 +181,17 @@ def record_shadow(kind: str) -> None:
     if kind not in {"shadow_ok", "shadow_mismatch", "shadow_missing"}:
         return
     with _lock:
+        _ensure_day_locked(_now())
         _shadow_counts[kind] += 1
+        _delta[(_day, _event_category("shadow", kind), "webhook")] += 1
+
+
+def record_mapping_fix() -> None:
+    global _webhook_mapping_fixes
+    with _lock:
+        _ensure_day_locked(_now())
+        _webhook_mapping_fixes += 1
+        _delta[(_day, _event_category("mapping", "fix"), "webhook")] += 1
 
 _metadata = sa.MetaData()
 usage_table = sa.Table(
@@ -147,6 +225,17 @@ class DbStore:
             rows = db.execute(sa.select(usage_table.c.category, usage_table.c.source, usage_table.c.count)
                               .where(usage_table.c.usage_day == day)).all()
         return {(r[0], r[1]): int(r[2]) for r in rows}
+
+    def history(self, days: int = 7, end: date | None = None) -> list[tuple[date, str, int]]:
+        end = end or date.today()
+        start = end - timedelta(days=max(1, days) - 1)
+        with self._session() as db:
+            rows = db.execute(
+                sa.select(usage_table.c.usage_day, usage_table.c.category, sa.func.sum(usage_table.c.count))
+                .where(usage_table.c.usage_day >= start, usage_table.c.usage_day <= end)
+                .group_by(usage_table.c.usage_day, usage_table.c.category)
+            ).all()
+        return [(r[0], r[1], int(r[2])) for r in rows]
 
     def write(self, rows: list[tuple[date, str, str, int]]) -> None:
         now = datetime.now(timezone.utc)
@@ -222,16 +311,20 @@ def _today(now: datetime) -> str:
 
 
 def _ensure_day_locked(now: datetime) -> None:
-    global _day, _base
+    global _day, _base, _webhook_in, _webhook_outcomes, _shadow_counts, _webhook_mapping_fixes, _webhook_last_received, _webhook_warned, _webhook_alert_sent
     today = _today(now)
     if _day != today:
         _day = today
         _base = Counter()  # yesterday's delta stays keyed by its own day and is still flushed
+        _rebuild_webhook_counters_locked()
+        _webhook_last_received = {}
+        _webhook_warned = False
+        _webhook_alert_sent = False
 
 
 def _total_locked() -> int:
-    total = sum(v for (cat, _), v in _base.items() if cat not in UNCOUNTED)
-    total += sum(v for (day, cat, _), v in _delta.items() if day == _day and cat not in UNCOUNTED)
+    total = sum(v for (cat, _), v in _base.items() if not _is_uncounted_category(cat))
+    total += sum(v for (day, cat, _), v in _delta.items() if day == _day and not _is_uncounted_category(cat))
     return total
 
 
@@ -240,12 +333,12 @@ def _by_category_locked() -> tuple[dict, dict]:
     by_source: Counter = Counter()
     for (cat, src), v in _base.items():
         by_cat[cat] += v
-        if cat not in UNCOUNTED:
+        if not _is_uncounted_category(cat):
             by_source[src] += v
     for (day, cat, src), v in _delta.items():
         if day == _day:
             by_cat[cat] += v
-            if cat not in UNCOUNTED:
+            if not _is_uncounted_category(cat):
                 by_source[src] += v
     return by_cat, by_source
 
@@ -374,7 +467,7 @@ def record_call(feature_name: str | None = None, *, background: bool = False) ->
 
 def restore() -> bool:
     """Load today's totals from Neon into memory. Additive with anything counted meanwhile."""
-    global _base, _restored, _restored_total, _restore_error, _last_readback
+    global _base, _webhook_in, _webhook_outcomes, _shadow_counts, _webhook_mapping_fixes, _webhook_alert_sent, _webhook_warned, _restored, _restored_total, _restore_error, _last_readback
     now = _now()
     with _lock:
         _ensure_day_locked(now)
@@ -390,10 +483,16 @@ def restore() -> bool:
     with _lock:
         if _day == day:
             _base = Counter(rows)
+        _rebuild_webhook_counters_locked()
         _last_readback = time.monotonic()
         _restored = True
         _restore_error = None
-        _restored_total = sum(v for (cat, _), v in rows.items() if cat not in UNCOUNTED)
+        _webhook_alert_sent = False
+        for (category, _source), value in rows.items():
+            if category == "webhook_alert:700" and value > 0:
+                _webhook_alert_sent = True
+        _webhook_warned = sum(_webhook_in.values()) >= 700
+        _restored_total = sum(v for (cat, _), v in rows.items() if not _is_uncounted_category(cat))
     return True
 
 
@@ -507,7 +606,7 @@ def snapshot() -> dict:
         total = _total_locked()
         by_cat, by_source = _by_category_locked()
         limit = budget()
-        counted = {k: v for k, v in by_cat.items() if k not in UNCOUNTED}
+        counted = {k: v for k, v in by_cat.items() if not _is_uncounted_category(k)}
         counted.setdefault("other", 0)
         return {
             "date": _day,
@@ -532,12 +631,30 @@ def snapshot() -> dict:
             "scope": "neon_additive",
             "process_started_at": PROCESS_STARTED_AT.isoformat(),
             "usage_restored_from_db": {"restored": _restored, "total": _restored_total, "error": _restore_error},
+            "webhook_last_received": dict(_webhook_last_received),
+            "webhook_mapping_fixes": _webhook_mapping_fixes,
         }
+
+
+def webhook_history(days: int = 7) -> list[dict]:
+    """Return persisted inbound webhook totals by Manila day and module."""
+    try:
+        rows = _get_store().history(days, end=_now().date())
+    except (AttributeError, TypeError):
+        return []
+    modules = {"salesorder", "purchaseorder", "transferorder", "package", "lock-result"}
+    grouped: dict[str, dict[str, int]] = {}
+    for day, category, count in rows:
+        if category.startswith("webhook_in:"):
+            module = category.split(":", 1)[1]
+            if module in modules:
+                grouped.setdefault(day.isoformat(), {})[module] = count
+    return [{"date": day, "total": sum(values.values()), "modules": values} for day, values in sorted(grouped.items(), reverse=True)]
 
 
 def reset(*, restored: bool = True) -> None:
     """Test helper: clear all memory state."""
-    global _day, _base, _delta, _webhook_in, _webhook_outcomes, _shadow_counts, _webhook_warned, _restored, _restored_total, _restore_error, _enabled, _failsafe_so_detail
+    global _day, _base, _delta, _webhook_in, _webhook_outcomes, _shadow_counts, _webhook_mapping_fixes, _webhook_last_received, _webhook_warned, _webhook_alert_sent, _restored, _restored_total, _restore_error, _enabled, _failsafe_so_detail
     with _lock:
         _day = ""
         _base = Counter()
@@ -545,7 +662,10 @@ def reset(*, restored: bool = True) -> None:
         _webhook_in = Counter()
         _webhook_outcomes = Counter()
         _shadow_counts = Counter()
+        _webhook_mapping_fixes = 0
+        _webhook_last_received = {}
         _webhook_warned = False
+        _webhook_alert_sent = False
         _restored = restored
         _restored_total = 0
         _restore_error = None
