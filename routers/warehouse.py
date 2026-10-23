@@ -10,6 +10,8 @@ from auth.dependencies import require_role
 router = APIRouter(tags=["warehouse"])
 
 WAREHOUSE_OR_ADMIN = require_role("warehouse", "admin")
+WAREHOUSE_FIELDS = ("id", "ROWID", "name", "location", "zone")
+EVENT_FIELDS = ("id", "ROWID", "warehouse_id", "event_type", "manifest_id", "status", "event_time")
 
 # 2026-09-24 (Step 6): warehouse/warehouse_events dropped from Neon (not in the final
 # kept-table list) - in-memory only now. warehouse_loading_checklists (a different, kept
@@ -19,16 +21,20 @@ _WAREHOUSES: list[dict] = []  # nothing ever wrote a Warehouse row; static empty
 _EVENTS: list[dict] = []
 
 
-@router.get("/warehouses")
+def _public_fields(row: dict, fields: tuple[str, ...]) -> dict:
+    return {key: row[key] for key in fields if key in row}
+
+
+@router.get("/warehouses", dependencies=[Depends(WAREHOUSE_OR_ADMIN)])
 def list_warehouses():
-    return _WAREHOUSES
+    return [_public_fields(row, WAREHOUSE_FIELDS) for row in _WAREHOUSES]
 
 
-@router.get("/warehouse-events")
+@router.get("/warehouse-events", dependencies=[Depends(WAREHOUSE_OR_ADMIN)])
 def list_warehouse_events(warehouseId: str | None = None):
     if warehouseId:
-        return [e for e in _EVENTS if e["warehouse_id"] == warehouseId]
-    return list(_EVENTS)
+        return [_public_fields(e, EVENT_FIELDS) for e in _EVENTS if e["warehouse_id"] == warehouseId]
+    return [_public_fields(e, EVENT_FIELDS) for e in _EVENTS]
 
 
 class WarehouseEventBody(BaseModel):
