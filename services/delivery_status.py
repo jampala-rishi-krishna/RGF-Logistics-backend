@@ -27,16 +27,23 @@ def sales_order_delivery_status(raw: dict) -> str:
             return "Delivered"
         if delivered:
             return "Partially delivered"
-        if any(value in {"shipped", "in transit", "partial", "partially delivered"} for value in package_values):
+        # A package that has left the warehouse is still simply Shipped until
+        # at least one package is delivered.  Treating every shipped package as
+        # "Partially delivered" made Fleet display a false delivery outcome.
+        if any(value in {"partial", "partially delivered"} for value in package_values):
             return "Partially delivered"
+        if any(value in {"shipped", "in transit", "packed"} for value in package_values):
+            return "Shipped"
         return "Pending"
     values = [_norm(raw.get(k)) for k in ("status", "order_status", "shipment_status", "shipping_status", "shipped_status", "sub_status", "current_sub_status") if raw.get(k) is not None]
     if any(v in {"delivered", "fulfilled", "completed"} for v in values):
         return "Delivered"
     if values and all(v == "closed" for v in values):
         return "Unknown"
-    if any(v in {"partially delivered", "partial", "shipped", "in transit"} for v in values):
+    if any(v in {"partially delivered", "partial"} for v in values):
         return "Partially delivered"
+    if any(v in {"shipped", "in transit", "packed"} for v in values):
+        return "Shipped"
     if values:
         return "Pending"
     logger.warning("[DELIVERY_STATUS_UNRESOLVED] raw_status_values=%s", values)

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hmac
 import logging
 import os
 import re
@@ -9,8 +10,8 @@ from zoneinfo import ZoneInfo
 
 import httpx
 import time
-from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel
+from fastapi import APIRouter, Depends, HTTPException, Request
+from pydantic import BaseModel, Field, model_validator
 
 from auth.dependencies import require_role
 from fastapi.concurrency import run_in_threadpool
@@ -163,8 +164,8 @@ def communications_overview():
     channel_map = {item["channel"]: item for item in by_channel}
     return {"messagesSentThisMonth": {"combined": total, **{channel: channel_map[channel]["messagesSentThisMonth"] for channel in channel_map}}, "responseRate": {"combined": replies / total * 100 if total else 0, **{channel: channel_map[channel]["responseRate"] for channel in channel_map}}, "avgReplyTimeMinutes": {"combined": sum(reply_samples) / len(reply_samples) if reply_samples else None, **{channel: channel_map[channel]["avgReplyTimeMinutes"] for channel in channel_map}}, "needsAttentionCount": sum(item["needsAttentionCount"] for item in by_channel), "confirmedVsUnconfirmed": {"confirmed": sum(item["confirmed"] for item in by_channel), "unconfirmed": sum(item["unconfirmed"] for item in by_channel)}, "period": {"type": "month", "start": month_start.isoformat()}, "channels": by_channel, "recentActivity": recent[:20], "attentionDetail": attention, "updatedAt": datetime.now(timezone.utc).isoformat()}
 
-# n8n workflows call into this one - no user JWT exists on that side, same posture as
-# comms.py's existing POST /webhooks/{provider} (unauthenticated by design, not an oversight).
+# n8n workflows call into this one - no user JWT exists on that side. The status callback uses
+# a dedicated shared secret because no provider signature contract exists in this application.
 public_router = APIRouter(prefix="/api/dispatch", tags=["dispatch"])
 
 # Populated once the matching n8n workflow (see COMMS_GATEWAY_SPEC.md section 3) exists and its
@@ -556,10 +557,37 @@ async def send_message(body: SendMessageBody):
 
 
 class MessageStatusBody(BaseModel):
-    message_log_id: int | None = None
-    provider_message_id: str | None = None
-    status: str
-    new_provider_message_id: str | None = None
+    message_log_id: int | None = Field(default=None, ge=1)
+    provider_message_id: str | None = Field(default=None, min_length=1, max_length=200)
+    status: str = Field(min_length=1, max_length=32)
+    new_provider_message_id: str | None = Field(default=None, min_length=1, max_length=200)
+
+    @model_validator(mode="after")
+    def require_identifier(self):
+        if self.message_log_id is None and not self.provider_message_id:
+            raise ValueError("message_log_id or provider_message_id is required")
+        return self
+
+
+STATUS_TRANSITIONS = {
+    "queued": {"queued", "sent", "failed", "undelivered"},
+    "sent": {"sent", "delivered", "failed", "undelivered"},
+    "delivered": {"delivered", "read"},
+    "read": {"read"},
+    "failed": {"failed"},
+    "undelivered": {"undelivered"},
+    "skipped": {"skipped"},
+}
+VALID_MESSAGE_STATUSES = frozenset(STATUS_TRANSITIONS)
+
+
+def _require_status_webhook_secret(request: Request) -> None:
+    expected = os.environ.get("DISPATCH_STATUS_WEBHOOK_SECRET", "").strip()
+    supplied = request.headers.get("X-Dispatch-Webhook-Secret", "")
+    if not expected:
+        raise HTTPException(503, "Message status webhook authentication is not configured")
+    if not hmac.compare_digest(supplied, expected):
+        raise HTTPException(401, "Invalid webhook credentials")
 
 
 def notify_packed_orders_batch(orders: list[dict]) -> None:
@@ -660,8 +688,11 @@ def notify_packed_orders_batch(orders: list[dict]) -> None:
         logger.exception("[Dispatch] notify_packed_orders_batch failed")
 
 
-@public_router.post("/webhooks/message-status")
+@public_router.post("/webhooks/message-status", dependencies=[Depends(_require_status_webhook_secret)])
 def update_message_status(body: MessageStatusBody):
+    status = body.status.strip().lower()
+    if status not in VALID_MESSAGE_STATUSES:
+        raise HTTPException(422, "Unsupported message status")
     row = None
     if body.message_log_id:
         row = memory_tables.message_log.get(body.message_log_id)
@@ -669,7 +700,14 @@ def update_message_status(body: MessageStatusBody):
         row = next(iter(memory_tables.message_log.list(provider_message_id=body.provider_message_id)), None)
     if row is None:
         raise HTTPException(404, "Message not found by message_log_id or provider_message_id")
-    fields = {"status": body.status}
+    current_status = str(row.get("status") or "").strip().lower()
+    if current_status not in STATUS_TRANSITIONS or status not in STATUS_TRANSITIONS[current_status]:
+        raise HTTPException(409, "Invalid message status transition")
+    fields = {"status": status}
     if body.new_provider_message_id:
-        fields["provider_message_id"] = body.new_provider_message_id
+        existing_provider_id = row.get("provider_message_id")
+        if existing_provider_id not in (None, body.new_provider_message_id):
+            raise HTTPException(409, "Provider message id cannot be replaced")
+        if existing_provider_id is None:
+            fields["provider_message_id"] = body.new_provider_message_id
     return memory_tables.message_log.update(row["id"], **fields)

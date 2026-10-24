@@ -23,7 +23,7 @@ def test_window_orders_are_not_the_assigned_source(tracker_env, monkeypatch):
     assert tracker.find_orders(tracker_env.admin, "", tracker_env.day, tracker_env.day)["total"] == 0
 
 
-def test_tracker_loads_cold_trip_without_opening_other_pages(tracker_env, monkeypatch):
+def test_tracker_does_not_read_neon_for_cold_current_day_trip(tracker_env, monkeypatch):
     env = tracker_env
     facts.facts.clear()
     calls = []
@@ -33,15 +33,9 @@ def test_tracker_loads_cold_trip_without_opening_other_pages(tracker_env, monkey
     monkeypatch.setattr(trip_state, "load", load)
     db = SimpleNamespace(info={})
     card = tracker.get_order(env.user, "SO-100", env.day, env.day, db)
-    assert card["status"] == "Out for delivery" and card["truck"] == "DCD 8953"
-    assert card["sections"]["times"]["value"]["left_warehouse"] == env.now
-    assert card["sections"]["status_now"]["value"]["stop"] == 1
-    assert card["sections"]["status_now"]["value"]["total_stops"] == 1
-    assert tracker.find_orders(env.user, "", env.day, env.day, db=db)["counts"]["Out for delivery"] == 3
-    assert calls == [["batch-1"]]
-    facts.facts.clear()
-    tracker.get_order(env.user, "SO-100", env.day, env.day, db)
-    assert len(calls) == 2
+    assert card["status"] == "Status unavailable"
+    assert card["sections"]["status_now"]["message"]
+    assert calls == []
 
 
 def test_fresh_gps_uses_cartrack_normalized_plate(tracker_env, monkeypatch):

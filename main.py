@@ -12,9 +12,9 @@ from contextlib import asynccontextmanager
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from dotenv import load_dotenv
 from fastapi import Depends, FastAPI, WebSocket, WebSocketDisconnect
-from auth.dependencies import require_role, workspace_access
+from auth.dependencies import _load_user, require_role, workspace_access
 from fastapi import Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, PlainTextResponse
 from alembic.migration import MigrationContext
 from alembic.script import ScriptDirectory
 from alembic.config import Config
@@ -275,7 +275,19 @@ app.add_middleware(
 
 media_root = os.path.join(os.path.dirname(os.path.abspath(__file__)), "media")
 os.makedirs(media_root, exist_ok=True)
-app.mount("/media", StaticFiles(directory=media_root), name="media")
+
+
+class PublicMediaFiles(StaticFiles):
+    """Keep public assets public while excluding legacy private delivery-proof paths."""
+
+    async def get_response(self, path: str, scope):
+        public_path = path.replace("\\", "/").lstrip("/")
+        if public_path == "delivery_proofs" or public_path.startswith("delivery_proofs/"):
+            return PlainTextResponse("Not Found", status_code=404)
+        return await super().get_response(path, scope)
+
+
+app.mount("/media", PublicMediaFiles(directory=media_root), name="media")
 
 @app.middleware("http")
 async def protect_assignment_attribution(request: Request, call_next):
@@ -404,8 +416,20 @@ async def ws_fleet(websocket: WebSocket):
         await websocket.close(code=WS_CLOSE_ORIGIN_FORBIDDEN, reason="origin not allowed")
         return
     token = websocket.query_params.get("token")
-    if token is not None and decode_access_token(token) is None:
+    if not token:
+        await websocket.close(code=WS_CLOSE_TOKEN_INVALID, reason="authentication required")
+        return
+    payload = decode_access_token(token)
+    if payload is None:
         await websocket.close(code=WS_CLOSE_TOKEN_INVALID, reason="token expired")
+        return
+    try:
+        user_id = int(payload["sub"])
+    except (KeyError, TypeError, ValueError):
+        await websocket.close(code=WS_CLOSE_TOKEN_INVALID, reason="invalid credentials")
+        return
+    if _load_user(user_id) is None:
+        await websocket.close(code=WS_CLOSE_TOKEN_INVALID, reason="user is not active")
         return
     try:
         if not manager.register(websocket):

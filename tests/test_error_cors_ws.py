@@ -239,15 +239,45 @@ def test_ws_from_disallowed_origin_is_closed_4403(ws_state):
     assert closed.value.code == 4403
 
 
-def test_ws_valid_token_or_no_token_stays_connected_and_always_disconnects(ws_state):
+def test_ws_missing_token_is_rejected_before_registration(ws_state):
     client = TestClient(main.app)
-    for path in (f"/ws/fleet?token={_token(5)}", "/ws/fleet"):  # no token: the currently deployed frontend
+    with client.websocket_connect("/ws/fleet", headers={"Origin": ORIGIN}) as ws:
+        with pytest.raises(WebSocketDisconnect) as closed:
+            ws.receive_text()
+    assert closed.value.code == 4401
+    assert ws_state.connection_count == 0
+
+
+def test_ws_invalid_token_is_rejected_before_registration(ws_state):
+    client = TestClient(main.app)
+    with client.websocket_connect("/ws/fleet?token=invalid", headers={"Origin": ORIGIN}) as ws:
+        with pytest.raises(WebSocketDisconnect) as closed:
+            ws.receive_text()
+    assert closed.value.code == 4401
+    assert ws_state.connection_count == 0
+
+
+def test_ws_disabled_user_is_rejected_before_registration(ws_state, monkeypatch):
+    monkeypatch.setattr(main, "_load_user", lambda _user_id: None)
+    client = TestClient(main.app)
+    with client.websocket_connect(f"/ws/fleet?token={_token(5)}", headers={"Origin": ORIGIN}) as ws:
+        with pytest.raises(WebSocketDisconnect) as closed:
+            ws.receive_text()
+    assert closed.value.code == 4401
+    assert ws_state.connection_count == 0
+
+
+def test_ws_valid_token_stays_connected_and_always_disconnects(ws_state, monkeypatch):
+    monkeypatch.setattr(main, "_load_user", lambda _user_id: object())
+    client = TestClient(main.app)
+    for path in (f"/ws/fleet?token={_token(5)}",):
         with client.websocket_connect(path, headers={"Origin": ORIGIN}):
             assert ws_state.connection_count == 1
         assert ws_state.connection_count == 0
 
 
-def test_ws_cartrack_start_failure_sends_status_and_keeps_socket_open(ws_state):
+def test_ws_cartrack_start_failure_sends_status_and_keeps_socket_open(ws_state, monkeypatch):
+    monkeypatch.setattr(main, "_load_user", lambda _user_id: object())
     calls = {"first": 0, "last": 0}
 
     def failing_start():
@@ -256,14 +286,15 @@ def test_ws_cartrack_start_failure_sends_status_and_keeps_socket_open(ws_state):
 
     ws_state.on_first_connect = failing_start
     ws_state.on_last_disconnect = lambda: calls.__setitem__("last", calls["last"] + 1)
-    with TestClient(main.app).websocket_connect("/ws/fleet") as ws:
+    with TestClient(main.app).websocket_connect(f"/ws/fleet?token={_token(5)}") as ws:
         assert ws.receive_json() == {"type": "status", "cartrack": "unavailable"}
         ws.send_text("still here")
         assert ws_state.connection_count == 1  # socket stays open
     assert ws_state.connection_count == 0 and calls == {"first": 1, "last": 0}  # never started, so never paused
 
 
-def test_ws_poller_start_is_retried_by_the_next_connection(ws_state):
+def test_ws_poller_start_is_retried_by_the_next_connection(ws_state, monkeypatch):
+    monkeypatch.setattr(main, "_load_user", lambda _user_id: object())
     attempts = []
 
     def flaky_start():
@@ -273,9 +304,9 @@ def test_ws_poller_start_is_retried_by_the_next_connection(ws_state):
 
     ws_state.on_first_connect = flaky_start
     client = TestClient(main.app)
-    with client.websocket_connect("/ws/fleet") as first:
+    with client.websocket_connect(f"/ws/fleet?token={_token(5)}") as first:
         assert first.receive_json()["cartrack"] == "unavailable"
-        with client.websocket_connect("/ws/fleet"):
+        with client.websocket_connect(f"/ws/fleet?token={_token(5)}"):
             assert ws_state._poller_running is True
     assert len(attempts) == 2 and ws_state._poller_running is False
 

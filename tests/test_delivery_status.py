@@ -17,6 +17,11 @@ class DeliveryStatusTests(unittest.TestCase):
         self.assertEqual(sales_order_delivery_status(raw), "Partially delivered")
         self.assertFalse(is_delivered(raw))
 
+    def test_all_shipped_packages_are_shipped_not_partially_delivered(self):
+        raw = {"packages": [{"status": "SHIPPED"}, {"status": "SHIPPED"}]}
+        self.assertEqual(sales_order_delivery_status(raw), "Shipped")
+        self.assertFalse(is_delivered(raw))
+
     def test_refresh_calculation_is_idempotent(self):
         orders = [
             {"weight": 200, "raw": {"packages": [{"status": "PENDING"}]}},

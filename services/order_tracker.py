@@ -170,7 +170,10 @@ def rows_for(user, start, end, db=None):
             raise HTTPException(503, "Historical records are unavailable.")
         result = chain(result, historical_rows(db, start, min(end, today() - timedelta(days=1))))
     result = [r for r in result if allowed(user, r) and r.get("vehicle") and r.get("assignment_status") in {"assigned", "completed"}]
-    ensure_trip_facts(db, [r for r in result if r["date"] >= today().isoformat()])
+    # Current-day order and trip data is live/in-memory only.  Do not hydrate
+    # missing trip facts from Neon here: a cold snapshot is unavailable until
+    # the existing trip workflow publishes it, and a failed DB read must not
+    # turn the live Order Tracker into a 500.
     return iter(result)
 
 
