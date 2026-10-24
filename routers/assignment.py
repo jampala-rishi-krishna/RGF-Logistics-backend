@@ -617,7 +617,7 @@ def _pickup_block(order) -> dict | None:
 @router.post("/transfer")
 def transfer_assignment(body: TransferAssignmentBody, current_user: CurrentUser = Depends(require_role("admin", "dispatcher")), db: Session = Depends(get_db)):
     """Manager-only in-place crew/vehicle transfer. It never calls Zoho and never resets trip progress."""
-    if not getattr(current_user, "is_manager", False):
+    if getattr(current_user, "role", "").casefold() != "admin" and not getattr(current_user, "is_manager", False):
         raise HTTPException(403, "Manager permission required to transfer an assignment.")
     ids = list(dict.fromkeys(str(value).strip() for value in body.salesorder_ids if str(value).strip()))
     if not ids or len(ids) > 100:
